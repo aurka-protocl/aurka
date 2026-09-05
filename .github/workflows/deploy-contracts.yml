@@ -1,0 +1,52 @@
+name: Deploy contracts
+
+on:
+  workflow_dispatch:
+    inputs:
+      broadcast:
+        description: Broadcast the deployment instead of simulating it
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: contract-deployment
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Mainnet contract deployment
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: contract-deployment
+    env:
+      MAINNET_RPC_URL: ${{ secrets.MAINNET_RPC_URL }}
+      DEPLOYER_PRIVATE_KEY: ${{ secrets.DEPLOYER_PRIVATE_KEY }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+
+      - name: Build and test
+        run: |
+          forge build --sizes
+          forge test
+
+      - name: Simulate deployment
+        if: ${{ !inputs.broadcast }}
+        run: >-
+          forge script contracts/script/Deploy.s.sol:DeployAurka --rpc-url
+          "$MAINNET_RPC_URL"
+
+      - name: Broadcast deployment
+        if: ${{ inputs.broadcast }}
+        run: >-
+          forge script contracts/script/Deploy.s.sol:DeployAurka --rpc-url
+          "$MAINNET_RPC_URL" --broadcast

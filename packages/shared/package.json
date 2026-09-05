@@ -1,0 +1,34 @@
+{
+  "name": "@aurka/shared",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Shared runtime schemas and protocol types for AURKA",
+  "license": "UNLICENSED",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "clean": "rm -rf dist coverage",
+    "generate:solidity-vectors": "node scripts/generate-solidity-settlement-vectors.mjs",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@noble/hashes": "^2.4.0",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@vitest/coverage-v8": "5.0.0",
+    "vitest": "5.0.0"
+  }
+}

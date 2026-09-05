@@ -1,0 +1,83 @@
+{
+  "model": {
+    "feePaymentMode": "OUTPUT_TOKEN",
+    "feeToken": "traderOutputToken",
+    "directionConvention": "traderInputToken enters treasury; traderOutputToken leaves treasury",
+    "capacityBaseline": "maximum safe gross pair value at epoch start",
+    "utilization": "floor(consumed * 1e18 / capacityBaseline)",
+    "portfolioPriceSnapshot": "keccak256(abi.encode(all managed tokens, all authoritative oracle snapshots))",
+    "aquaStrategyBinding": "governance-bound strategy hash for policy and position",
+    "oracleClock": "settlement block timestamp; caller-provided nowSeconds is advisory only",
+    "priceRounding": "floor treasury input value, ceil treasury output value",
+    "maximumTotalFeeBps": "100",
+    "maximumInstantaneousPremiumBps": "80"
+  },
+  "canonical200000Request": {
+    "traderInputToken": "WETH",
+    "traderOutputToken": "USDC",
+    "feeToken": "USDC",
+    "requestedValue": "200000",
+    "capacityBaselineValue": "50000",
+    "consumedBefore": "0",
+    "maximumTransactionValue": "50000",
+    "executedValue": "50000",
+    "bindingConstraint": "TRANSACTION_CAP",
+    "utilizationBefore": "0",
+    "utilizationAfter": "1000000000000000000",
+    "capacityEpochId": "0x6897aa00631d49196434a59ffa75fa7d34f8f56c634cc91bc838eee625e2133a",
+    "portfolioPriceSnapshot": "0x0000000000000000000000000000000000000000000000000000000000000006",
+    "aquaStrategyHash": "0x0000000000000000000000000000000000000000000000000000000000000007",
+    "baseFeeBps": "20",
+    "optionSpacePremiumBpsScaled": "26666666666666666667",
+    "totalFeeBpsScaled": "46666666666666666667",
+    "baseFeeAmount": "100",
+    "treasuryBaseFeeAmount": "50",
+    "optionSpacePremiumAmount": "134",
+    "totalFeeAmount": "234",
+    "treasuryAmount": "184",
+    "solverAmount": "25",
+    "protocolAmount": "25",
+    "traderOutputValue": "49766",
+    "treasuryOutputValue": "49816",
+    "finalPortfolio": {
+      "USDC": "550184",
+      "WETH": "350000",
+      "LINK": "100000",
+      "nav": "1000184"
+    }
+  },
+  "splitEquivalence": {
+    "firstFill": "25000",
+    "secondFill": "25000",
+    "capacityBaselineValue": "50000",
+    "firstUtilizationAfter": "500000000000000000",
+    "secondUtilizationAfter": "1000000000000000000",
+    "wholeFeeAmount": "234",
+    "splitFeeAmount": "234",
+    "maximumTreasuryStateDifference": "2"
+  },
+  "priceProtection": {
+    "maximumPriceDeviationBps": "100",
+    "maximumPriceAgeSeconds": "120",
+    "approvedSnapshotId": "0x1111111111111111111111111111111111111111111111111111111111111111",
+    "treasuryOutputValue": "1000",
+    "minimumTreasuryInputValue": "990"
+  },
+  "correctedFill": {
+    "requestedValue": "200000",
+    "maximumExecutableFill": "50000",
+    "reason": "the 50000 transaction cap binds before the fee-inclusive portfolio bounds"
+  },
+  "atomicDirectFixture": {
+    "chainId": "31337",
+    "programId": "AURKA_DIRECT_PAIR_V1",
+    "direction": "WETH -> USDC",
+    "grossTraderInputAmount": "50000",
+    "traderOutputAmount": "49766",
+    "solverFeeAmount": "25",
+    "protocolFeeAmount": "25",
+    "treasuryFeeAmountRetainedInAqua": "184",
+    "externalOutputAmount": "49816",
+    "failureRule": "signature, policy, risk, price, epoch, calldata, balance, or transfer mismatch reverts all state and token changes"
+  }
+}

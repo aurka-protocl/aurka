@@ -1,0 +1,29 @@
+services:
+  aurka-services:
+    build:
+      context: .
+      dockerfile: packages/services/Dockerfile
+    environment:
+      NODE_ENV: development
+      HOST: 0.0.0.0
+      PORT: 8787
+      DATABASE_URL: /data/aurka.sqlite
+      CHAIN_ID: 31337
+    ports:
+      - "8787:8787"
+    volumes:
+      - aurka-services-data:/data
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8787/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  aurka-services-data:

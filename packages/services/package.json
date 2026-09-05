@@ -1,0 +1,43 @@
+{
+  "name": "@aurka/services",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Deterministic AURKA solver, API, persistence, and event projection services",
+  "license": "UNLICENSED",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./server": {
+      "types": "./dist/server.js",
+      "import": "./dist/server.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json && mkdir -p dist/drizzle && cp -R drizzle/. dist/drizzle/",
+    "clean": "rm -rf dist coverage",
+    "db:migrate": "tsx src/cli.ts migrate",
+    "db:check": "tsx src/cli.ts check",
+    "start": "tsx src/cli.ts serve",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@aurka/shared": "workspace:*",
+    "@noble/curves": "^2.4.0",
+    "@noble/hashes": "^2.4.0",
+    "better-sqlite3": "^12.4.1",
+    "drizzle-orm": "^0.45.2",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^24.3.0",
+    "tsx": "^4.20.5",
+    "vitest": "5.0.0"
+  }
+}

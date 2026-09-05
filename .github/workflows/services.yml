@@ -1,0 +1,49 @@
+name: AURKA services
+
+on:
+  push:
+    paths:
+      - "packages/shared/**"
+      - "packages/services/**"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - ".github/workflows/services.yml"
+  pull_request:
+    paths:
+      - "packages/shared/**"
+      - "packages/services/**"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - ".github/workflows/services.yml"
+  workflow_dispatch:
+
+jobs:
+  deterministic-services:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.13.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile --ignore-scripts=false
+      - run: pnpm --filter @aurka/shared build
+      - run: pnpm --filter @aurka/services db:check
+      - run: pnpm --filter @aurka/services typecheck
+      - run: pnpm --filter @aurka/services test
+      - run: pnpm --filter @aurka/services build
+      - run: pnpm format:check
+      - run: pnpm lint
+
+  docker-simulation:
+    runs-on: ubuntu-latest
+    needs: deterministic-services
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - run: docker build -f packages/services/Dockerfile -t aurka-services:ci .
+      - run: docker compose -f docker-compose.services.yml config

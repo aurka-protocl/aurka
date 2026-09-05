@@ -1,0 +1,99 @@
+{
+  "precision": {
+    "fixedPointScale": "1000000000000000000",
+    "basisPoints": "10000",
+    "maximumFeeBps": 100,
+    "valueDecimals": 0,
+    "rounding": "asset values and weights ceil; safe fills floor; complete fees ceil once"
+  },
+  "portfolioExample": {
+    "traderInputToken": "WETH",
+    "traderOutputToken": "USDC",
+    "assets": [
+      {
+        "token": "USDC",
+        "balance": "600000",
+        "decimals": 0,
+        "price": "1",
+        "priceDecimals": 0,
+        "minimumWeightBps": 5500,
+        "maximumWeightBps": 10000
+      },
+      {
+        "token": "WETH",
+        "balance": "300000",
+        "decimals": 0,
+        "price": "1",
+        "priceDecimals": 0,
+        "minimumWeightBps": 0,
+        "maximumWeightBps": 3500
+      },
+      {
+        "token": "LINK",
+        "balance": "100000",
+        "decimals": 0,
+        "price": "1",
+        "priceDecimals": 0,
+        "minimumWeightBps": 0,
+        "maximumWeightBps": 1500
+      }
+    ],
+    "maximumTransactionValue": "50000",
+    "requestedValue": "200000",
+    "maximumSafeFill": "50000",
+    "unsafeProposal": "62000",
+    "postTradeValues": { "USDC": "550000", "WETH": "350000", "LINK": "100000" },
+    "postTradeWeightsBps": { "USDC": "5500", "WETH": "3500", "LINK": "1000" },
+    "sameDirectionCapacityAfterFill": "0",
+    "reverseDirectionCapacityAfterFill": "50000",
+    "feeInclusiveSettlement": {
+      "capacityBaselineValue": "50000",
+      "consumedBefore": "0",
+      "consumedAfter": "50000",
+      "baseFeeBps": "20",
+      "optionSpacePremiumBps": "26.66666666666666672",
+      "totalFeeBps": "46.66666666666666672",
+      "baseFeeAmount": "100",
+      "treasuryBaseFeeAmount": "50",
+      "optionSpacePremiumAmount": "134",
+      "totalFeeAmount": "234",
+      "treasuryAmount": "184",
+      "solverAmount": "25",
+      "protocolAmount": "25",
+      "traderOutputValue": "49766",
+      "treasuryOutputValue": "49816",
+      "postTradeValues": {
+        "USDC": "550184",
+        "WETH": "350000",
+        "LINK": "100000"
+      },
+      "postTradeNav": "1000184"
+    }
+  },
+  "optionSpaceFees": [
+    {
+      "fill": "10000",
+      "utilizationAfter": "200000000000000000",
+      "feeBpsScaled": "21066666666666666667",
+      "feeBps": "21.066666666666666667"
+    },
+    {
+      "fill": "25000",
+      "utilizationAfter": "500000000000000000",
+      "feeBpsScaled": "26666666666666666667",
+      "feeBps": "26.666666666666666667"
+    },
+    {
+      "fill": "45000",
+      "utilizationAfter": "900000000000000000",
+      "feeBpsScaled": "41600000000000000000",
+      "feeBps": "41.6"
+    },
+    {
+      "fill": "50000",
+      "utilizationAfter": "1000000000000000000",
+      "feeBpsScaled": "46666666666666666667",
+      "feeBps": "46.666666666666666667"
+    }
+  ]
+}

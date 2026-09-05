@@ -1,0 +1,15 @@
+node_modules
+**/node_modules
+dist
+**/dist
+coverage
+cache
+contracts/cache
+contracts/out
+contracts/broadcast
+.git
+.aurkadev
+.env
+*.db
+*.db-shm
+*.db-wal
