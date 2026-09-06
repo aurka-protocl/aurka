@@ -8,26 +8,45 @@ import {
 import { URL } from "node:url";
 
 import {
+  apiFailureSchema,
   apiResponseSchema,
+  directionalCapacitySchema,
   executeRequestSchema,
+  executeResponseSchema,
+  executionSchema,
+  healthResponseSchema,
   listRequestSchema,
   paginatedSchema,
   positionCapacityQuerySchema,
   positionSchema,
+  positionsResponseSchema,
+  proposalsResponseSchema,
   quoteRequestSchema,
+  quoteSchema,
+  readinessResponseSchema,
   solveRequestSchema,
+  solveResponseSchema,
   submitIntentRequestSchema,
+  submitIntentResponseSchema,
   unsignedTransactionRequestSchema,
+  atomicSettlementIntentSchema,
   type AtomicSettlementIntent,
 } from "@aurka/shared";
 import { z } from "zod";
 
 import { AurkaService, ServiceError } from "../service.js";
+import { IdempotencyConflictError } from "../db/repository.js";
+import { hashCanonical } from "../solver/hash.js";
 import { StructuredLogger } from "../observability.js";
+import {
+  riskCertificateRequestSchema,
+  riskCertificateResponseSchema,
+  riskEvaluateRequestSchema,
+  riskEvaluateResponseSchema,
+  riskPositionResponseSchema,
+} from "../risk-service.js";
 
 const MAX_BODY_BYTES = 1_048_576;
-const successSchema = apiResponseSchema(z.unknown());
-
 export interface ApiServerOptions {
   readonly service?: AurkaService;
   readonly requestBodyLimitBytes?: number;
@@ -49,8 +68,9 @@ function send(
   statusCode: number,
   body: unknown,
   request: IncomingMessage,
+  schema: z.ZodType,
 ): void {
-  const parsed = successSchema.parse(body);
+  const parsed = schema.parse(body);
   const encoded = JSON.stringify(parsed);
   response.writeHead(statusCode, {
     "content-type": "application/json; charset=utf-8",
@@ -65,8 +85,15 @@ function sendSuccess(
   statusCode: number,
   data: unknown,
   request: IncomingMessage,
+  dataSchema: z.ZodType,
 ): void {
-  send(response, statusCode, { ok: true, data }, request);
+  send(
+    response,
+    statusCode,
+    { ok: true, data },
+    request,
+    apiResponseSchema(dataSchema),
+  );
 }
 
 function sendFailure(
@@ -94,6 +121,7 @@ function sendFailure(
       },
     },
     request,
+    apiFailureSchema,
   );
 }
 
@@ -152,10 +180,14 @@ async function withIdempotency<T>(
     const result = await callback();
     return { ...result, cached: false };
   }
-  const existing = service.repository.getIdempotentResponse(
+  const method = request.method ?? "POST";
+  const requestHash = hashCanonical(payload);
+  // Atomically claim the slot; returns existing response if COMPLETED or throws 409.
+  const existing = service.repository.claimIdempotencyKey(
     key,
-    request.method ?? "POST",
+    method,
     path,
+    requestHash,
   );
   if (existing)
     return {
@@ -163,14 +195,17 @@ async function withIdempotency<T>(
       data: existing.body as T,
       cached: true,
     };
-  const result = await callback();
-  service.repository.saveIdempotentResponse(
-    key,
-    request.method ?? "POST",
-    path,
-    { statusCode: result.statusCode, body: result.data },
-  );
-  return { ...result, cached: false };
+  try {
+    const result = await callback();
+    service.repository.completeIdempotencyResponse(key, {
+      statusCode: result.statusCode,
+      body: result.data,
+    });
+    return { ...result, cached: false };
+  } catch (error) {
+    service.repository.releaseIdempotencyKey(key, requestHash);
+    throw error;
+  }
 }
 
 function openApi(): Record<string, unknown> {
@@ -188,6 +223,9 @@ function openApi(): Record<string, unknown> {
       "/v1/intents/{id}/proposals": { get: { operationId: "listProposals" } },
       "/v1/execute": { post: { operationId: "execute" } },
       "/v1/executions/{hash}": { get: { operationId: "getExecution" } },
+      "/v1/risk/evaluate": { post: { operationId: "evaluateRisk" } },
+      "/v1/risk/certificates": { post: { operationId: "saveRiskCertificate" } },
+      "/v1/risk/{positionId}": { get: { operationId: "getRisk" } },
     },
   };
 }
@@ -208,6 +246,7 @@ async function handle(
         200,
         { status: "ok", service: "aurka-services", version: "0.1.0" },
         request,
+        healthResponseSchema,
       );
       return;
     }
@@ -221,10 +260,11 @@ async function handle(
         {
           status: ready.ready === 1 ? "ready" : "not_ready",
           database: ready.ready === 1 ? "ok" : "error",
-          rpc: "fixture-only",
+          rpc: service.runtime.rpc,
           indexerLagBlocks: 0,
         },
         request,
+        readinessResponseSchema,
       );
       return;
     }
@@ -245,6 +285,7 @@ async function handle(
           service.listPositions(query.limit, query.cursor),
         ),
         request,
+        positionsResponseSchema,
       );
       return;
     }
@@ -257,7 +298,7 @@ async function handle(
         query.traderInputToken,
         query.traderOutputToken,
       );
-      sendSuccess(response, 200, capacity, request);
+      sendSuccess(response, 200, capacity, request, directionalCapacitySchema);
       return;
     }
 
@@ -268,11 +309,68 @@ async function handle(
         200,
         service.getPosition(decodeURIComponent(positionMatch[1]!)),
         request,
+        positionSchema,
+      );
+      return;
+    }
+
+    const riskPositionMatch = path.match(/^\/v1\/risk\/([^/]+)$/);
+    if (method === "GET" && riskPositionMatch) {
+      sendSuccess(
+        response,
+        200,
+        service.riskService.getPosition(
+          decodeURIComponent(riskPositionMatch[1]!),
+        ),
+        request,
+        riskPositionResponseSchema,
       );
       return;
     }
 
     const payload = method === "POST" ? await body(request, limit) : undefined;
+    if (method === "POST" && path === "/v1/risk/evaluate") {
+      const input = riskEvaluateRequestSchema.parse(payload);
+      const result = await withIdempotency(
+        service,
+        request,
+        path,
+        payload,
+        async () => ({
+          statusCode: 200,
+          data: service.riskService.evaluate(input),
+        }),
+      );
+      sendSuccess(
+        response,
+        result.statusCode,
+        result.data,
+        request,
+        riskEvaluateResponseSchema,
+      );
+      return;
+    }
+    if (method === "POST" && path === "/v1/risk/certificates") {
+      const input = riskCertificateRequestSchema.parse(payload);
+      const result = await withIdempotency(
+        service,
+        request,
+        path,
+        payload,
+        async () => ({
+          statusCode: 201,
+          data: service.riskService.saveCertificate(input),
+        }),
+      );
+      sendSuccess(
+        response,
+        result.statusCode,
+        result.data,
+        request,
+        riskCertificateResponseSchema,
+      );
+      return;
+    }
     if (method === "POST" && path === "/v1/intents") {
       const input = submitIntentRequestSchema.parse(payload);
       const result = await withIdempotency(
@@ -285,7 +383,13 @@ async function handle(
           data: await service.submitIntent(input.intent),
         }),
       );
-      sendSuccess(response, result.statusCode, result.data, request);
+      sendSuccess(
+        response,
+        result.statusCode,
+        result.data,
+        request,
+        submitIntentResponseSchema,
+      );
       return;
     }
 
@@ -300,6 +404,7 @@ async function handle(
           decodeURIComponent(intentProposalMatch[1]!),
         ),
         request,
+        proposalsResponseSchema,
       );
       return;
     }
@@ -311,7 +416,7 @@ async function handle(
       );
       if (!intent)
         throw new ServiceError("INTENT_NOT_FOUND", "Intent was not found", 404);
-      sendSuccess(response, 200, intent, request);
+      sendSuccess(response, 200, intent, request, atomicSettlementIntentSchema);
       return;
     }
 
@@ -327,7 +432,13 @@ async function handle(
           data: await service.quote(input.intent),
         }),
       );
-      sendSuccess(response, result.statusCode, result.data, request);
+      sendSuccess(
+        response,
+        result.statusCode,
+        result.data,
+        request,
+        quoteSchema,
+      );
       return;
     }
 
@@ -343,7 +454,13 @@ async function handle(
           return { statusCode: 200, data: await service.solve(input.intent) };
         },
       );
-      sendSuccess(response, result.statusCode, result.data, request);
+      sendSuccess(
+        response,
+        result.statusCode,
+        result.data,
+        request,
+        solveResponseSchema,
+      );
       return;
     }
 
@@ -371,6 +488,7 @@ async function handle(
         result.statusCode,
         { ...result.data, transactionRequest: transaction },
         request,
+        executeResponseSchema,
       );
       return;
     }
@@ -382,6 +500,7 @@ async function handle(
         200,
         service.getExecution(decodeURIComponent(executionMatch[1]!)),
         request,
+        executionSchema,
       );
       return;
     }
@@ -396,6 +515,15 @@ async function handle(
         new ServiceError("INVALID_REQUEST", "Request validation failed", 400, {
           issues: error.issues,
         }),
+        request,
+      );
+      return;
+    }
+    if (error instanceof IdempotencyConflictError) {
+      sendFailure(
+        response,
+        409,
+        new ServiceError("IDEMPOTENCY_CONFLICT", error.message, 409),
         request,
       );
       return;

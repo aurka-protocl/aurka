@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import riskVector from "../../test-vectors/risk.json" with { type: "json" };
 
 import {
   addressSchema,
@@ -7,6 +8,9 @@ import {
   atomicSettlementProposalSchema,
   decodeProtocolEventLog,
   feeBreakdownSchema,
+  hashActiveBounds,
+  hashRiskCertificate,
+  hashRiskReasonCode,
   parseProtocolEventPayload,
   protocolEventTopic,
   riskCertificateSchema,
@@ -210,7 +214,7 @@ describe("signed-object schemas", () => {
 
   it("rejects risk certificates with invalid validity windows", () => {
     const certificate = {
-      policyId: "policy:1",
+      policyId: HASH,
       chainId: 1,
       verifyingContract: ADDRESS_A,
       signatureVersion: 2,
@@ -219,7 +223,7 @@ describe("signed-object schemas", () => {
       activeBoundsHash: HASH,
       maximumTradeValue: "37500000000",
       sourceDigest: HASH,
-      reasonCode: "LIQUIDITY_DECLINE",
+      reasonCode: HASH,
       issuedAt: 1_800_000_000,
       expiresAt: 1_799_999_999,
       nonce: "2",
@@ -232,7 +236,7 @@ describe("signed-object schemas", () => {
 
   it("requires the current certificate signature version and authority epochs", () => {
     const certificate = {
-      policyId: "policy:1",
+      policyId: HASH,
       chainId: 1,
       verifyingContract: ADDRESS_A,
       signatureVersion: 2,
@@ -241,7 +245,7 @@ describe("signed-object schemas", () => {
       activeBoundsHash: HASH,
       maximumTradeValue: "37500000000",
       sourceDigest: HASH,
-      reasonCode: "LIQUIDITY_DECLINE",
+      reasonCode: HASH,
       issuedAt: 1_800_000_000,
       expiresAt: 1_800_000_100,
       nonce: "2",
@@ -260,6 +264,33 @@ describe("signed-object schemas", () => {
         watchtowerAuthorizationEpoch: undefined,
       }).success,
     ).toBe(false);
+  });
+
+  it("matches the language-neutral RiskModeRegistry v2 vector", () => {
+    expect(hashActiveBounds(riskVector.activeBounds)).toBe(
+      riskVector.activeBoundsHash,
+    );
+    expect(hashRiskReasonCode(riskVector.reasonLabel)).toBe(
+      riskVector.reasonCode,
+    );
+    expect(
+      hashRiskCertificate({
+        policyId: riskVector.policyId,
+        chainId: riskVector.chainId,
+        verifyingContract: riskVector.verifyingContract,
+        riskMode: riskVector.riskMode as "CAUTIOUS",
+        activeBoundsHash: riskVector.activeBoundsHash,
+        maximumTradeValue: riskVector.maximumTradeValue,
+        sourceDigest: riskVector.sourceDigest,
+        reasonCode: riskVector.reasonCode,
+        issuedAt: riskVector.issuedAt,
+        expiresAt: riskVector.expiresAt,
+        nonce: riskVector.nonce,
+        watchtower: riskVector.watchtower,
+        watchtowerAuthorizationEpoch: riskVector.watchtowerAuthorizationEpoch,
+        policyNonce: riskVector.policyNonce,
+      }),
+    ).toBe(riskVector.eip712Digest);
   });
 });
 

@@ -13,13 +13,19 @@ Raw event identity is:
 ```
 
 The unique key makes replay idempotent. A checkpoint stores the last accepted
-block number and hash per chain/contract. RPC reads are retried at most three
-times with bounded exponential delay. A removed log is marked instead of
-deleted, then derived capacity epochs are rebuilt in block/log order from the
-remaining raw events. This handles duplicate delivery, process restart, and a
-short reorg without treating the read model as contract authority.
+block number and hash per chain/contract, and every verified block header in an
+indexed range is retained. RPC reads are retried at most three times with
+bounded exponential delay. A removed log is marked instead of deleted, then
+derived capacity epochs are rebuilt in block/log order from the remaining raw
+events. On restart, a changed checkpoint walks retained headers to a canonical
+common ancestor, removes the entire orphaned branch transactionally, and replays
+replacement logs. This handles empty blocks as well as duplicate delivery
+without treating the read model as contract authority.
 
 The read model includes policies, managed assets, risk certificates, positions,
 capacity epochs, signed intents/proposals, quotes, executions, agent roles,
-idempotency responses, checkpoints, and raw events. The Phase 5 indexer does not
-implement a Graph watchtower or risk scoring.
+versioned risk observations/evaluations, watchtower jobs, wallet policy
+fingerprints, risk audit events, idempotency responses, checkpoints, and raw
+events. Risk observations and decisions retain source, deployment, block,
+finality, hash, and configuration provenance; no private authorization key or
+Privy app secret is persisted.

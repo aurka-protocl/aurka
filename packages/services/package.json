@@ -22,6 +22,7 @@
     "clean": "rm -rf dist coverage",
     "db:migrate": "tsx src/cli.ts migrate",
     "db:check": "tsx src/cli.ts check",
+    "generate:router-fixture": "pnpm build && node scripts/generate-router-calldata-fixture.mjs",
     "start": "tsx src/cli.ts serve",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit"

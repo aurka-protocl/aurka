@@ -1,4 +1,4 @@
-import { keccak_256 } from "@noble/hashes/sha3.js";
+﻿import { keccak_256 } from "@noble/hashes/sha3.js";
 
 import type {
   AtomicSettlementIntent,
@@ -10,44 +10,44 @@ import type { SolverSnapshot } from "./types.js";
 
 const text = new TextEncoder();
 
-function hex(bytes: Uint8Array): string {
+export function hex(bytes: Uint8Array): string {
   return `0x${Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
 }
 
-function parseHex(value: string): Uint8Array {
+export function parseHex(value: string): Uint8Array {
   return Uint8Array.from(value.slice(2).match(/.{2}/g) ?? [], (pair) =>
     Number.parseInt(pair, 16),
   );
 }
 
-function hashText(value: string): Uint8Array {
+export function hashText(value: string): Uint8Array {
   return keccak_256(text.encode(value));
 }
 
-function bytes32(value: string): Uint8Array {
+export function bytes32(value: string): Uint8Array {
   if (!/^0x[0-9a-fA-F]{64}$/.test(value))
     throw new TypeError("Expected bytes32");
   return parseHex(value);
 }
 
-function slot(value: bigint | number | string): Uint8Array {
+export function slot(value: bigint | number | string): Uint8Array {
   const number = typeof value === "bigint" ? value : BigInt(value);
   if (number < 0n || number >= 1n << 256n)
     throw new RangeError("Value does not fit uint256");
   return parseHex(`0x${number.toString(16).padStart(64, "0")}`);
 }
 
-function address(value: string): Uint8Array {
+export function address(value: string): Uint8Array {
   if (!/^0x[0-9a-fA-F]{40}$/.test(value))
     throw new TypeError("Expected address");
   return parseHex(`0x${value.slice(2).padStart(64, "0")}`);
 }
 
-function bool(value: boolean): Uint8Array {
+export function bool(value: boolean): Uint8Array {
   return slot(value ? 1 : 0);
 }
 
-function join(slots: readonly Uint8Array[]): Uint8Array {
+export function join(slots: readonly Uint8Array[]): Uint8Array {
   const value = new Uint8Array(slots.length * 32);
   slots.forEach((item, index) => value.set(item, index * 32));
   return value;
@@ -121,29 +121,29 @@ export interface DirectProgramFields {
 }
 
 /** Solidity `abi.encode` payload accepted by AurkaSwapVMRouter._validateProgram. */
+export function encodeDirectProgram(fields: DirectProgramFields): Uint8Array {
+  return join([
+    hashText("AURKA_DIRECT_PAIR_V1"),
+    bytes32(fields.policyId),
+    bytes32(fields.positionIdHash),
+    address(fields.trader),
+    address(fields.inputToken),
+    address(fields.outputToken),
+    bytes32(fields.strategyHash),
+    slot(fields.inputAmount),
+    slot(fields.traderOutputAmount),
+    slot(fields.solverFeeAmount),
+    slot(fields.protocolFeeAmount),
+    slot(fields.inputValue),
+    slot(fields.traderOutputValue),
+    slot(fields.treasuryOutputValue),
+    bytes32(fields.capacityEpochId),
+    bytes32(fields.intentHash),
+  ]);
+}
+
 export function hashDirectProgram(fields: DirectProgramFields): string {
-  return hex(
-    keccak_256(
-      join([
-        hashText("AURKA_DIRECT_PAIR_V1"),
-        bytes32(fields.policyId),
-        bytes32(fields.positionIdHash),
-        address(fields.trader),
-        address(fields.inputToken),
-        address(fields.outputToken),
-        bytes32(fields.strategyHash),
-        slot(fields.inputAmount),
-        slot(fields.traderOutputAmount),
-        slot(fields.solverFeeAmount),
-        slot(fields.protocolFeeAmount),
-        slot(fields.inputValue),
-        slot(fields.traderOutputValue),
-        slot(fields.treasuryOutputValue),
-        bytes32(fields.capacityEpochId),
-        bytes32(fields.intentHash),
-      ]),
-    ),
-  );
+  return hex(keccak_256(encodeDirectProgram(fields)));
 }
 
 function typedData(domain: Uint8Array, structHash: Uint8Array): string {

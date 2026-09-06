@@ -6,4 +6,5 @@ export * from "./fixture.js";
 export * from "./indexer.js";
 export * from "./observability.js";
 export * from "./service.js";
+export * from "./risk-service.js";
 export * from "./solver/index.js";

@@ -2,6 +2,7 @@ import { loadConfig } from "./config.js";
 import { ServiceDatabase } from "./db/database.js";
 import { createApiServer, listenApiServer } from "./api/server.js";
 import { AurkaService } from "./service.js";
+import { JsonRpcHttpTransport } from "./solver/rpc.js";
 
 const config = loadConfig();
 const command = process.argv[2] ?? "serve";
@@ -23,7 +24,24 @@ if (command === "migrate" || command === "check") {
   );
 } else if (command === "serve") {
   const database = new ServiceDatabase({ filename: config.DATABASE_URL });
-  const handle = createApiServer({ service: new AurkaService({ database }) });
+  if (config.RPC_URL && !config.SETTLEMENT_CONTRACT) {
+    throw new Error(
+      "SETTLEMENT_CONTRACT is required when RPC_URL is configured",
+    );
+  }
+  const handle = createApiServer({
+    service: new AurkaService({
+      database,
+      chainId: config.CHAIN_ID,
+      indexConfirmations: config.INDEX_CONFIRMATIONS,
+      ...(config.SETTLEMENT_CONTRACT
+        ? { settlementContract: config.SETTLEMENT_CONTRACT }
+        : {}),
+      ...(config.RPC_URL
+        ? { rpcTransport: new JsonRpcHttpTransport(config.RPC_URL) }
+        : {}),
+    }),
+  });
   await listenApiServer(handle, config.PORT, config.HOST);
   console.log(
     `AURKA services listening on http://${config.HOST}:${config.PORT}`,

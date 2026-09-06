@@ -103,6 +103,14 @@ export const simulationStatusSchema = z.enum([
   "SUCCEEDED",
   "REVERTED",
   "STALE",
+  "AUTHORIZATION_PENDING",
+]);
+
+/** Persistence state for a solver proposal at the service boundary. */
+export const proposalStatusSchema = z.enum([
+  "EXECUTABLE",
+  "AUTHORIZATION_PENDING",
+  "REJECTED",
 ]);
 
 export const quoteSchema = z
@@ -159,4 +167,5 @@ export const quoteSchema = z
 
 export type FeeBreakdown = z.infer<typeof feeBreakdownSchema>;
 export type SimulationStatus = z.infer<typeof simulationStatusSchema>;
+export type ProposalStatus = z.infer<typeof proposalStatusSchema>;
 export type Quote = z.infer<typeof quoteSchema>;

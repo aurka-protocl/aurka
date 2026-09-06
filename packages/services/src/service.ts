@@ -25,27 +25,42 @@ import { DirectSolver } from "./solver/direct.js";
 import { OptimizedSolver } from "./solver/optimized.js";
 import {
   FixtureProposalSigner,
+  verifySignature,
   verifyProposalSignature,
 } from "./solver/signing.js";
+import {
+  buildRouterTransactionRequest,
+  type RouterTransactionRequest,
+} from "./solver/calldata.js";
 import { DeterministicRouterSimulator } from "./fixture.js";
 import type {
   ProposalSigner,
+  RouterSimulator,
   SolverSnapshot,
   SolverSnapshotProvider,
 } from "./solver/types.js";
+import { Eip1193RouterSimulator, type Eip1193Transport } from "./solver/rpc.js";
+import { RiskService } from "./risk-service.js";
 
-export interface UnsignedTransactionRequest {
-  readonly chainId: number;
-  readonly to: string;
-  readonly data: string;
-  readonly value: string;
-}
+export type UnsignedTransactionRequest = RouterTransactionRequest;
 
 export interface ServiceOptions {
   readonly database?: ServiceDatabase;
   readonly provider?: SolverSnapshotProvider;
   readonly signer?: ProposalSigner;
   readonly seedFixture?: boolean;
+  readonly chainId?: number;
+  readonly settlementContract?: string;
+  readonly indexConfirmations?: number;
+  readonly routerSimulator?: RouterSimulator;
+  readonly rpcTransport?: Eip1193Transport;
+}
+
+export interface ServiceRuntimeDiagnostics {
+  readonly chainId: number;
+  readonly settlementContract: string | undefined;
+  readonly indexConfirmations: number;
+  readonly rpc: "fixture-only" | "configured";
 }
 
 export class ServiceError extends Error {
@@ -115,14 +130,53 @@ export class AurkaService {
   readonly provider: SolverSnapshotProvider;
   readonly directSolver: DirectSolver;
   readonly optimizedSolver: OptimizedSolver;
+  readonly routerSimulator: RouterSimulator;
+  readonly riskService: RiskService;
+  readonly runtime: ServiceRuntimeDiagnostics;
 
   constructor(options: ServiceOptions = {}) {
     this.database = options.database ?? new ServiceDatabase();
     this.repository = new ServiceRepository(this.database.db);
-    this.provider = options.provider ?? new FixtureProvider();
+    this.riskService = new RiskService(this.repository);
+    this.runtime = {
+      chainId: options.chainId ?? 31_337,
+      settlementContract: options.settlementContract,
+      indexConfirmations: options.indexConfirmations ?? 2,
+      rpc: options.rpcTransport ? "configured" : "fixture-only",
+    };
+    const sourceProvider = options.provider ?? new FixtureProvider();
+    this.provider = {
+      getSnapshot: async (intent) => {
+        const snapshot = await sourceProvider.getSnapshot(intent);
+        if (snapshot.chainId !== this.runtime.chainId) {
+          throw new ServiceError(
+            "CHAIN_MISMATCH",
+            "Settlement snapshot chain does not match service configuration",
+            409,
+          );
+        }
+        if (
+          this.runtime.settlementContract !== undefined &&
+          snapshot.verifyingContract.toLowerCase() !==
+            this.runtime.settlementContract.toLowerCase()
+        ) {
+          throw new ServiceError(
+            "CONTRACT_MISMATCH",
+            "Settlement snapshot router does not match service configuration",
+            409,
+          );
+        }
+        return snapshot;
+      },
+    };
+    this.routerSimulator =
+      options.routerSimulator ??
+      (options.rpcTransport
+        ? new Eip1193RouterSimulator(options.rpcTransport)
+        : new DeterministicRouterSimulator());
     this.directSolver = new DirectSolver(
       this.provider,
-      new DeterministicRouterSimulator(),
+      this.routerSimulator,
       options.signer ?? new FixtureProposalSigner(),
     );
     this.optimizedSolver = new OptimizedSolver(this.directSolver);
@@ -278,52 +332,70 @@ export class AurkaService {
         "Solver proposal signature is invalid",
       );
     }
-    const simulation = await new DeterministicRouterSimulator().simulate(
-      intent,
-      proposal,
-      snapshot,
-    );
-    if (simulation.status !== "SUCCEEDED") {
+    const authorization = externalSignature ?? intent.signature;
+    if (authorization !== undefined) {
+      if (!verifySignature(intent.trader, expectedIntentHash, authorization)) {
+        throw new ServiceError(
+          "INVALID_SIGNATURE",
+          "External trader signature is invalid",
+          400,
+        );
+      }
+    }
+    const simulationIntent =
+      authorization === undefined
+        ? intent
+        : { ...intent, signature: authorization };
+    const simulation =
+      authorization !== undefined &&
+      this.routerSimulator.simulateExact !== undefined
+        ? await this.routerSimulator.simulateExact(
+            simulationIntent,
+            proposal,
+            snapshot,
+          )
+        : await this.routerSimulator.simulate(
+            simulationIntent,
+            proposal,
+            snapshot,
+          );
+    if (
+      simulation.status !== "SUCCEEDED" &&
+      !(
+        authorization === undefined &&
+        simulation.status === "AUTHORIZATION_PENDING"
+      )
+    ) {
       throw new ServiceError(
         "SIMULATION_FAILED",
         simulation.reason ?? "Router simulation failed",
       );
     }
-    if (externalSignature === undefined) {
-      const transactionRequest = this.unsignedTransaction(
-        snapshot.chainId,
-        snapshot.verifyingContract,
-        expectedIntentHash,
-        expectedProposalHash,
-      );
-      const execution = this.pendingExecution(
-        intent,
-        proposal,
-        snapshot,
-        hashBytes(`pending:${expectedIntentHash}:${expectedProposalHash}`),
-      );
-      this.repository.saveExecution(execution);
-      return { execution, transactionRequest };
+    if (authorization !== undefined && simulation.status === "SUCCEEDED") {
+      // A preflight-only proposal remains pending until the caller supplies a
+      // verified trader authorization and the exact router boundary passes.
+      this.repository.saveProposal(proposal, proposalHashValue, "SUCCEEDED");
     }
-    const transactionHash = hashBytes(
-      `submitted:${expectedIntentHash}:${expectedProposalHash}:${externalSignature ?? proposal.signature}`,
+    const transactionRequest = this.buildTransactionRequest(
+      intent,
+      proposal,
+      snapshot,
+      expectedIntentHash,
+      authorization,
+    );
+    // Phase 5 has no broadcaster. Keep this a durable pending request, never
+    // a synthetic onchain transaction hash or a claimed submission.
+    const executionId = hashBytes(
+      `pending:${expectedIntentHash}:${expectedProposalHash}`,
     );
     const execution = this.pendingExecution(
       intent,
       proposal,
       snapshot,
-      transactionHash,
+      executionId,
     );
     this.repository.saveExecution(execution);
-    return {
-      execution,
-      transactionRequest: this.unsignedTransaction(
-        snapshot.chainId,
-        snapshot.verifyingContract,
-        expectedIntentHash,
-        expectedProposalHash,
-      ),
-    };
+    return { execution, transactionRequest };
   }
 
   getExecution(hash: string): Execution {
@@ -395,17 +467,19 @@ export class AurkaService {
     return result;
   }
 
-  private unsignedTransaction(
-    chainId: number,
-    to: string,
+  private buildTransactionRequest(
+    intent: AtomicSettlementIntent,
+    proposal: AtomicSettlementProposal,
+    snapshot: SolverSnapshot,
     intentHash: string,
-    proposalHash: string,
+    intentSignature?: string,
   ): UnsignedTransactionRequest {
-    return {
-      chainId,
-      to,
-      data: `0x${Buffer.from(`AURKA_DIRECT_PAIR_V1:${intentHash}:${proposalHash}`, "utf8").toString("hex")}`,
-      value: "0",
-    };
+    return buildRouterTransactionRequest(
+      intent,
+      proposal,
+      snapshot,
+      intentHash,
+      intentSignature,
+    );
   }
 }

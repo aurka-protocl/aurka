@@ -15,6 +15,27 @@
       "when": 1788566400000,
       "tag": "0001_settlement_authority",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1788652800000,
+      "tag": "0002_idempotency_request_hash",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1788739200000,
+      "tag": "0003_indexing_headers",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1788825600000,
+      "tag": "0004_risk_watchtower",
+      "breakpoints": true
     }
   ]
 }

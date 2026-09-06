@@ -47,6 +47,18 @@ contract RiskModeRegistryTest is TestBase {
         assertEq(riskRegistry.lastNonce(POLICY_ID), 1);
     }
 
+    function testActiveBoundsEncodingMatchesSharedRiskVector() public pure {
+        RiskModeRegistry.ActiveAssetBound[] memory bounds =
+            new RiskModeRegistry.ActiveAssetBound[](3);
+        bounds[0] = RiskModeRegistry.ActiveAssetBound(address(0x1001), 5_600, 10_000, false);
+        bounds[1] = RiskModeRegistry.ActiveAssetBound(address(0x1002), 0, 3_400, false);
+        bounds[2] = RiskModeRegistry.ActiveAssetBound(address(0x1003), 0, 1_400, false);
+        assertEq(
+            keccak256(abi.encode(bounds)),
+            0xf77f12765c7db701fee013730979d0a8bd6ae7034db88a98c683da24a6c8c51d
+        );
+    }
+
     function testRiskAgentCannotWidenAssetBounds() public {
         RiskModeRegistry.ActiveAssetBound[] memory bounds = _tightBounds();
         bounds[0].minimumWeightBps = 5_400;

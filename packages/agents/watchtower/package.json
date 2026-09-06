@@ -1,0 +1,31 @@
+{
+  "name": "@aurka/watchtower",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Pure deterministic AURKA risk evaluation and certificate preparation",
+  "license": "UNLICENSED",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "clean": "rm -rf dist coverage",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@noble/curves": "^2.4.0",
+    "@noble/hashes": "^2.4.0",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "vitest": "5.0.0"
+  }
+}

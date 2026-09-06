@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gt, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, lte, or, sql } from "drizzle-orm";
 
 import {
   atomicSettlementIntentSchema,
@@ -14,6 +14,7 @@ import {
   type Position,
   type ProtocolEvent,
   type Quote,
+  type SimulationStatus,
 } from "@aurka/shared";
 
 import {
@@ -23,6 +24,7 @@ import {
   agentIdentities,
   idempotencyKeys,
   indexingCheckpoints,
+  indexingHeaders,
   intents,
   managedAssets,
   policies,
@@ -30,6 +32,11 @@ import {
   proposals,
   quotes,
   riskCertificates,
+  riskObservations,
+  riskEvaluations,
+  riskJobs,
+  riskAuditEvents,
+  walletPolicies,
 } from "./schema.js";
 import type { ServiceDrizzleDatabase } from "./database.js";
 import { hashBytes } from "../solver/hash.js";
@@ -48,9 +55,24 @@ export interface EventPage {
   readonly nextCursor: string | null;
 }
 
+export interface IndexedBlockHeader {
+  readonly blockNumber: string;
+  readonly blockHash: string;
+}
+
 export interface StoredIdempotencyResponse {
   readonly statusCode: number;
   readonly body: unknown;
+}
+
+type ProposalStatus = "EXECUTABLE" | "AUTHORIZATION_PENDING" | "REJECTED";
+
+export class IdempotencyConflictError extends Error {
+  readonly code = "IDEMPOTENCY_CONFLICT";
+  constructor(message: string) {
+    super(message);
+    this.name = "IdempotencyConflictError";
+  }
 }
 
 export class ServiceRepository {
@@ -203,13 +225,268 @@ export class ServiceRepository {
         expiresAt: Number(certificate.expiresAt),
         certificateJson: json(certificate),
         active,
+        status: String(certificate.status ?? (active ? "ACTIVE" : "EXPIRED")),
         updatedAt: now(),
       })
       .onConflictDoUpdate({
         target: riskCertificates.hash,
-        set: { certificateJson: json(certificate), active, updatedAt: now() },
+        set: {
+          certificateJson: json(certificate),
+          active,
+          status: String(certificate.status ?? (active ? "ACTIVE" : "EXPIRED")),
+          updatedAt: now(),
+        },
       })
       .run();
+  }
+
+  saveRiskObservation(observation: Record<string, unknown>): void {
+    this.db
+      .insert(riskObservations)
+      .values({
+        id: String(observation.id),
+        sourceId: String(observation.sourceId),
+        chainId: Number(observation.chainId),
+        deploymentId: String(observation.deploymentId),
+        indexedBlock: String(observation.indexedBlock),
+        indexedBlockHash: String(observation.indexedBlockHash),
+        finality: String(observation.finality),
+        payloadHash: String(observation.payloadHash),
+        observationJson: json(observation),
+        updatedAt: now(),
+      })
+      .onConflictDoUpdate({
+        target: riskObservations.id,
+        set: {
+          sourceId: String(observation.sourceId),
+          indexedBlock: String(observation.indexedBlock),
+          indexedBlockHash: String(observation.indexedBlockHash),
+          finality: String(observation.finality),
+          payloadHash: String(observation.payloadHash),
+          observationJson: json(observation),
+          updatedAt: now(),
+        },
+      })
+      .run();
+  }
+
+  saveRiskEvaluation(
+    hash: string,
+    positionId: string,
+    evaluation: Record<string, unknown>,
+    configuration: Record<string, unknown>,
+    configurationHash: string,
+  ): void {
+    this.db
+      .insert(riskEvaluations)
+      .values({
+        evaluationHash: hash,
+        positionId,
+        configurationVersion: String(evaluation.version),
+        configurationHash,
+        configurationJson: json(configuration),
+        sourceDigest: String(evaluation.sourceDigest),
+        mode: String(evaluation.mode),
+        activeBoundsHash: String(evaluation.activeBoundsHash),
+        evaluatedAt: Number(evaluation.evaluatedAt),
+        evaluationJson: json(evaluation),
+        updatedAt: now(),
+      })
+      .onConflictDoUpdate({
+        target: riskEvaluations.evaluationHash,
+        set: {
+          evaluationJson: json(evaluation),
+          configurationHash,
+          configurationJson: json(configuration),
+          mode: String(evaluation.mode),
+          updatedAt: now(),
+        },
+      })
+      .run();
+  }
+
+  getLatestRiskEvaluation(
+    positionId: string,
+  ): Record<string, unknown> | undefined {
+    const row = this.db
+      .select()
+      .from(riskEvaluations)
+      .where(eq(riskEvaluations.positionId, positionId))
+      .orderBy(
+        desc(riskEvaluations.evaluatedAt),
+        asc(riskEvaluations.evaluationHash),
+      )
+      .limit(1)
+      .get();
+    return row ? parse<Record<string, unknown>>(row.evaluationJson) : undefined;
+  }
+
+  saveRiskJob(input: {
+    readonly id: string;
+    readonly positionId: string;
+    readonly kind: string;
+    readonly status: string;
+    readonly attempt: number;
+    readonly lastError?: string;
+    readonly nextRunAt: number;
+  }): void {
+    this.db
+      .insert(riskJobs)
+      .values({ ...input, updatedAt: now() })
+      .onConflictDoUpdate({
+        target: riskJobs.id,
+        set: { ...input, updatedAt: now() },
+      })
+      .run();
+  }
+
+  /** Claim one due job transactionally; repeated workers cannot double-run it. */
+  claimRiskJob(
+    id: string,
+    nowSeconds = now(),
+  ):
+    | {
+        readonly id: string;
+        readonly positionId: string;
+        readonly kind: string;
+        readonly attempt: number;
+      }
+    | undefined {
+    return this.db.transaction((transaction) => {
+      const row = transaction
+        .select()
+        .from(riskJobs)
+        .where(
+          and(
+            eq(riskJobs.id, id),
+            eq(riskJobs.status, "QUEUED"),
+            lte(riskJobs.nextRunAt, nowSeconds),
+          ),
+        )
+        .get();
+      if (!row) return undefined;
+      transaction
+        .update(riskJobs)
+        .set({ status: "RUNNING", attempt: row.attempt + 1, updatedAt: now() })
+        .where(and(eq(riskJobs.id, id), eq(riskJobs.status, "QUEUED")))
+        .run();
+      return {
+        id: row.id,
+        positionId: row.positionId,
+        kind: row.kind,
+        attempt: row.attempt + 1,
+      };
+    });
+  }
+
+  completeRiskJob(id: string, nextRunAt = now()): void {
+    this.db
+      .update(riskJobs)
+      .set({
+        status: "COMPLETED",
+        lastError: null,
+        nextRunAt,
+        updatedAt: now(),
+      })
+      .where(eq(riskJobs.id, id))
+      .run();
+  }
+
+  failRiskJob(id: string, error: string, nextRunAt: number): void {
+    this.db
+      .update(riskJobs)
+      .set({
+        status: "QUEUED",
+        lastError: error.slice(0, 500),
+        nextRunAt,
+        updatedAt: now(),
+      })
+      .where(eq(riskJobs.id, id))
+      .run();
+  }
+
+  saveRiskAuditEvent(input: {
+    readonly id: string;
+    readonly positionId: string;
+    readonly eventType: string;
+    readonly actor: string;
+    readonly payload: Record<string, unknown>;
+    readonly createdAt?: number;
+  }): void {
+    this.db
+      .insert(riskAuditEvents)
+      .values({
+        id: input.id,
+        positionId: input.positionId,
+        eventType: input.eventType,
+        actor: input.actor,
+        payloadJson: json(input.payload),
+        createdAt: input.createdAt ?? now(),
+      })
+      .onConflictDoNothing()
+      .run();
+  }
+
+  saveWalletPolicy(policy: {
+    readonly fingerprint: string;
+    readonly walletId: string;
+    readonly role: string;
+    readonly signerAddress: string;
+    readonly expiresAt: number;
+    readonly revoked: boolean;
+    readonly policy: Record<string, unknown>;
+  }): void {
+    this.db
+      .insert(walletPolicies)
+      .values({
+        fingerprint: policy.fingerprint,
+        walletId: policy.walletId,
+        role: policy.role,
+        signerAddress: policy.signerAddress,
+        expiresAt: policy.expiresAt,
+        revoked: policy.revoked,
+        policyJson: json(policy.policy),
+        updatedAt: now(),
+      })
+      .onConflictDoUpdate({
+        target: walletPolicies.fingerprint,
+        set: {
+          revoked: policy.revoked,
+          expiresAt: policy.expiresAt,
+          policyJson: json(policy.policy),
+          updatedAt: now(),
+        },
+      })
+      .run();
+  }
+
+  getRiskPosition(positionId: string): {
+    readonly evaluation: Record<string, unknown> | undefined;
+    readonly certificate: Record<string, unknown> | undefined;
+    readonly certificateStatus: string | undefined;
+  } {
+    const position = this.db
+      .select()
+      .from(positions)
+      .where(eq(positions.id, positionId))
+      .get();
+    const evaluation = this.getLatestRiskEvaluation(positionId);
+    const certificateRow = position
+      ? this.db
+          .select()
+          .from(riskCertificates)
+          .where(eq(riskCertificates.policyId, position.policyId))
+          .orderBy(desc(riskCertificates.updatedAt))
+          .limit(1)
+          .get()
+      : undefined;
+    return {
+      evaluation,
+      certificate: certificateRow
+        ? parse<Record<string, unknown>>(certificateRow.certificateJson)
+        : undefined,
+      certificateStatus: certificateRow?.status,
+    };
   }
 
   saveAgentIdentity(input: {
@@ -295,9 +572,15 @@ export class ServiceRepository {
   saveProposal(
     proposal: AtomicSettlementProposal,
     proposalHash: string,
-    simulationStatus: string,
+    simulationStatus: SimulationStatus,
   ): void {
     const value = atomicSettlementProposalSchema.parse(proposal);
+    const status: ProposalStatus =
+      simulationStatus === "SUCCEEDED"
+        ? "EXECUTABLE"
+        : simulationStatus === "AUTHORIZATION_PENDING"
+          ? "AUTHORIZATION_PENDING"
+          : "REJECTED";
     const timestamp = now();
     this.db
       .insert(proposals)
@@ -305,7 +588,7 @@ export class ServiceRepository {
         proposalHash,
         intentHash: value.intentHash,
         solver: value.solver,
-        status: simulationStatus === "SUCCEEDED" ? "EXECUTABLE" : "REJECTED",
+        status,
         simulationStatus,
         proposalJson: json(value),
         createdAt: timestamp,
@@ -314,6 +597,7 @@ export class ServiceRepository {
       .onConflictDoUpdate({
         target: proposals.proposalHash,
         set: {
+          status,
           simulationStatus,
           proposalJson: json(value),
           updatedAt: timestamp,
@@ -331,7 +615,8 @@ export class ServiceRepository {
       .limit(limit)
       .all()
       .flatMap((row) =>
-        row.simulationStatus === "SUCCEEDED"
+        row.simulationStatus === "SUCCEEDED" ||
+        row.simulationStatus === "AUTHORIZATION_PENDING"
           ? [atomicSettlementProposalSchema.parse(parse(row.proposalJson))]
           : [],
       );
@@ -458,6 +743,94 @@ export class ServiceRepository {
       .get();
   }
 
+  /**
+   * Atomically claim an idempotency key slot.
+   * - Returns undefined if the key is new (slot was claimed for us).
+   * - Returns the stored response if the key was already COMPLETED with matching body.
+   * - Throws IdempotencyConflictError (HTTP 409) if:
+   *   a) the key was used with a different method/path, or
+   *   b) the key was used with a different request body (hash mismatch).
+   */
+  claimIdempotencyKey(
+    key: string,
+    method: string,
+    path: string,
+    requestHash: string,
+  ): StoredIdempotencyResponse | undefined {
+    return this.db.transaction((tx) => {
+      const row = tx
+        .select()
+        .from(idempotencyKeys)
+        .where(eq(idempotencyKeys.key, key))
+        .get();
+      if (!row) {
+        // New key: insert a PENDING claim
+        tx.insert(idempotencyKeys)
+          .values({
+            key,
+            method,
+            path,
+            requestHash,
+            status: "PENDING",
+            createdAt: now(),
+          })
+          .run();
+        return undefined;
+      }
+      if (row.method !== method || row.path !== path) {
+        throw new IdempotencyConflictError(
+          "Idempotency key was reused for a different endpoint",
+        );
+      }
+      if (row.requestHash !== requestHash) {
+        throw new IdempotencyConflictError(
+          "Idempotency key was reused with a different request body",
+        );
+      }
+      if (row.status === "PENDING") {
+        // Concurrent request still in-flight; let caller handle as 409
+        throw new IdempotencyConflictError(
+          "Idempotency key request is still in progress",
+        );
+      }
+      if (row.statusCode !== null && row.responseJson !== null) {
+        return { statusCode: row.statusCode, body: parse(row.responseJson) };
+      }
+      return undefined;
+    });
+  }
+
+  /** Record the completed response for an idempotency key. */
+  completeIdempotencyResponse(
+    key: string,
+    response: StoredIdempotencyResponse,
+  ): void {
+    this.db
+      .update(idempotencyKeys)
+      .set({
+        status: "COMPLETED",
+        statusCode: response.statusCode,
+        responseJson: json(response.body),
+      })
+      .where(eq(idempotencyKeys.key, key))
+      .run();
+  }
+
+  /** Release a claim when its callback failed before a response was stored. */
+  releaseIdempotencyKey(key: string, requestHash: string): void {
+    this.db
+      .delete(idempotencyKeys)
+      .where(
+        and(
+          eq(idempotencyKeys.key, key),
+          eq(idempotencyKeys.requestHash, requestHash),
+          eq(idempotencyKeys.status, "PENDING"),
+        ),
+      )
+      .run();
+  }
+
+  /** @deprecated Use claimIdempotencyKey + completeIdempotencyResponse instead */
   getIdempotentResponse(
     key: string,
     method: string,
@@ -470,10 +843,15 @@ export class ServiceRepository {
       .get();
     if (!row) return undefined;
     if (row.method !== method || row.path !== path)
-      throw new Error("Idempotency key was reused for another request");
-    return { statusCode: row.statusCode, body: parse(row.responseJson) };
+      throw new IdempotencyConflictError(
+        "Idempotency key was reused for another request",
+      );
+    if (row.statusCode !== null && row.responseJson !== null)
+      return { statusCode: row.statusCode, body: parse(row.responseJson) };
+    return undefined;
   }
 
+  /** @deprecated Use claimIdempotencyKey + completeIdempotencyResponse instead */
   saveIdempotentResponse(
     key: string,
     method: string,
@@ -486,6 +864,8 @@ export class ServiceRepository {
         key,
         method,
         path,
+        requestHash: "",
+        status: "COMPLETED",
         statusCode: response.statusCode,
         responseJson: json(response.body),
         createdAt: now(),
@@ -511,7 +891,7 @@ export class ServiceRepository {
           blockHash: value.blockHash,
           transactionHash: value.transactionHash,
           logIndex: value.logIndex,
-          contract: value.contract,
+          contract: value.contract.toLowerCase(),
           eventVersion: 1,
           name: value.name,
           payloadJson: json(value.payload),
@@ -528,6 +908,7 @@ export class ServiceRepository {
           set: {
             blockNumber: value.blockNumber,
             blockHash: value.blockHash,
+            contract: value.contract.toLowerCase(),
             name: value.name,
             payloadJson: json(value.payload),
             removed: false,
@@ -552,7 +933,7 @@ export class ServiceRepository {
         .where(
           and(
             eq(chainEvents.chainId, value.chainId),
-            eq(chainEvents.contract, value.contract),
+            eq(chainEvents.contract, value.contract.toLowerCase()),
             eq(chainEvents.transactionHash, value.transactionHash),
             eq(chainEvents.logIndex, value.logIndex),
           ),
@@ -737,19 +1118,171 @@ export class ServiceRepository {
     };
   }
 
+  /**
+   * Retain every verified header in an indexed range. Events alone are not
+   * sufficient for fork recovery because a replaced block may have emitted no
+   * event.
+   */
+  saveIndexedHeaders(
+    chainId: number,
+    contract: string,
+    headers: readonly IndexedBlockHeader[],
+  ): void {
+    if (headers.length === 0) return;
+    this.db.transaction((tx) => {
+      for (const header of headers) {
+        tx.insert(indexingHeaders)
+          .values({
+            chainId,
+            contract: contract.toLowerCase(),
+            blockNumber: header.blockNumber,
+            blockHash: header.blockHash,
+            updatedAt: now(),
+          })
+          .onConflictDoUpdate({
+            target: [
+              indexingHeaders.chainId,
+              indexingHeaders.contract,
+              indexingHeaders.blockNumber,
+            ],
+            set: { blockHash: header.blockHash, updatedAt: now() },
+          })
+          .run();
+      }
+    });
+  }
+
+  getIndexedHeader(
+    chainId: number,
+    contract: string,
+    blockNumber: bigint,
+  ): IndexedBlockHeader | undefined {
+    const row = this.db
+      .select({
+        blockNumber: indexingHeaders.blockNumber,
+        blockHash: indexingHeaders.blockHash,
+      })
+      .from(indexingHeaders)
+      .where(
+        and(
+          eq(indexingHeaders.chainId, chainId),
+          eq(indexingHeaders.contract, contract.toLowerCase()),
+          eq(indexingHeaders.blockNumber, blockNumber.toString()),
+        ),
+      )
+      .get();
+    return row;
+  }
+
+  /**
+   * Remove the orphaned branch after a verified common ancestor and rebuild
+   * all derived projections in the same SQLite transaction.
+   */
+  rollbackToBlock(
+    chainId: number,
+    contract: string,
+    ancestorBlock: bigint,
+    ancestorHash?: string,
+  ): void {
+    const normalizedContract = contract.toLowerCase();
+    this.db.transaction((tx) => {
+      const eventCondition = and(
+        eq(chainEvents.chainId, chainId),
+        eq(chainEvents.contract, normalizedContract),
+        ancestorBlock < 0n
+          ? undefined
+          : sql`CAST(${chainEvents.blockNumber} AS INTEGER) > ${Number(ancestorBlock)}`,
+      );
+      tx.delete(chainEvents).where(eventCondition).run();
+      tx.delete(indexingHeaders)
+        .where(
+          and(
+            eq(indexingHeaders.chainId, chainId),
+            eq(indexingHeaders.contract, normalizedContract),
+            ancestorBlock < 0n
+              ? undefined
+              : sql`CAST(${indexingHeaders.blockNumber} AS INTEGER) > ${Number(ancestorBlock)}`,
+          ),
+        )
+        .run();
+      this.rebuildProjectedState(tx);
+      if (ancestorHash === undefined || ancestorBlock < 0n) {
+        tx.delete(indexingCheckpoints)
+          .where(
+            and(
+              eq(indexingCheckpoints.chainId, chainId),
+              eq(indexingCheckpoints.contract, normalizedContract),
+            ),
+          )
+          .run();
+      } else {
+        tx.insert(indexingCheckpoints)
+          .values({
+            chainId,
+            contract: normalizedContract,
+            blockNumber: ancestorBlock.toString(),
+            blockHash: ancestorHash,
+            updatedAt: now(),
+          })
+          .onConflictDoUpdate({
+            target: [indexingCheckpoints.chainId, indexingCheckpoints.contract],
+            set: {
+              blockNumber: ancestorBlock.toString(),
+              blockHash: ancestorHash,
+              updatedAt: now(),
+            },
+          })
+          .run();
+      }
+    });
+  }
+
+  /** Remove all chain events at or after blockNumber for reorg rollback. */
+  removeEventsAfterBlock(
+    chainId: number,
+    contract: string,
+    blockNumber: bigint,
+  ): void {
+    this.rollbackToBlock(chainId, contract, blockNumber - 1n);
+  }
+
+  /** Public alias for external reorg recovery. */
+  rebuildProjections(): void {
+    this.db.transaction((tx) => this.rebuildProjectedState(tx));
+  }
+
   setCheckpoint(
     chainId: number,
     contract: string,
     blockNumber: string,
     blockHash: string,
   ): void {
+    const normalizedContract = contract.toLowerCase();
     this.db
       .insert(indexingCheckpoints)
-      .values({ chainId, contract, blockNumber, blockHash, updatedAt: now() })
+      .values({
+        chainId,
+        contract: normalizedContract,
+        blockNumber,
+        blockHash,
+        updatedAt: now(),
+      })
       .onConflictDoUpdate({
         target: [indexingCheckpoints.chainId, indexingCheckpoints.contract],
         set: { blockNumber, blockHash, updatedAt: now() },
       })
+      .run();
+  }
+
+  clearCheckpoint(chainId: number, contract: string): void {
+    this.db
+      .delete(indexingCheckpoints)
+      .where(
+        and(
+          eq(indexingCheckpoints.chainId, chainId),
+          eq(indexingCheckpoints.contract, contract.toLowerCase()),
+        ),
+      )
       .run();
   }
 
@@ -760,7 +1293,7 @@ export class ServiceRepository {
       .where(
         and(
           eq(indexingCheckpoints.chainId, chainId),
-          eq(indexingCheckpoints.contract, contract),
+          eq(indexingCheckpoints.contract, contract.toLowerCase()),
         ),
       )
       .get();

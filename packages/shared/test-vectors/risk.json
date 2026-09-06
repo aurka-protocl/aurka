@@ -1,0 +1,39 @@
+{
+  "version": "risk-v1",
+  "chainId": 31337,
+  "policyId": "0x0101010101010101010101010101010101010101010101010101010101010101",
+  "verifyingContract": "0x0000000000000000000000000000000000009999",
+  "watchtower": "0x000000000000000000000000000000000000cafe",
+  "riskMode": "CAUTIOUS",
+  "maximumTradeValue": "37500",
+  "sourceDigest": "0x0202020202020202020202020202020202020202020202020202020202020202",
+  "reasonLabel": "LIQUIDITY_DECLINE",
+  "reasonCode": "0x22b2b6b43ac542c13b0bc0d7e38bc9c8b3b1ac8dc6815af145e261666a850d3f",
+  "issuedAt": 1800000000,
+  "expiresAt": 1800003600,
+  "nonce": "1",
+  "watchtowerAuthorizationEpoch": "1",
+  "policyNonce": "1",
+  "activeBounds": [
+    {
+      "token": "0x0000000000000000000000000000000000001001",
+      "minimumWeightBps": 5600,
+      "maximumWeightBps": 10000,
+      "paused": false
+    },
+    {
+      "token": "0x0000000000000000000000000000000000001002",
+      "minimumWeightBps": 0,
+      "maximumWeightBps": 3400,
+      "paused": false
+    },
+    {
+      "token": "0x0000000000000000000000000000000000001003",
+      "minimumWeightBps": 0,
+      "maximumWeightBps": 1400,
+      "paused": false
+    }
+  ],
+  "activeBoundsHash": "0xf77f12765c7db701fee013730979d0a8bd6ae7034db88a98c683da24a6c8c51d",
+  "eip712Digest": "0x9beeab2a10458ab7196721daa8585bc34c3fdbfa1589a935291e66d7f7cf098d"
+}

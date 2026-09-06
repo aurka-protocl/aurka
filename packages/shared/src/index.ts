@@ -9,5 +9,6 @@ export * from "./primitives.js";
 export * from "./price.js";
 export * from "./quote.js";
 export * from "./risk.js";
+export * from "./router.js";
 export * from "./settlement.js";
 export * from "./trading.js";

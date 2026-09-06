@@ -1,6 +1,52 @@
-# Aqua and SwapVM integration boundary
+# AURKA integration boundaries
 
-Status: reviewed for AURKA-005; local deterministic adapter only.
+Status: reviewed for AURKA-005 and AURKA-007; local deterministic adapters only.
+
+## Graph and Privy pin (AURKA-007)
+
+The implementation was pinned on 2026-09-05 against the current official
+documentation:
+
+- [The Graph GraphQL API](https://thegraph.com/docs/en/subgraphs/querying/graphql-api/)
+  is consumed with server-only HTTP `POST` requests. Queries use deterministic
+  ID cursors (`id_gt`, ascending ID order), and `_meta` is retained as
+  provenance (deployment, indexing-error flag, and indexed block).
+- [The Graph gateway query guidance](https://thegraph.com/docs/en/gateways/subgraphs/consumer-side/serving-queries/)
+  and
+  [API-key management](https://thegraph.com/docs/en/subgraphs/providers/subgraph-studio/managing-api-keys/)
+  are operational references. API keys are sent as a bearer token by
+  `@aurka/graph` and are never part of browser-facing code or logs.
+- [Privy policy controls](https://docs.privy.io/controls/policies/overview) are
+  treated as a second default-deny boundary. The local policy model allows only
+  explicit EVM methods, selectors, chain, target, assets, amount/value, and
+  expiry; policy DENY remains authoritative.
+- [Privy owners and signers](https://docs.privy.io/controls/authorization-keys/owners/overview)
+  define the authority split: owners retain policy/signer administration while
+  additional signers may transact only within their policy.
+- [Privy authorization signatures](https://docs.privy.io/api-reference/authorization-signatures)
+  are required by the production adapter for sensitive wallet RPC calls.
+- The Node integration uses the current
+  [`@privy-io/node`](https://docs.privy.io/basics/nodeJS/advanced/migrating-from-server-auth)
+  surface, pinned to `0.34.0` in `packages/wallet/package.json`. The deprecated
+  `@privy-io/server-auth` package is not used. App secrets and any signing
+  material are runtime-only.
+
+Graph finality is not inferred from a subgraph response alone. The adapter
+compares `_meta.block` and every observation block against an injected canonical
+chain reader, configured lag/finality limits, and block hashes. The documented
+Graph block-hash limitation for non-final state is why an observation can be
+`SAFE` or rejected rather than being treated as final.
+
+The initial DEX source is `fixture-dex-v1` on Anvil/Foundry chain `31337` only.
+There is no production DEX subgraph ID, network, or live smoke test selected in
+this milestone. `packages/graph/subgraph/subgraph.yaml` therefore contains
+reviewed fixture addresses; replacing them is a separately approved deployment
+decision.
+
+The watchtower consumes the normalized observations and produces a pure integer
+decision. A prose explanation is post-decision only. It cannot alter mode,
+thresholds, bounds, maximum transaction value, certificate fields, or wallet
+actions.
 
 ## Reviewed upstreams
 

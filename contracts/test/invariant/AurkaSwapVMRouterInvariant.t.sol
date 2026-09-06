@@ -400,6 +400,14 @@ contract AurkaSwapVMRouterInvariantTest is TestBase {
         handler.step(1_000);
     }
 
+    /// @dev The pinned Foundry version discovers invariant targets through
+    /// this hook rather than the newer targetContract cheatcode. Restricting
+    /// fuzz actions to the handler excludes unsolicited token/Aqua mutations.
+    function targetContracts() external view returns (address[] memory targets) {
+        targets = new address[](1);
+        targets[0] = address(handler);
+    }
+
     /// @dev The pinned Foundry version does not expose targetContract(). The
     /// forwarding action keeps the router handler in the invariant target ABI.
     function step(uint256 seed) external {

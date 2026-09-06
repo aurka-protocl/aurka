@@ -47,13 +47,19 @@ export interface SolverSnapshot {
 }
 
 export interface ProposalSimulation {
-  readonly status: "SUCCEEDED" | "REVERTED" | "STALE";
+  readonly status: "SUCCEEDED" | "REVERTED" | "STALE" | "AUTHORIZATION_PENDING";
   readonly gasEstimate: bigint;
   readonly reason?: string;
 }
 
 export interface RouterSimulator {
   simulate(
+    intent: AtomicSettlementIntent,
+    proposal: AtomicSettlementProposal,
+    snapshot: SolverSnapshot,
+  ): Promise<ProposalSimulation>;
+  /** Optional authoritative check used at the custody/execution boundary. */
+  simulateExact?(
     intent: AtomicSettlementIntent,
     proposal: AtomicSettlementProposal,
     snapshot: SolverSnapshot,

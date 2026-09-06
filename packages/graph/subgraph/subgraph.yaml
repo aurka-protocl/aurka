@@ -1,0 +1,116 @@
+specVersion: 1.3.0
+schema:
+  file: ./schema.graphql
+dataSources:
+  - kind: ethereum
+    name: AurkaSwapVMRouter
+    network: localhost
+    source:
+      # Fixture-only deployment. A production deployment must replace this
+      # address and startBlock through an approved, reviewed manifest change.
+      address: "0x0000000000000000000000000000000000000001"
+      abi: AurkaSwapVMRouter
+      startBlock: 0
+    mapping:
+      kind: ethereum/events
+      apiVersion: 0.0.9
+      language: wasm/assemblyscript
+      entities:
+        - TradeExecuted
+        - FeesRouted
+        - PolicyMutation
+        - RiskObservation
+      abis:
+        - name: AurkaSwapVMRouter
+          file: ./abis/AurkaSwapVMRouter.json
+      eventHandlers:
+        - event:
+            TradeExecuted(indexed bytes32,indexed bytes32,indexed
+            bytes32,bytes32,bytes32,address,address,address,address,uint256,uint256,uint256,uint256,uint256,uint256,bytes32)
+          handler: handleTradeExecuted
+        - event:
+            FeesRouted(indexed bytes32,indexed address,indexed
+            address,address,uint256,uint256,uint256)
+          handler: handleFeesRouted
+  - kind: ethereum
+    name: RiskModeRegistry
+    network: localhost
+    source:
+      address: "0x0000000000000000000000000000000000000002"
+      abi: RiskModeRegistry
+      startBlock: 0
+    mapping:
+      kind: ethereum/events
+      apiVersion: 0.0.9
+      language: wasm/assemblyscript
+      entities:
+        - RiskModeChanged
+        - PolicyMutation
+        - RiskObservation
+      abis:
+        - name: RiskModeRegistry
+          file: ./abis/RiskModeRegistry.json
+      eventHandlers:
+        - event:
+            RiskModeChanged(indexed bytes32,indexed
+            uint8,uint256,uint64,uint256,indexed address,bytes32)
+          handler: handleRiskModeChanged
+        - event:
+            WatchtowerAuthorizationChanged(indexed bytes32,indexed address,bool)
+          handler: handlePolicyMutation
+  - kind: ethereum
+    name: AurkaPolicyRegistry
+    network: localhost
+    source:
+      address: "0x0000000000000000000000000000000000000003"
+      abi: AurkaPolicyRegistry
+      startBlock: 0
+    mapping:
+      kind: ethereum/events
+      apiVersion: 0.0.9
+      language: wasm/assemblyscript
+      entities:
+        - PolicyMutation
+        - RiskObservation
+      abis:
+        - name: AurkaPolicyRegistry
+          file: ./abis/AurkaPolicyRegistry.json
+      eventHandlers:
+        - event:
+            PolicyCreated(indexed bytes32,indexed address,indexed
+            address,uint256)
+          handler: handlePolicyMutation
+        - event:
+            AssetBoundsUpdated(indexed bytes32,indexed
+            address,uint16,uint16,uint256)
+          handler: handlePolicyMutation
+        - event:
+            AssetAdded(indexed bytes32,indexed
+            address,uint8,uint16,uint16,uint256)
+          handler: handlePolicyMutation
+        - event: MaximumTransactionValueUpdated(indexed bytes32,uint256,uint256)
+          handler: handlePolicyMutation
+        - event: FeeConfigurationUpdated(indexed bytes32,uint256)
+          handler: handlePolicyMutation
+        - event: PauseStatusUpdated(indexed bytes32,bool,uint256)
+          handler: handlePolicyMutation
+        - event:
+            TreasuryUpdated(indexed bytes32,indexed address,indexed
+            address,uint256)
+          handler: handlePolicyMutation
+        - event:
+            GovernanceTransferStarted(indexed bytes32,indexed address,indexed
+            address)
+          handler: handlePolicyMutation
+        - event:
+            GovernanceTransferred(indexed bytes32,indexed address,indexed
+            address,uint256)
+          handler: handlePolicyMutation
+        - event:
+            SettlementConfigurationUpdated(indexed bytes32,indexed
+            bytes32,bytes32,indexed address,uint256)
+          handler: handlePolicyMutation
+        - event:
+            PriceProtectionConfigurationUpdated(indexed
+            bytes32,uint64,uint16,uint256)
+          handler: handlePolicyMutation

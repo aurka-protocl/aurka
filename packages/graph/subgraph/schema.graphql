@@ -1,0 +1,92 @@
+type TradeExecuted @entity(immutable: true) {
+  id: ID!
+  chainId: BigInt!
+  contract: Bytes!
+  blockNumber: BigInt!
+  blockHash: Bytes!
+  transactionHash: Bytes!
+  logIndex: BigInt!
+  policyId: Bytes!
+  positionIdHash: Bytes!
+  intentHash: Bytes!
+  proposalHash: Bytes!
+  capacityEpochId: Bytes!
+  trader: Bytes!
+  treasury: Bytes!
+  traderInputToken: Bytes!
+  traderOutputToken: Bytes!
+  traderInputValue: BigInt!
+  traderOutputValue: BigInt!
+  treasuryOutputValue: BigInt!
+  totalFeeAmount: BigInt!
+  consumedBefore: BigInt!
+  consumedAfter: BigInt!
+  expectedPostStateHash: Bytes!
+}
+
+type FeesRouted @entity(immutable: true) {
+  id: ID!
+  chainId: BigInt!
+  contract: Bytes!
+  blockNumber: BigInt!
+  blockHash: Bytes!
+  transactionHash: Bytes!
+  logIndex: BigInt!
+  proposalHash: Bytes!
+  feeToken: Bytes!
+  solver: Bytes!
+  protocolRecipient: Bytes!
+  solverAmount: BigInt!
+  protocolAmount: BigInt!
+  treasuryAmount: BigInt!
+}
+
+type RiskModeChanged @entity(immutable: true) {
+  id: ID!
+  chainId: BigInt!
+  contract: Bytes!
+  blockNumber: BigInt!
+  blockHash: Bytes!
+  transactionHash: Bytes!
+  logIndex: BigInt!
+  policyId: Bytes!
+  riskMode: Int!
+  maximumTradeValue: BigInt!
+  expiresAt: BigInt!
+  nonce: BigInt!
+  watchtower: Bytes!
+  certificateHash: Bytes!
+}
+
+type PolicyMutation @entity(immutable: true) {
+  id: ID!
+  chainId: BigInt!
+  contract: Bytes!
+  blockNumber: BigInt!
+  blockHash: Bytes!
+  transactionHash: Bytes!
+  logIndex: BigInt!
+  policyId: Bytes!
+  eventName: String!
+  nonce: BigInt!
+  payload: Bytes!
+}
+
+type RiskObservation @entity(immutable: true) {
+  id: ID!
+  sourceId: String!
+  sourceKind: String!
+  chainId: BigInt!
+  deploymentId: String!
+  schemaVersion: String!
+  queryVersion: String!
+  signal: String!
+  metricValue: BigInt!
+  sampleSize: BigInt!
+  affectedAssets: [Bytes!]!
+  indexedBlock: BigInt!
+  indexedBlockHash: Bytes!
+  observedAt: BigInt!
+  payloadHash: Bytes!
+  payload: Bytes!
+}

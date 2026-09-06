@@ -5,6 +5,9 @@ on:
     paths:
       - "packages/shared/**"
       - "packages/services/**"
+      - "packages/graph/**"
+      - "packages/agents/watchtower/**"
+      - "packages/wallet/**"
       - "pnpm-lock.yaml"
       - "pnpm-workspace.yaml"
       - ".github/workflows/services.yml"
@@ -12,6 +15,9 @@ on:
     paths:
       - "packages/shared/**"
       - "packages/services/**"
+      - "packages/graph/**"
+      - "packages/agents/watchtower/**"
+      - "packages/wallet/**"
       - "pnpm-lock.yaml"
       - "pnpm-workspace.yaml"
       - ".github/workflows/services.yml"

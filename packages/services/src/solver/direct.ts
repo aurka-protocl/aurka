@@ -122,7 +122,9 @@ export class DirectSolver {
         intent.deadline,
         snapshot.priceProtection.nowSeconds + 60,
       ),
-      simulationStatus: "SUCCEEDED",
+      // A quote has no trader authorization and therefore cannot claim that
+      // the deployed router accepted the eventual transaction.
+      simulationStatus: "AUTHORIZATION_PENDING",
     };
   }
 

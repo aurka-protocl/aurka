@@ -2,7 +2,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import routerCalldataFixture from "../test-vectors/router-execute-partial.json" with { type: "json" };
 
 import {
   FIXTURE_ADDRESSES,
@@ -31,8 +32,16 @@ import { OptimizedSolver } from "../src/solver/optimized.js";
 import { ProposalCollector } from "../src/solver/proposals.js";
 import {
   FixtureProposalSigner,
+  SECP256K1_HALF_ORDER,
+  signDigest,
   verifyProposalSignature,
+  verifySignature,
 } from "../src/solver/signing.js";
+import {
+  JsonRpcHttpTransport,
+  Eip1193RouterSimulator,
+  ROUTER_EXECUTE_SELECTOR,
+} from "../src/solver/index.js";
 import { retryBounded } from "../src/observability.js";
 
 function eventLog(overrides: Partial<ChainLog> = {}): ChainLog {
@@ -92,6 +101,21 @@ function abiWord(value: string | bigint): string {
   }
   if (typeof value === "string") return value.toLowerCase();
   return `0x${value.toString(16).padStart(64, "0")}`;
+}
+
+function calldataWord(data: string, index: number): bigint {
+  const start = 2 + 8 + index * 64;
+  return BigInt(`0x${data.slice(start, start + 64)}`);
+}
+
+function highSTwin(signature: string): string {
+  const order =
+    0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141n;
+  const r = signature.slice(2, 66);
+  const s = BigInt(`0x${signature.slice(66, 130)}`);
+  const v = signature.slice(130, 132) === "1b" ? "1c" : "1b";
+  const highS = (order - s).toString(16).padStart(64, "0");
+  return `0x${r}${highS}${v}`;
 }
 
 function rawRouterEvent(log: ChainLog): ChainLog {
@@ -231,8 +255,244 @@ describe("AURKA service solver", () => {
       expect(result.execution.status).toBe("PENDING");
       expect(result.transactionRequest.chainId).toBe(31337);
       expect(
+        result.transactionRequest.data.startsWith(ROUTER_EXECUTE_SELECTOR),
+      ).toBe(true);
+      expect(
+        result.transactionRequest.data.includes("AURKA_DIRECT_PAIR_V1"),
+      ).toBe(false);
+      expect(
         service.getExecution(result.execution.transactionHash).status,
       ).toBe("PENDING");
+    } finally {
+      service.close();
+    }
+  });
+
+  it("retains authorization-pending proposals for service and HTTP discovery", async () => {
+    const service = new AurkaService({
+      rpcTransport: {
+        request: async () => "0x",
+      },
+    });
+    const handle = createApiServer({ service });
+    await listenApiServer(handle, 0);
+    const address = handle.server.address();
+    if (!address || typeof address === "string")
+      throw new Error("API did not bind a TCP port");
+    const base = `http://127.0.0.1:${address.port}`;
+    const fixture = createCanonicalFixture();
+    try {
+      const solveResponse = await fetch(`${base}/v1/solve`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ intent: fixture.intent }),
+      });
+      expect(solveResponse.status).toBe(200);
+      const solved = await json(solveResponse);
+      expect((solved.data?.simulation as { status: string }).status).toBe(
+        "AUTHORIZATION_PENDING",
+      );
+
+      const proposalHash = solved.data?.proposalHash as string;
+      const stored = service.database.sqlite
+        .prepare(
+          "SELECT status, simulation_status AS simulationStatus FROM proposals WHERE proposal_hash = ?",
+        )
+        .get(proposalHash) as
+        { status: string; simulationStatus: string } | undefined;
+      expect(stored).toEqual({
+        status: "AUTHORIZATION_PENDING",
+        simulationStatus: "AUTHORIZATION_PENDING",
+      });
+
+      const proposals = await fetch(
+        `${base}/v1/intents/${fixture.intent.intentId}/proposals`,
+      );
+      expect(proposals.status).toBe(200);
+      expect((await json(proposals)).data).toHaveLength(1);
+    } finally {
+      await closeApiServer(handle);
+    }
+  });
+
+  it("uses the same ABI calldata for an exact EIP-1193 router simulation", async () => {
+    const fixture = createCanonicalFixture();
+    const calls: Array<{ method: string; params?: readonly unknown[] }> = [];
+    const simulator = new Eip1193RouterSimulator({
+      request: async (input) => {
+        calls.push(input);
+        return "0x";
+      },
+    });
+    const direct = new DirectSolver(
+      new FixtureProvider(fixture),
+      new DeterministicRouterSimulator(),
+      new FixtureProposalSigner(),
+    );
+    const solved = await direct.solve(fixture.intent);
+    const result = await simulator.simulateExact(
+      { ...fixture.intent, signature: `0x${"11".repeat(65)}` },
+      solved.proposal,
+      fixture.snapshot,
+    );
+    expect(result).toEqual({ status: "SUCCEEDED", gasEstimate: 0n });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.method).toBe("eth_call");
+    const transaction = calls[0]?.params?.[0] as {
+      to: string;
+      data: string;
+      value: string;
+    };
+    expect(transaction.to).toBe(FIXTURE_ADDRESSES.router);
+    expect(transaction.data.startsWith(ROUTER_EXECUTE_SELECTOR)).toBe(true);
+    expect(transaction.value).toBe("0x0");
+    expect(calls[0]?.params?.[1]).toBe("0x64");
+  });
+
+  it("rejects null and non-hex eth_call results", async () => {
+    const fixture = createCanonicalFixture();
+    const direct = new DirectSolver(
+      new FixtureProvider(fixture),
+      new DeterministicRouterSimulator(),
+      new FixtureProposalSigner(),
+    );
+    const solved = await direct.solve(fixture.intent);
+    for (const result of [null, "not-hex"]) {
+      const simulator = new Eip1193RouterSimulator({
+        request: async () => result,
+      });
+      await expect(
+        simulator.simulateExact(
+          { ...fixture.intent, signature: `0x${"11".repeat(65)}` },
+          solved.proposal,
+          fixture.snapshot,
+        ),
+      ).resolves.toEqual({
+        status: "REVERTED",
+        gasEstimate: 0n,
+        reason: "Malformed eth_call result",
+      });
+    }
+  });
+
+  it("binds price-input amounts to the executable partial fill", async () => {
+    const fixture = createCanonicalFixture();
+    const intent = {
+      ...fixture.intent,
+      intentId: `0x${"07".repeat(32)}`,
+      requestedValue: "25000",
+    };
+    const service = new AurkaService();
+    try {
+      const submitted = await service.submitIntent(intent);
+      const solved = await service.solve(intent);
+      const result = await service.execute(
+        submitted.intentHash,
+        solved.proposalHash,
+      );
+      expect(calldataWord(result.transactionRequest.data, 94)).toBe(25000n);
+      expect(calldataWord(result.transactionRequest.data, 95)).toBe(
+        BigInt(solved.proposal.traderOutputAmount) +
+          BigInt(solved.proposal.solverFeeAmount) +
+          BigInt(solved.proposal.protocolFeeAmount),
+      );
+      expect(calldataWord(result.transactionRequest.data, 24)).toBe(25000n);
+      expect(result.transactionRequest.data).toBe(
+        routerCalldataFixture.calldata,
+      );
+    } finally {
+      service.close();
+    }
+  });
+
+  it("rejects high-s signature malleability accepted by the old boundary", () => {
+    const signer = new FixtureProposalSigner();
+    const digest = `0x${"09".repeat(32)}`;
+    const signature = signDigest(
+      digest,
+      Uint8Array.from({ length: 32 }, (_, i) => i + 1),
+    );
+    expect(BigInt(`0x${signature.slice(66, 130)}`)).toBeLessThanOrEqual(
+      SECP256K1_HALF_ORDER,
+    );
+    expect(verifySignature(signer.address, digest, signature)).toBe(true);
+    expect(verifySignature(signer.address, digest, highSTwin(signature))).toBe(
+      false,
+    );
+  });
+
+  it("does not call an exact router before trader authorization", async () => {
+    const fixture = createCanonicalFixture();
+    const direct = new DirectSolver(
+      new FixtureProvider(fixture),
+      new Eip1193RouterSimulator({ request: async () => "0x" }),
+      new FixtureProposalSigner(),
+    );
+    const solved = await direct.solve(fixture.intent);
+    expect(solved.simulation.status).toBe("AUTHORIZATION_PENDING");
+  });
+
+  it("rejects malformed JSON-RPC envelopes and preserves revert data", async () => {
+    const transport = new JsonRpcHttpTransport("http://rpc.invalid");
+    vi.stubGlobal("fetch", async () => ({
+      ok: true,
+      json: async () => ({ jsonrpc: "2.0" }),
+    }));
+    await expect(transport.request({ method: "eth_call" })).rejects.toThrow(
+      "missing result",
+    );
+    vi.stubGlobal("fetch", async () => ({
+      ok: true,
+      json: async () => ({
+        jsonrpc: "2.0",
+        error: { message: "execution reverted: 0x1234" },
+      }),
+    }));
+    await expect(transport.request({ method: "eth_call" })).rejects.toThrow(
+      "execution reverted: 0x1234",
+    );
+    vi.unstubAllGlobals();
+  });
+
+  it("exactly simulates an authorized execute request without claiming submission", async () => {
+    const fixture = createCanonicalFixture();
+    const solverAddress = new FixtureProposalSigner().address;
+    const intent = { ...fixture.intent, trader: solverAddress };
+    const calls: Array<{ method: string; params?: readonly unknown[] }> = [];
+    const service = new AurkaService({
+      rpcTransport: {
+        request: async (input) => {
+          calls.push(input);
+          return "0x";
+        },
+      },
+    });
+    const privateKey = Uint8Array.from({ length: 32 }, (_, index) => index + 1);
+    try {
+      const submitted = await service.submitIntent(intent);
+      const solved = await service.solve(intent);
+      const result = await service.execute(
+        submitted.intentHash,
+        solved.proposalHash,
+        signDigest(submitted.intentHash, privateKey),
+      );
+      expect(result.execution.status).toBe("PENDING");
+      expect(
+        result.transactionRequest.data.startsWith(ROUTER_EXECUTE_SELECTOR),
+      ).toBe(true);
+      expect(calls.map((call) => call.method)).toEqual(["eth_call"]);
+      const stored = service.database.sqlite
+        .prepare(
+          "SELECT status, simulation_status AS simulationStatus FROM proposals WHERE proposal_hash = ?",
+        )
+        .get(solved.proposalHash) as {
+        status: string;
+        simulationStatus: string;
+      };
+      expect(stored).toEqual({
+        status: "EXECUTABLE",
+        simulationStatus: "SUCCEEDED",
+      });
     } finally {
       service.close();
     }
@@ -270,22 +530,14 @@ describe("AURKA service solver", () => {
     }
   });
 
-  it("keeps direct fallback when an allowlisted optimized route fails", async () => {
+  it("uses only the deterministic direct pairwise solver", async () => {
     const fixture = createCanonicalFixture();
     const direct = new DirectSolver(
       new FixtureProvider(fixture),
       new DeterministicRouterSimulator(),
       new FixtureProposalSigner(),
     );
-    const solver = new OptimizedSolver(direct, [
-      {
-        id: "failing-local-route",
-        allowlisted: true,
-        solve: async () => {
-          throw new Error("route unavailable");
-        },
-      },
-    ]);
+    const solver = new OptimizedSolver(direct);
     const solved = await solver.solve(fixture.intent);
     expect(solved.simulation.status).toBe("SUCCEEDED");
     expect(solved.fill.executedValue).toBe(50_000n);
@@ -328,6 +580,12 @@ describe("AURKA service solver", () => {
       const result = await indexer.sync(
         {
           getLatestBlock: async () => 2n,
+          getBlockHash: async (blockNumber) =>
+            blockNumber === 0n
+              ? `0x${"00".repeat(32)}`
+              : blockNumber === 1n
+                ? `0x${"10".repeat(32)}`
+                : `0x${"11".repeat(32)}`,
           getLogs: async () => {
             attempts += 1;
             if (attempts < 3) throw new Error("temporary RPC failure");
@@ -355,6 +613,95 @@ describe("AURKA service solver", () => {
       ).toThrow();
     } finally {
       service.close();
+    }
+  });
+
+  it("rejects fetched logs that do not bind to the requested canonical range", async () => {
+    const canonicalHash = (blockNumber: bigint): string =>
+      `0x${blockNumber.toString(16).padStart(2, "0").repeat(32)}`;
+    const cases: readonly {
+      readonly name: string;
+      readonly log: ChainLog;
+      readonly confirmations?: number;
+      readonly checkpoint?: string;
+    }[] = [
+      {
+        name: "wrong chain",
+        log: eventLog({ chainId: 1 }),
+      },
+      {
+        name: "wrong contract",
+        log: eventLog({ contract: `0x${"de".repeat(20)}` }),
+      },
+      {
+        name: "wrong block hash",
+        log: eventLog({ blockHash: `0x${"aa".repeat(32)}` }),
+      },
+      {
+        name: "reorg between log and header reads",
+        log: eventLog({ blockHash: `0x${"aa".repeat(32)}` }),
+      },
+      {
+        name: "below requested range",
+        log: eventLog(),
+        checkpoint: "1",
+      },
+      {
+        name: "above sufficiently confirmed range",
+        log: eventLog({
+          blockNumber: "3",
+          blockHash: canonicalHash(3n),
+        }),
+        confirmations: 1,
+      },
+    ];
+
+    for (const testCase of cases) {
+      const database = new ServiceDatabase();
+      const service = new AurkaService({ database, seedFixture: true });
+      const indexer = new ChainEventIndexer(service.repository);
+      if (testCase.checkpoint !== undefined) {
+        service.repository.setCheckpoint(
+          31337,
+          FIXTURE_ADDRESSES.router,
+          testCase.checkpoint,
+          canonicalHash(BigInt(testCase.checkpoint)),
+        );
+      }
+      try {
+        const source = {
+          getLatestBlock: async () => 3n,
+          getBlockHash: async (blockNumber: bigint) =>
+            canonicalHash(blockNumber),
+          getLogs: async () => [testCase.log],
+        };
+        await expect(
+          indexer.sync(
+            source,
+            31337,
+            FIXTURE_ADDRESSES.router,
+            testCase.confirmations ?? 0,
+          ),
+        ).rejects.toThrow();
+        expect(
+          service.repository.listEvents(31337, 20).items,
+          testCase.name,
+        ).toHaveLength(0);
+        const checkpoint = service.repository.getCheckpoint(
+          31337,
+          FIXTURE_ADDRESSES.router,
+        );
+        if (testCase.checkpoint === undefined) {
+          expect(checkpoint, testCase.name).toBeUndefined();
+        } else {
+          expect(checkpoint, testCase.name).toMatchObject({
+            blockNumber: testCase.checkpoint,
+            blockHash: canonicalHash(BigInt(testCase.checkpoint)),
+          });
+        }
+      } finally {
+        service.close();
+      }
     }
   });
 
@@ -458,6 +805,36 @@ describe("AURKA HTTP API", () => {
       expect((await json(executeRetry)).data?.execution).toEqual(
         executeBody.data?.execution,
       );
+
+      const conflict = await fetch(`${base}/v1/intents`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "Idempotency-Key": "intent-create-1",
+        },
+        body: JSON.stringify({
+          intent: { ...fixture.intent, nonce: "2" },
+        }),
+      });
+      expect(conflict.status).toBe(409);
+
+      const concurrentHash = "0x" + "33".repeat(32);
+      expect(
+        handle.service.repository.claimIdempotencyKey(
+          "intent-concurrent-1",
+          "POST",
+          "/v1/intents",
+          concurrentHash,
+        ),
+      ).toBeUndefined();
+      expect(() =>
+        handle.service.repository.claimIdempotencyKey(
+          "intent-concurrent-1",
+          "POST",
+          "/v1/intents",
+          concurrentHash,
+        ),
+      ).toThrow("still in progress");
     } finally {
       await closeApiServer(handle);
     }
@@ -529,6 +906,268 @@ describe("AURKA event projection", () => {
       expect(service.repository.listEvents(31337, 20).items[0]?.name).toBe(
         "CapacityEpochActivated",
       );
+    } finally {
+      service.close();
+    }
+  });
+
+  it("rewinds and replays a replacement checkpointed block after restart", async () => {
+    const database = new ServiceDatabase();
+    const service = new AurkaService({ database, seedFixture: true });
+    const indexer = new ChainEventIndexer(service.repository);
+    let forked = false;
+    const originalTrade = rawRouterEvent(
+      eventLog({
+        blockNumber: "2",
+        blockHash: `0x${"11".repeat(32)}`,
+        transactionHash: `0x${"21".repeat(32)}`,
+        name: "TradeExecuted",
+        payload: tradePayload("50000"),
+      }),
+    );
+    const replacementTrade = rawRouterEvent(
+      eventLog({
+        blockNumber: "2",
+        blockHash: `0x${"12".repeat(32)}`,
+        transactionHash: `0x${"22".repeat(32)}`,
+        name: "TradeExecuted",
+        payload: tradePayload("30000"),
+      }),
+    );
+    try {
+      const source = {
+        getLatestBlock: async () => 2n,
+        getBlockHash: async (blockNumber: bigint) => {
+          if (blockNumber === 1n) return `0x${"10".repeat(32)}`;
+          if (blockNumber === 2n)
+            return `0x${(forked ? "12" : "11").repeat(32)}`;
+          return `0x${"00".repeat(32)}`;
+        },
+        getLogs: async ({ fromBlock }: { fromBlock: bigint }) =>
+          fromBlock <= 1n ? [eventLog(), originalTrade] : [replacementTrade],
+      };
+      await indexer.sync(source, 31337, FIXTURE_ADDRESSES.router);
+      expect(
+        service.repository.getCheckpoint(31337, FIXTURE_ADDRESSES.router)
+          ?.blockHash,
+      ).toBe(`0x${"11".repeat(32)}`);
+
+      forked = true;
+      const result = await indexer.sync(
+        source,
+        31337,
+        FIXTURE_ADDRESSES.router,
+      );
+      expect(result.inserted).toBe(1);
+      expect(
+        service.repository.getCapacityEpoch(
+          FIXTURE_POSITION_ID,
+          FIXTURE_ADDRESSES.weth,
+          FIXTURE_ADDRESSES.usdc,
+        )?.consumedValue,
+      ).toBe("30000");
+      const events = service.repository.listEvents(31337, 20).items;
+      expect(events).toHaveLength(2);
+      expect(
+        events.some(
+          (event) => event.transactionHash === `0x${"21".repeat(32)}`,
+        ),
+      ).toBe(false);
+      expect(
+        events.some(
+          (event) => event.transactionHash === `0x${"22".repeat(32)}`,
+        ),
+      ).toBe(true);
+    } finally {
+      service.close();
+    }
+  });
+
+  it("rewinds a multi-block fork to the retained common ancestor", async () => {
+    const database = new ServiceDatabase();
+    const service = new AurkaService({ database, seedFixture: true });
+    const indexer = new ChainEventIndexer(service.repository);
+    let forked = false;
+    const oldTrade2 = rawRouterEvent(
+      eventLog({
+        blockNumber: "2",
+        blockHash: `0x${"11".repeat(32)}`,
+        transactionHash: `0x${"23".repeat(32)}`,
+        name: "TradeExecuted",
+        payload: tradePayload("20000"),
+      }),
+    );
+    const oldTrade3 = rawRouterEvent(
+      eventLog({
+        blockNumber: "3",
+        blockHash: `0x${"13".repeat(32)}`,
+        transactionHash: `0x${"24".repeat(32)}`,
+        name: "TradeExecuted",
+        payload: tradePayload("50000"),
+      }),
+    );
+    const replacementTrade2 = rawRouterEvent(
+      eventLog({
+        blockNumber: "2",
+        blockHash: `0x${"12".repeat(32)}`,
+        transactionHash: `0x${"25".repeat(32)}`,
+        name: "TradeExecuted",
+        payload: tradePayload("15000"),
+      }),
+    );
+    const replacementTrade3 = rawRouterEvent(
+      eventLog({
+        blockNumber: "3",
+        blockHash: `0x${"14".repeat(32)}`,
+        transactionHash: `0x${"26".repeat(32)}`,
+        name: "TradeExecuted",
+        payload: tradePayload("45000"),
+      }),
+    );
+    try {
+      const source = {
+        getLatestBlock: async () => 3n,
+        getBlockHash: async (blockNumber: bigint) => {
+          if (blockNumber === 0n) return `0x${"00".repeat(32)}`;
+          if (blockNumber === 1n) return `0x${"10".repeat(32)}`;
+          if (blockNumber === 2n)
+            return `0x${(forked ? "12" : "11").repeat(32)}`;
+          if (blockNumber === 3n)
+            return `0x${(forked ? "14" : "13").repeat(32)}`;
+          return undefined;
+        },
+        getLogs: async ({ fromBlock }: { fromBlock: bigint }) =>
+          fromBlock <= 1n
+            ? [eventLog(), oldTrade2, oldTrade3]
+            : [replacementTrade2, replacementTrade3],
+      };
+      await indexer.sync(source, 31337, FIXTURE_ADDRESSES.router);
+      forked = true;
+      const result = await indexer.sync(
+        source,
+        31337,
+        FIXTURE_ADDRESSES.router,
+      );
+      expect(result.inserted).toBe(2);
+      expect(
+        service.repository.getCapacityEpoch(
+          FIXTURE_POSITION_ID,
+          FIXTURE_ADDRESSES.weth,
+          FIXTURE_ADDRESSES.usdc,
+        )?.consumedValue,
+      ).toBe("45000");
+      const events = service.repository.listEvents(31337, 20).items;
+      expect(events).toHaveLength(3);
+      expect(
+        events.some((event) => event.blockHash === `0x${"11".repeat(32)}`),
+      ).toBe(false);
+      expect(
+        events.some((event) => event.blockHash === `0x${"13".repeat(32)}`),
+      ).toBe(false);
+      expect(
+        service.repository.getCheckpoint(31337, FIXTURE_ADDRESSES.router)
+          ?.blockHash,
+      ).toBe(`0x${"14".repeat(32)}`);
+    } finally {
+      service.close();
+    }
+  });
+
+  it("advances empty ranges only to a verified canonical block", async () => {
+    const database = new ServiceDatabase();
+    const service = new AurkaService({ database, seedFixture: true });
+    const indexer = new ChainEventIndexer(service.repository);
+    let reads = 0;
+    try {
+      const source = {
+        getLatestBlock: async () => 3n,
+        getBlockHash: async (blockNumber: bigint) =>
+          `0x${blockNumber.toString(16).padStart(2, "0").repeat(32)}`,
+        getLogs: async () => {
+          reads += 1;
+          return [];
+        },
+      };
+      const first = await indexer.sync(source, 31337, FIXTURE_ADDRESSES.router);
+      expect(reads).toBe(1);
+      expect(first.checkpoint?.blockNumber).toBe("3");
+      expect(
+        service.repository.getCheckpoint(31337, FIXTURE_ADDRESSES.router)
+          ?.blockNumber,
+      ).toBe("3");
+      const second = await indexer.sync(
+        source,
+        31337,
+        FIXTURE_ADDRESSES.router,
+      );
+      expect(reads).toBe(1);
+      expect(second.checkpoint?.blockNumber).toBe("3");
+    } finally {
+      service.close();
+    }
+  });
+
+  it("uses retained empty-block headers during a deeper restart reorg", async () => {
+    const database = new ServiceDatabase();
+    const service = new AurkaService({ database, seedFixture: true });
+    const indexer = new ChainEventIndexer(service.repository);
+    let forked = false;
+    const oldTrade = rawRouterEvent(
+      eventLog({
+        blockNumber: "4",
+        blockHash: `0x${"15".repeat(32)}`,
+        transactionHash: `0x${"27".repeat(32)}`,
+        name: "TradeExecuted",
+        payload: tradePayload("50000"),
+      }),
+    );
+    const replacementTrade = rawRouterEvent(
+      eventLog({
+        blockNumber: "4",
+        blockHash: `0x${"16".repeat(32)}`,
+        transactionHash: `0x${"28".repeat(32)}`,
+        name: "TradeExecuted",
+        payload: tradePayload("42000"),
+      }),
+    );
+    try {
+      const source = {
+        getLatestBlock: async () => 4n,
+        getBlockHash: async (blockNumber: bigint) => {
+          if (blockNumber === 0n) return `0x${"00".repeat(32)}`;
+          if (blockNumber === 1n) return `0x${"10".repeat(32)}`;
+          if (blockNumber === 2n)
+            return `0x${(forked ? "12" : "11").repeat(32)}`;
+          if (blockNumber === 3n)
+            return `0x${(forked ? "14" : "13").repeat(32)}`;
+          if (blockNumber === 4n)
+            return `0x${(forked ? "16" : "15").repeat(32)}`;
+          return undefined;
+        },
+        getLogs: async ({ fromBlock }: { fromBlock: bigint }) =>
+          fromBlock <= 1n ? [eventLog(), oldTrade] : [replacementTrade],
+      };
+      await indexer.sync(source, 31337, FIXTURE_ADDRESSES.router);
+      forked = true;
+      await indexer.sync(source, 31337, FIXTURE_ADDRESSES.router);
+      expect(
+        service.repository.getCapacityEpoch(
+          FIXTURE_POSITION_ID,
+          FIXTURE_ADDRESSES.weth,
+          FIXTURE_ADDRESSES.usdc,
+        )?.consumedValue,
+      ).toBe("42000");
+      const events = service.repository.listEvents(31337, 20).items;
+      expect(events).toHaveLength(2);
+      expect(
+        events.some(
+          (event) => event.transactionHash === oldTrade.transactionHash,
+        ),
+      ).toBe(false);
+      expect(
+        service.repository.getIndexedHeader(31337, FIXTURE_ADDRESSES.router, 2n)
+          ?.blockHash,
+      ).toBe(`0x${"12".repeat(32)}`);
     } finally {
       service.close();
     }
