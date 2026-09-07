@@ -22,7 +22,10 @@
   "dependencies": {
     "@noble/hashes": "^2.4.0",
     "@privy-io/node": "0.34.0",
-    "zod": "catalog:"
+    "zod": "catalog:",
+    "@aurka/watchtower": "workspace:*",
+    "@aurka/shared": "workspace:*",
+    "viem": "2.56.3"
   },
   "devDependencies": {
     "@types/node": "^24.3.0",

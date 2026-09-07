@@ -35,6 +35,8 @@ import {
   riskObservations,
   riskEvaluations,
   riskJobs,
+  riskStates,
+  riskWorkflows,
   riskAuditEvents,
   walletPolicies,
 } from "./schema.js";
@@ -207,6 +209,55 @@ export class ServiceRepository {
     };
   }
 
+  transaction<T>(action: () => T): T {
+    return this.db.transaction(action, { behavior: "immediate" });
+  }
+  getRiskState(positionId: string): Record<string, unknown> | undefined {
+    const row = this.db
+      .select()
+      .from(riskStates)
+      .where(eq(riskStates.positionId, positionId))
+      .get();
+    return row ? parse<Record<string, unknown>>(row.stateJson) : undefined;
+  }
+  saveRiskState(positionId: string, state: Record<string, unknown>): void {
+    this.db
+      .insert(riskStates)
+      .values({ positionId, stateJson: json(state) })
+      .onConflictDoUpdate({
+        target: riskStates.positionId,
+        set: { stateJson: json(state) },
+      })
+      .run();
+  }
+
+  getRiskWorkflow(positionId: string): Record<string, unknown> | undefined {
+    const row = this.db
+      .select()
+      .from(riskWorkflows)
+      .where(eq(riskWorkflows.positionId, positionId))
+      .get();
+    return row ? parse<Record<string, unknown>>(row.payloadJson) : undefined;
+  }
+  saveRiskWorkflow(positionId: string, payload: Record<string, unknown>): void {
+    this.db
+      .insert(riskWorkflows)
+      .values({ positionId, payloadJson: json(payload) })
+      .onConflictDoUpdate({
+        target: riskWorkflows.positionId,
+        set: { payloadJson: json(payload) },
+      })
+      .run();
+  }
+  ownsRiskJob(id: string, attempt: number): boolean {
+    const row = this.db
+      .select()
+      .from(riskJobs)
+      .where(eq(riskJobs.id, id))
+      .get();
+    return row?.status === "RUNNING" && row.attempt === attempt;
+  }
+
   saveRiskCertificate(
     hash: string,
     certificate: Record<string, unknown>,
@@ -312,10 +363,7 @@ export class ServiceRepository {
       .select()
       .from(riskEvaluations)
       .where(eq(riskEvaluations.positionId, positionId))
-      .orderBy(
-        desc(riskEvaluations.evaluatedAt),
-        asc(riskEvaluations.evaluationHash),
-      )
+      .orderBy(desc(riskEvaluations.evaluatedAt), sql`rowid DESC`)
       .limit(1)
       .get();
     return row ? parse<Record<string, unknown>>(row.evaluationJson) : undefined;
@@ -359,7 +407,7 @@ export class ServiceRepository {
         .where(
           and(
             eq(riskJobs.id, id),
-            eq(riskJobs.status, "QUEUED"),
+            or(eq(riskJobs.status, "QUEUED"), eq(riskJobs.status, "RUNNING")),
             lte(riskJobs.nextRunAt, nowSeconds),
           ),
         )
@@ -367,8 +415,13 @@ export class ServiceRepository {
       if (!row) return undefined;
       transaction
         .update(riskJobs)
-        .set({ status: "RUNNING", attempt: row.attempt + 1, updatedAt: now() })
-        .where(and(eq(riskJobs.id, id), eq(riskJobs.status, "QUEUED")))
+        .set({
+          status: "RUNNING",
+          attempt: row.attempt + 1,
+          nextRunAt: nowSeconds + 120,
+          updatedAt: now(),
+        })
+        .where(and(eq(riskJobs.id, id), eq(riskJobs.attempt, row.attempt)))
         .run();
       return {
         id: row.id,
@@ -377,6 +430,35 @@ export class ServiceRepository {
         attempt: row.attempt + 1,
       };
     });
+  }
+
+  releaseRiskJob(id: string, attempt: number, nextRunAt: number): void {
+    this.db
+      .update(riskJobs)
+      .set({ status: "QUEUED", nextRunAt, updatedAt: now() })
+      .where(
+        and(
+          eq(riskJobs.id, id),
+          eq(riskJobs.attempt, attempt),
+          eq(riskJobs.status, "RUNNING"),
+        ),
+      )
+      .run();
+  }
+  ensureRiskJob(id: string, positionId: string, nextRunAt: number): void {
+    this.db
+      .insert(riskJobs)
+      .values({
+        id,
+        positionId,
+        kind: "CERTIFICATE_RENEWAL",
+        status: "QUEUED",
+        attempt: 0,
+        nextRunAt,
+        updatedAt: now(),
+      })
+      .onConflictDoNothing()
+      .run();
   }
 
   completeRiskJob(id: string, nextRunAt = now()): void {
@@ -610,7 +692,15 @@ export class ServiceRepository {
     return this.db
       .select()
       .from(proposals)
-      .where(eq(proposals.intentHash, intentHash))
+      .where(
+        and(
+          eq(proposals.intentHash, intentHash),
+          or(
+            eq(proposals.simulationStatus, "SUCCEEDED"),
+            eq(proposals.simulationStatus, "AUTHORIZATION_PENDING"),
+          ),
+        ),
+      )
       .orderBy(desc(proposals.simulationStatus), asc(proposals.proposalHash))
       .limit(limit)
       .all()

@@ -116,8 +116,9 @@ export const readinessResponseSchema = z
   .object({
     status: z.enum(["ready", "not_ready"]),
     database: z.enum(["ok", "error"]),
-    rpc: z.enum(["fixture-only", "configured"]),
-    indexerLagBlocks: z.number().int().nonnegative().safe(),
+    rpc: z.enum(["fixture-only", "configured", "error"]),
+    indexerLagBlocks: z.number().int().nonnegative().safe().nullable(),
+    risk: z.enum(["not_configured", "unverified"]),
   })
   .strict();
 
@@ -189,11 +190,30 @@ export const riskCertificateRequestSchema = z
   })
   .strict();
 
+export const riskCertificateResponseSchema = z
+  .object({
+    positionId: identifierSchema,
+    certificateHash: bytes32Schema,
+    certificate: riskCertificateSchema,
+    state: z.enum(["SIGNED", "SUBMITTED", "ACTIVE", "EXPIRED", "REVOKED"]),
+    submissionState: z.enum(["NOT_SUBMITTED", "SUBMITTED"]),
+  })
+  .strict();
+
 export const riskPositionResponseSchema = z
   .object({
     positionId: identifierSchema,
     hardPolicy: z.record(z.string(), z.unknown()),
-    effective: riskEvaluationSchema,
+    effective: z
+      .object({
+        source: z.enum(["REGISTRY", "UNAVAILABLE"]),
+        mode: z.enum(["NORMAL", "CAUTIOUS", "SHOCK", "PAUSED"]).nullable(),
+        maximumTradeValue: uint256StringSchema.nullable(),
+        activeBounds: z.array(activeAssetBoundSchema),
+        observedAt: z.number().int().nonnegative().nullable(),
+      })
+      .strict(),
+    proposed: riskEvaluationSchema.nullable(),
     certificate: riskCertificateSchema.nullable(),
     certificateState: z.enum([
       "NONE",
@@ -212,11 +232,27 @@ export const riskPositionResponseSchema = z
         expiresAt: z.number().int().nonnegative().safe(),
         policyFingerprint: bytes32Schema,
       })
-      .strict(),
+      .strict()
+      .nullable(),
   })
   .strict();
 
+export type RiskPositionResponse = z.infer<typeof riskPositionResponseSchema>;
 export type ApiError = z.infer<typeof apiErrorSchema>;
 export type ApiResponse<T> =
   | { readonly ok: true; readonly data: T }
   | { readonly ok: false; readonly error: ApiError };
+
+export const prepareIntentRequestSchema = z
+  .object({
+    positionId: identifierSchema,
+    trader: addressSchema,
+    traderInputToken: addressSchema,
+    traderOutputToken: addressSchema,
+    requestedValue: uint256StringSchema,
+    minimumTraderOutputValue: uint256StringSchema,
+    nonce: uint256StringSchema,
+    deadline: z.number().int().positive().safe(),
+  })
+  .strict();
+export type PrepareIntentRequest = z.infer<typeof prepareIntentRequestSchema>;

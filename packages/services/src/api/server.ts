@@ -8,6 +8,7 @@ import {
 import { URL } from "node:url";
 
 import {
+  prepareIntentRequestSchema,
   apiFailureSchema,
   apiResponseSchema,
   directionalCapacitySchema,
@@ -208,25 +209,111 @@ async function withIdempotency<T>(
   }
 }
 
-function openApi(): Record<string, unknown> {
+export function openApi(): Record<string, unknown> {
+  const contracts: [string, string, z.ZodType | undefined, z.ZodType][] = [
+    ["/health", "get", undefined, healthResponseSchema],
+    ["/ready", "get", undefined, readinessResponseSchema],
+    ["/v1/positions", "get", undefined, positionsResponseSchema],
+    ["/v1/positions/{id}", "get", undefined, positionSchema],
+    [
+      "/v1/positions/{id}/capacity",
+      "get",
+      undefined,
+      directionalCapacitySchema,
+    ],
+    [
+      "/v1/intents/prepare",
+      "post",
+      prepareIntentRequestSchema,
+      atomicSettlementIntentSchema,
+    ],
+    [
+      "/v1/intents",
+      "post",
+      submitIntentRequestSchema,
+      submitIntentResponseSchema,
+    ],
+    ["/v1/intents/{id}", "get", undefined, atomicSettlementIntentSchema],
+    ["/v1/intents/{id}/proposals", "get", undefined, proposalsResponseSchema],
+    ["/v1/quote", "post", quoteRequestSchema, quoteSchema],
+    ["/v1/solve", "post", solveRequestSchema, solveResponseSchema],
+    ["/v1/execute", "post", executeRequestSchema, executeResponseSchema],
+    ["/v1/executions/{hash}", "get", undefined, executionSchema],
+    [
+      "/v1/risk/evaluate",
+      "post",
+      riskEvaluateRequestSchema,
+      riskEvaluateResponseSchema,
+    ],
+    [
+      "/v1/risk/certificates",
+      "post",
+      riskCertificateRequestSchema,
+      riskCertificateResponseSchema,
+    ],
+    ["/v1/risk/{positionId}", "get", undefined, riskPositionResponseSchema],
+  ];
+  const content = (schema: z.ZodType) => ({
+    "application/json": {
+      schema: z.toJSONSchema(schema, { unrepresentable: "any" }),
+    },
+  });
+  const paths: Record<string, unknown> = {};
+  for (const [path, method, input, output] of contracts) {
+    const parameters: unknown[] = [...path.matchAll(/\{([^}]+)\}/g)].map(
+      (match) => ({
+        name: match[1],
+        in: "path",
+        required: true,
+        schema: { type: "string" },
+      }),
+    );
+    if (path === "/v1/positions")
+      parameters.push(
+        {
+          name: "limit",
+          in: "query",
+          schema: { type: "integer", minimum: 1, maximum: 100 },
+        },
+        { name: "cursor", in: "query", schema: { type: "string" } },
+      );
+    if (path.endsWith("/capacity"))
+      for (const name of ["traderInputToken", "traderOutputToken"])
+        parameters.push({
+          name,
+          in: "query",
+          required: true,
+          schema: { type: "string", pattern: "^0x[0-9a-fA-F]{40}$" },
+        });
+    const success =
+      path === "/v1/execute"
+        ? "202"
+        : path === "/v1/intents" || path === "/v1/risk/certificates"
+          ? "201"
+          : "200";
+    paths[path] = {
+      [method]: {
+        parameters,
+        ...(input
+          ? { requestBody: { required: true, content: content(input) } }
+          : {}),
+        responses: {
+          [success]: {
+            description: "Success",
+            content: content(apiResponseSchema(output)),
+          },
+          default: {
+            description: "Typed API error",
+            content: content(apiFailureSchema),
+          },
+        },
+      },
+    };
+  }
   return {
     openapi: "3.1.0",
-    info: { title: "AURKA Solver and Settlement API", version: "0.1.0" },
-    paths: {
-      "/v1/positions": { get: { operationId: "listPositions" } },
-      "/v1/positions/{id}": { get: { operationId: "getPosition" } },
-      "/v1/positions/{id}/capacity": { get: { operationId: "getCapacity" } },
-      "/v1/intents": { post: { operationId: "createIntent" } },
-      "/v1/intents/{id}": { get: { operationId: "getIntent" } },
-      "/v1/quote": { post: { operationId: "quote" } },
-      "/v1/solve": { post: { operationId: "solve" } },
-      "/v1/intents/{id}/proposals": { get: { operationId: "listProposals" } },
-      "/v1/execute": { post: { operationId: "execute" } },
-      "/v1/executions/{hash}": { get: { operationId: "getExecution" } },
-      "/v1/risk/evaluate": { post: { operationId: "evaluateRisk" } },
-      "/v1/risk/certificates": { post: { operationId: "saveRiskCertificate" } },
-      "/v1/risk/{positionId}": { get: { operationId: "getRisk" } },
-    },
+    info: { title: "AURKA API", version: "0.2.0" },
+    paths,
   };
 }
 
@@ -254,14 +341,34 @@ async function handle(
       const ready = service.database.sqlite
         .prepare("SELECT 1 AS ready")
         .get() as { ready: number };
+      let rpc: "fixture-only" | "configured" | "error" = "fixture-only";
+      if (service.rpcTransport) {
+        try {
+          const chain = await service.rpcTransport.request({
+            method: "eth_chainId",
+            params: [],
+          });
+          if (
+            typeof chain !== "string" ||
+            !/^0x[0-9a-fA-F]+$/.test(chain) ||
+            BigInt(chain) !== BigInt(service.runtime.chainId)
+          )
+            throw new Error("RPC chain mismatch");
+          rpc = "configured";
+        } catch {
+          rpc = "error";
+        }
+      }
       sendSuccess(
         response,
         200,
         {
-          status: ready.ready === 1 ? "ready" : "not_ready",
+          status:
+            ready.ready === 1 && rpc === "fixture-only" ? "ready" : "not_ready",
           database: ready.ready === 1 ? "ok" : "error",
-          rpc: service.runtime.rpc,
-          indexerLagBlocks: 0,
+          rpc,
+          indexerLagBlocks: null,
+          risk: service.riskService.diagnostics,
         },
         request,
         readinessResponseSchema,
@@ -319,7 +426,7 @@ async function handle(
       sendSuccess(
         response,
         200,
-        service.riskService.getPosition(
+        await service.riskService.getPositionLive(
           decodeURIComponent(riskPositionMatch[1]!),
         ),
         request,
@@ -329,6 +436,19 @@ async function handle(
     }
 
     const payload = method === "POST" ? await body(request, limit) : undefined;
+    if (method === "POST" && path === "/v1/intents/prepare") {
+      const input = prepareIntentRequestSchema.parse(payload);
+      service.getPosition(input.positionId);
+      if (!service.provider.prepareIntent)
+        throw new ServiceError(
+          "PREPARATION_UNAVAILABLE",
+          "The configured provider does not support intent preparation",
+          503,
+        );
+      const intent = await service.provider.prepareIntent(input);
+      sendSuccess(response, 200, intent, request, atomicSettlementIntentSchema);
+      return;
+    }
     if (method === "POST" && path === "/v1/risk/evaluate") {
       const input = riskEvaluateRequestSchema.parse(payload);
       const result = await withIdempotency(

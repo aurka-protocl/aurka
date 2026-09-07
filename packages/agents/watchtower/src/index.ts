@@ -422,7 +422,22 @@ export function evaluateRisk(input: EvaluateRiskInput): WatchtowerEvaluation {
     if ((triggered.get(mode)?.size ?? 0) >= configuration.requiredQuorum)
       desired = mode;
   }
-  const failSafe = valid.length === 0 || invalidReasons.length > 0;
+  const missingCoverage = configuration.thresholds.some(
+    (threshold) =>
+      new Set(
+        valid
+          .filter(
+            (observation) =>
+              observation.signal === threshold.signal &&
+              assetsOverlap(
+                threshold.affectedAssets,
+                observation.affectedAssets,
+              ),
+          )
+          .map((observation) => observation.sourceId),
+      ).size < configuration.requiredQuorum,
+  );
+  const failSafe = missingCoverage || invalidReasons.length > 0;
   if (
     failSafe &&
     riskModeRank(desired) < riskModeRank(configuration.failSafeMode)
@@ -443,7 +458,9 @@ export function evaluateRisk(input: EvaluateRiskInput): WatchtowerEvaluation {
       input.currentState === undefined ||
       input.nowSeconds >= input.currentState.cooldownUntil;
     desired =
-      cooldownComplete && recoverySources.size >= configuration.recoveryQuorum
+      !failSafe &&
+      cooldownComplete &&
+      recoverySources.size >= configuration.recoveryQuorum
         ? desired
         : previousMode;
   }

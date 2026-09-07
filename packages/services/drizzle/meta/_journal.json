@@ -36,6 +36,20 @@
       "when": 1788825600000,
       "tag": "0004_risk_watchtower",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1788825600001,
+      "tag": "0005_risk_states",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1788825600002,
+      "tag": "0006_risk_workflows",
+      "breakpoints": true
     }
   ]
 }

@@ -58,3 +58,17 @@ This repository is under active development. It is not audited and must not be
 used with production funds.
 
 # aurka
+
+## SDK and local applications
+
+Run `pnpm install --frozen-lockfile` and `pnpm build` at the repository root.
+Start the API with `pnpm --filter @aurka/services start` (port 8787), then
+`pnpm --filter @aurka/treasury-app dev` (3001) or
+`pnpm --filter @aurka/trader-app dev` (3002). The development proxies forward
+`/api` to the API with that prefix removed.
+
+The trader can prepare an intent, quote, solve, and request unsigned execution
+calldata after supplying an external trader signature. It does not broadcast.
+Unavailable balances, P&L, history feeds and effective risk are labeled as such.
+See [SDK usage](packages/sdk/README.md), [API semantics](docs/api.md), and
+[watchtower runtime requirements](docs/risk-watchtower.md).

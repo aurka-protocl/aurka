@@ -1,3 +1,8 @@
+import type { RegistryRiskReader } from "./risk-service.js";
+import { pathToFileURL } from "node:url";
+import { resolve } from "node:path";
+import { startRiskWorker, type RiskCertificateWorker } from "./risk-worker.js";
+import { LocalDemoProvider } from "./fixture.js";
 import { loadConfig } from "./config.js";
 import { ServiceDatabase } from "./db/database.js";
 import { createApiServer, listenApiServer } from "./api/server.js";
@@ -34,6 +39,7 @@ if (command === "migrate" || command === "check") {
       database,
       chainId: config.CHAIN_ID,
       indexConfirmations: config.INDEX_CONFIRMATIONS,
+      ...(!config.RPC_URL ? { provider: new LocalDemoProvider() } : {}),
       ...(config.SETTLEMENT_CONTRACT
         ? { settlementContract: config.SETTLEMENT_CONTRACT }
         : {}),
@@ -42,6 +48,40 @@ if (command === "migrate" || command === "check") {
         : {}),
     }),
   });
+  let stopRiskWorker: (() => Promise<void>) | undefined;
+  if (config.RISK_RUNTIME_MODULE) {
+    const runtime = (await import(
+      pathToFileURL(resolve(config.RISK_RUNTIME_MODULE)).href
+    )) as {
+      createRiskRuntime?: (service: AurkaService) => Promise<{
+        worker: RiskCertificateWorker;
+        positions: string[];
+        readRisk?: RegistryRiskReader;
+        riskRegistry?: string;
+      }>;
+    };
+    if (typeof runtime.createRiskRuntime !== "function")
+      throw new Error("Risk runtime must export createRiskRuntime");
+    const configured = await runtime.createRiskRuntime(handle.service);
+    if (
+      !Array.isArray(configured.positions) ||
+      configured.positions.some((position) => typeof position !== "string") ||
+      typeof configured.worker?.tick !== "function"
+    )
+      throw new Error("Invalid risk runtime");
+    if (configured.riskRegistry)
+      handle.service.riskService.configureCertificateRegistry(
+        configured.riskRegistry,
+      );
+    if (configured.readRisk)
+      handle.service.riskService.configureRegistryReader(configured.readRisk);
+    stopRiskWorker = startRiskWorker(
+      configured.worker,
+      configured.positions,
+      () =>
+        console.error("Risk worker attempt failed; inspect its audit state"),
+    );
+  }
   await listenApiServer(handle, config.PORT, config.HOST);
   console.log(
     `AURKA services listening on http://${config.HOST}:${config.PORT}`,
@@ -51,6 +91,7 @@ if (command === "migrate" || command === "check") {
       await new Promise<void>((resolve) =>
         handle.server.close(() => resolve()),
       );
+      await stopRiskWorker?.();
       handle.service.close();
     })();
   };

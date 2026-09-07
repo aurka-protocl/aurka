@@ -1,3 +1,4 @@
+import type { PrepareIntentRequest } from "@aurka/shared";
 import type {
   AtomicSettlementIntent,
   AtomicSettlementProposal,
@@ -83,6 +84,8 @@ export interface SolvedProposal {
 }
 
 export interface SolverSnapshotProvider {
+  getPositionSnapshot?(positionId: string): Promise<SolverSnapshot>;
+  prepareIntent?(input: PrepareIntentRequest): Promise<AtomicSettlementIntent>;
   getSnapshot(intent: AtomicSettlementIntent): Promise<SolverSnapshot>;
 }
 

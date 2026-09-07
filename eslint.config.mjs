@@ -3,7 +3,14 @@ import tseslint from "typescript-eslint";
 
 export default tseslint.config(
   {
-    ignores: ["**/dist/**", "**/coverage/**", "**/node_modules/**"],
+    ignores: [
+      "**/dist/**",
+      "**/coverage/**",
+      "**/node_modules/**",
+      "packages/graph/subgraph/generated/**",
+      "packages/graph/subgraph/build/**",
+      "packages/graph/subgraph/src/graph-mapping.ts",
+    ],
   },
   eslint.configs.recommended,
   ...tseslint.configs.recommended,

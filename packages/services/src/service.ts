@@ -1,3 +1,4 @@
+import type { PrepareIntentRequest } from "@aurka/shared";
 import {
   calculateDirectionalCapacity,
   executionSchema,
@@ -45,6 +46,7 @@ import { RiskService } from "./risk-service.js";
 export type UnsignedTransactionRequest = RouterTransactionRequest;
 
 export interface ServiceOptions {
+  readonly riskNow?: () => number;
   readonly database?: ServiceDatabase;
   readonly provider?: SolverSnapshotProvider;
   readonly signer?: ProposalSigner;
@@ -133,40 +135,63 @@ export class AurkaService {
   readonly routerSimulator: RouterSimulator;
   readonly riskService: RiskService;
   readonly runtime: ServiceRuntimeDiagnostics;
+  readonly rpcTransport: Eip1193Transport | undefined;
 
   constructor(options: ServiceOptions = {}) {
+    this.rpcTransport = options.rpcTransport;
     this.database = options.database ?? new ServiceDatabase();
     this.repository = new ServiceRepository(this.database.db);
-    this.riskService = new RiskService(this.repository);
+    this.riskService = new RiskService(this.repository, options.riskNow);
     this.runtime = {
       chainId: options.chainId ?? 31_337,
       settlementContract: options.settlementContract,
       indexConfirmations: options.indexConfirmations ?? 2,
       rpc: options.rpcTransport ? "configured" : "fixture-only",
     };
-    const sourceProvider = options.provider ?? new FixtureProvider();
+    const sourceProvider: SolverSnapshotProvider =
+      options.provider ?? new FixtureProvider();
+    const validateSnapshot = (snapshot: SolverSnapshot): SolverSnapshot => {
+      if (snapshot.chainId !== this.runtime.chainId) {
+        throw new ServiceError(
+          "CHAIN_MISMATCH",
+          "Settlement snapshot chain does not match service configuration",
+          409,
+        );
+      }
+      if (
+        this.runtime.settlementContract !== undefined &&
+        snapshot.verifyingContract.toLowerCase() !==
+          this.runtime.settlementContract.toLowerCase()
+      ) {
+        throw new ServiceError(
+          "CONTRACT_MISMATCH",
+          "Settlement snapshot router does not match service configuration",
+          409,
+        );
+      }
+      return snapshot;
+    };
     this.provider = {
+      ...(sourceProvider.getPositionSnapshot
+        ? {
+            getPositionSnapshot: async (positionId: string) =>
+              validateSnapshot(
+                await sourceProvider.getPositionSnapshot!(positionId),
+              ),
+          }
+        : {}),
+      ...(sourceProvider.prepareIntent
+        ? {
+            prepareIntent: async (input: PrepareIntentRequest) => {
+              const intent = await sourceProvider.prepareIntent!(input);
+              await this.provider.getSnapshot(intent);
+              return intent;
+            },
+          }
+        : {}),
       getSnapshot: async (intent) => {
         const snapshot = await sourceProvider.getSnapshot(intent);
-        if (snapshot.chainId !== this.runtime.chainId) {
-          throw new ServiceError(
-            "CHAIN_MISMATCH",
-            "Settlement snapshot chain does not match service configuration",
-            409,
-          );
-        }
-        if (
-          this.runtime.settlementContract !== undefined &&
-          snapshot.verifyingContract.toLowerCase() !==
-            this.runtime.settlementContract.toLowerCase()
-        ) {
-          throw new ServiceError(
-            "CONTRACT_MISMATCH",
-            "Settlement snapshot router does not match service configuration",
-            409,
-          );
-        }
-        return snapshot;
+        return validateSnapshot(snapshot);
       },
     };
     this.routerSimulator =
@@ -210,7 +235,9 @@ export class AurkaService {
   ): Promise<DirectionalCapacity> {
     this.getPosition(positionId);
     const fixture = createCanonicalFixture({ positionId });
-    const snapshot = await this.provider.getSnapshot(fixture.intent);
+    const snapshot = this.provider.getPositionSnapshot
+      ? await this.provider.getPositionSnapshot(positionId)
+      : await this.provider.getSnapshot(fixture.intent);
     const state = this.repository.getCapacityEpoch(
       positionId,
       traderInputToken.toLowerCase(),

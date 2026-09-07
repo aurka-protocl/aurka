@@ -1,5 +1,21 @@
 import { keccak_256 } from "@noble/hashes/sha3.js";
 import { z } from "zod";
+import type { PrivyClient } from "@privy-io/node";
+import {
+  decodeFunctionData,
+  encodeFunctionData,
+  recoverAddress,
+  type Hex,
+} from "viem";
+import {
+  hashActiveBounds,
+  hashRiskCertificate,
+  riskCertificateSchema,
+  RISK_CERTIFICATE_EIP712_TYPE,
+  type RiskCertificate,
+} from "@aurka/shared";
+import { routerAbi } from "./routerAbi.js";
+import { riskRegistryAbi } from "./riskRegistryAbi.js";
 
 const addressSchema = z.string().regex(/^0x[0-9a-fA-F]{40}$/);
 const bytes32Schema = z.string().regex(/^0x[0-9a-fA-F]{64}$/);
@@ -23,7 +39,9 @@ export const walletPolicySchema = z
     router: addressSchema,
     riskRegistry: addressSchema,
     allowedMethods: z
-      .array(z.enum(["eth_call", "eth_sendTransaction", "eth_sign"]))
+      .array(
+        z.enum(["eth_call", "eth_sendTransaction", "eth_signTypedData_v4"]),
+      )
       .min(1),
     allowedSelectors: z.array(z.string().regex(/^0x[0-9a-fA-F]{8}$/)),
     calldataRules: z.array(
@@ -43,6 +61,7 @@ export const walletPolicySchema = z
     paused: z.boolean(),
     revoked: z.boolean(),
     signerAddress: addressSchema,
+    approvedRiskBoundsHashes: z.array(bytes32Schema).default([]),
     fingerprint: bytes32Schema,
   })
   .strict();
@@ -86,7 +105,10 @@ export interface WalletTransactionResult {
 export interface AurkaWalletAdapter {
   getSignerStatus(): Promise<SignerStatus>;
   getPolicy(): Promise<WalletPolicy>;
-  signTypedData(digest: string, context: AuthorizationContext): Promise<string>;
+  signTypedData(
+    certificate: RiskCertificate,
+    context: AuthorizationContext,
+  ): Promise<string>;
   simulateAndSend(
     action: WalletAction,
     context: AuthorizationContext,
@@ -108,7 +130,9 @@ function fingerprint(value: Omit<WalletPolicy, "fingerprint">): string {
 }
 
 export function createWalletPolicy(
-  input: Omit<WalletPolicy, "fingerprint">,
+  input: Omit<WalletPolicy, "fingerprint" | "approvedRiskBoundsHashes"> & {
+    approvedRiskBoundsHashes?: string[];
+  },
 ): WalletPolicy {
   const parsed = walletPolicySchema.omit({ fingerprint: true }).parse(input);
   return walletPolicySchema.parse({
@@ -132,7 +156,7 @@ function calldataWord(data: string, index: number): string {
 
 function enforceMethod(
   policy: WalletPolicy,
-  method: "eth_call" | "eth_sendTransaction" | "eth_sign",
+  method: "eth_call" | "eth_sendTransaction" | "eth_signTypedData_v4",
 ): void {
   if (!policy.allowedMethods.includes(method))
     throw new Error(`Wallet RPC method ${method} is not approved`);
@@ -143,6 +167,7 @@ function enforce(
   policy: WalletPolicy,
   nowSeconds: number,
 ): void {
+  walletActionSchema.parse(action);
   if (policy.paused || policy.revoked || !policy.signerAddress)
     throw new Error("Wallet policy is paused or revoked");
   if (
@@ -236,33 +261,14 @@ export class FakeWalletAdapter implements AurkaWalletAdapter {
   }
 
   async signTypedData(
-    digest: string,
+    certificate: RiskCertificate,
     context: AuthorizationContext,
   ): Promise<string> {
     requireAuthorization(context);
-    if (this.policy.role !== "RISK")
-      throw new Error("Only the risk signer may sign risk certificates");
-    enforceMethod(this.policy, "eth_sign");
-    if (!bytes32Schema.safeParse(digest).success)
-      throw new Error("Typed-data digest must be bytes32");
-    enforce(
-      {
-        operation: "RISK_CERTIFICATE",
-        chainId: this.policy.chainId,
-        to: this.policy.riskRegistry,
-        data: "0x00000000",
-        value: "0",
-        expiresAt: this.policy.validUntil,
-        policyFingerprint: this.policy.fingerprint,
-      },
-      {
-        ...this.policy,
-        allowedSelectors: ["0x00000000"],
-        calldataRules: [{ selector: "0x00000000", wordCount: 0 }],
-      },
-      this.now(),
+    assertRiskCertificate(certificate, this.policy, this.now());
+    throw new Error(
+      "Fake wallet signing requires an explicit test signer; no synthetic signature is returned",
     );
-    return digest;
   }
 
   async simulateAndSend(
@@ -283,152 +289,382 @@ export class FakeWalletAdapter implements AurkaWalletAdapter {
   }
 }
 
-/** Minimal structural surface of the current `@privy-io/node` wallet RPC. */
+type EthereumService = ReturnType<
+  ReturnType<PrivyClient["wallets"]>["ethereum"]
+>;
 export interface PrivyNodeClient {
   wallets(): {
-    rpc(
-      walletId: string,
-      request: {
-        readonly method: string;
-        readonly params?: unknown;
-        readonly authorization_context?: AuthorizationContext;
-      },
-    ): Promise<unknown>;
+    ethereum(): Pick<EthereumService, "signTypedData" | "sendTransaction">;
   };
 }
-
+export interface RiskAuthority {
+  policyNonce: string;
+  watchtowerAuthorizationEpoch: string;
+  nextNonce: string;
+  authorized: boolean;
+}
+export interface ChainRpc {
+  request(method: string, params: readonly unknown[]): Promise<unknown>;
+}
 export interface PrivyWalletAdapterOptions {
   readonly walletId: string;
-  readonly policy: WalletPolicy;
-  readonly authorizationContext: AuthorizationContext;
+  readonly refreshPolicy: () => Promise<WalletPolicy>;
+  readonly readRiskAuthority: (
+    policyId: string,
+    watchtower: string,
+  ) => Promise<RiskAuthority>;
+  readonly rpc: ChainRpc;
   readonly now?: () => number;
 }
-
-function responseString(value: unknown, name: string): string {
-  if (typeof value === "string") return value;
-  if (value && typeof value === "object") {
-    for (const key of ["signature", "result", "hash", "transactionHash"]) {
-      const candidate = (value as Record<string, unknown>)[key];
-      if (typeof candidate === "string") return candidate;
-    }
-  }
-  throw new Error(`Privy response did not contain ${name}`);
+function assertRiskCertificate(
+  raw: RiskCertificate,
+  policy: WalletPolicy,
+  now: number,
+): RiskCertificate {
+  const certificate = riskCertificateSchema.parse(raw);
+  if (policy.paused || policy.revoked || now >= policy.validUntil)
+    throw new Error("Wallet policy is expired, paused or revoked");
+  if (
+    policy.role !== "RISK" ||
+    certificate.watchtower.toLowerCase() !== policy.signerAddress.toLowerCase()
+  )
+    throw new Error("Risk signer mismatch");
+  if (
+    certificate.chainId !== policy.chainId ||
+    certificate.verifyingContract.toLowerCase() !==
+      policy.riskRegistry.toLowerCase() ||
+    certificate.policyId.toLowerCase() !== policy.policyId.toLowerCase()
+  )
+    throw new Error("Risk certificate domain mismatch");
+  if (
+    certificate.issuedAt > now ||
+    certificate.expiresAt <= now ||
+    certificate.expiresAt > policy.validUntil
+  )
+    throw new Error("Risk certificate expiry mismatch");
+  if (BigInt(certificate.maximumTradeValue) > BigInt(policy.maximumTokenAmount))
+    throw new Error("Risk certificate cap exceeded");
+  if (
+    certificate.riskMode === "PAUSED" &&
+    certificate.maximumTradeValue !== "0"
+  )
+    throw new Error("Paused certificate capacity must be zero");
+  const boundsHash = hashActiveBounds(certificate.activeBounds);
+  if (
+    boundsHash !== certificate.activeBoundsHash ||
+    !policy.approvedRiskBoundsHashes.includes(boundsHash)
+  )
+    throw new Error("Risk bounds are not approved");
+  if (
+    certificate.riskMode !== "PAUSED" &&
+    (certificate.activeBounds.reduce((n, b) => n + b.minimumWeightBps, 0) >
+      10000 ||
+      certificate.activeBounds.reduce((n, b) => n + b.maximumWeightBps, 0) <
+        10000)
+  )
+    throw new Error("Infeasible risk bounds");
+  return certificate;
 }
-
-/**
- * Server-only adapter. It never accepts a private key and passes a caller
- * supplied authorization signature to each sensitive Privy RPC request.
- */
+export function encodeRiskSubmission(certificate: RiskCertificate): Hex {
+  const { signature } = certificate;
+  if (!signature || !/^0x[0-9a-fA-F]{130}$/.test(signature))
+    throw new Error("A valid risk signature is required");
+  return encodeFunctionData({
+    abi: riskRegistryAbi,
+    functionName: "submitRiskCertificate",
+    args: [
+      {
+        policyId: certificate.policyId as Hex,
+        riskMode: { NORMAL: 0, CAUTIOUS: 1, SHOCK: 2, PAUSED: 3 }[
+          certificate.riskMode
+        ],
+        activeBoundsHash: certificate.activeBoundsHash as Hex,
+        maximumTradeValue: BigInt(certificate.maximumTradeValue),
+        sourceDigest: certificate.sourceDigest as Hex,
+        reasonCode: certificate.reasonCode as Hex,
+        issuedAt: BigInt(certificate.issuedAt),
+        expiresAt: BigInt(certificate.expiresAt),
+        nonce: BigInt(certificate.nonce),
+        watchtower: certificate.watchtower as Hex,
+        watchtowerAuthorizationEpoch: BigInt(
+          certificate.watchtowerAuthorizationEpoch,
+        ),
+        policyNonce: BigInt(certificate.policyNonce),
+      },
+      certificate.activeBounds.map((b) => ({ ...b, token: b.token as Hex })),
+      signature as Hex,
+    ],
+  });
+}
 export class PrivyWalletAdapter implements AurkaWalletAdapter {
   private readonly now: () => number;
-  private readonly context: AuthorizationContext;
   constructor(
     private readonly client: PrivyNodeClient,
     private readonly options: PrivyWalletAdapterOptions,
   ) {
     this.now = options.now ?? (() => Math.floor(Date.now() / 1000));
-    this.context = authorizationContextSchema.parse(
-      options.authorizationContext,
-    );
   }
-
-  async getSignerStatus(): Promise<SignerStatus> {
-    return signerStatusSchema.parse({
-      walletId: this.options.walletId,
-      role: this.options.policy.role,
-      address: this.options.policy.signerAddress,
-      enabled: !this.options.policy.paused && !this.options.policy.revoked,
-      revoked: this.options.policy.revoked,
-      expiresAt: this.options.policy.validUntil,
-      policyFingerprint: this.options.policy.fingerprint,
-    });
-  }
-
   async getPolicy(): Promise<WalletPolicy> {
-    return this.options.policy;
+    const policy = walletPolicySchema.parse(await this.options.refreshPolicy());
+    const { fingerprint: expected, ...values } = policy;
+    if (fingerprint(values) !== expected)
+      throw new Error("Wallet policy fingerprint is not authentic");
+    return policy;
   }
-
+  async getSignerStatus(): Promise<SignerStatus> {
+    const policy = await this.getPolicy();
+    return {
+      walletId: this.options.walletId,
+      role: policy.role,
+      address: policy.signerAddress,
+      enabled:
+        !policy.paused && !policy.revoked && this.now() < policy.validUntil,
+      revoked: policy.revoked,
+      expiresAt: policy.validUntil,
+      policyFingerprint: policy.fingerprint,
+    };
+  }
+  private async assertAuthority(certificate: RiskCertificate): Promise<void> {
+    const state = await this.options.readRiskAuthority(
+      certificate.policyId,
+      certificate.watchtower,
+    );
+    if (
+      !state.authorized ||
+      state.policyNonce !== certificate.policyNonce ||
+      state.watchtowerAuthorizationEpoch !==
+        certificate.watchtowerAuthorizationEpoch ||
+      state.nextNonce !== certificate.nonce
+    )
+      throw new Error("Risk registry authority changed");
+  }
+  private async assertChain(chainId: number): Promise<void> {
+    const actual = await this.options.rpc.request("eth_chainId", []);
+    if (
+      typeof actual !== "string" ||
+      !/^0x[0-9a-fA-F]+$/.test(actual) ||
+      BigInt(actual) !== BigInt(chainId)
+    )
+      throw new Error("RPC chain mismatch");
+  }
   async signTypedData(
-    digest: string,
+    raw: RiskCertificate,
     context: AuthorizationContext,
   ): Promise<string> {
     requireAuthorization(context);
-    enforceMethod(this.options.policy, "eth_sign");
-    enforce(
-      {
-        operation: "RISK_CERTIFICATE",
-        chainId: this.options.policy.chainId,
-        to: this.options.policy.riskRegistry,
-        data: "0x00000000",
-        value: "0",
-        expiresAt: this.options.policy.validUntil,
-        policyFingerprint: this.options.policy.fingerprint,
-      },
-      {
-        ...this.options.policy,
-        allowedSelectors: ["0x00000000"],
-        calldataRules: [{ selector: "0x00000000", wordCount: 0 }],
-      },
-      this.now(),
+    const policy = await this.getPolicy();
+    enforceMethod(policy, "eth_signTypedData_v4");
+    const certificate = assertRiskCertificate(raw, policy, this.now());
+    await this.assertChain(policy.chainId);
+    await this.assertAuthority(certificate);
+    const fields = RISK_CERTIFICATE_EIP712_TYPE.slice(
+      RISK_CERTIFICATE_EIP712_TYPE.indexOf("(") + 1,
+      -1,
+    )
+      .split(",")
+      .map((field) => {
+        const [type, name] = field.split(" ");
+        return { type: type!, name: name! };
+      });
+    const message: Record<string, unknown> = Object.fromEntries(
+      fields.map((field) => [
+        field.name,
+        certificate[field.name as keyof RiskCertificate],
+      ]),
     );
-    const result = await this.client.wallets().rpc(this.options.walletId, {
-      method: "eth_sign",
-      params: [this.options.policy.signerAddress, digest],
-      authorization_context: context,
+    message.riskMode = { NORMAL: 0, CAUTIOUS: 1, SHOCK: 2, PAUSED: 3 }[
+      certificate.riskMode
+    ];
+    const result = await this.client
+      .wallets()
+      .ethereum()
+      .signTypedData(this.options.walletId, {
+        params: {
+          typed_data: {
+            domain: {
+              name: "AURKA RiskModeRegistry",
+              version: "2",
+              chain_id: policy.chainId,
+              verifying_contract: policy.riskRegistry,
+            },
+            types: { RiskCertificate: fields },
+            primary_type: "RiskCertificate",
+            message,
+          },
+        },
+        authorization_context: context,
+      });
+    if (
+      result.encoding !== "hex" ||
+      !/^0x[0-9a-fA-F]{130}$/.test(result.signature)
+    )
+      throw new Error("Malformed Privy signature");
+    const signer = await recoverAddress({
+      hash: hashRiskCertificate(certificate) as Hex,
+      signature: result.signature as Hex,
     });
-    return responseString(result, "signature");
+    if (signer.toLowerCase() !== policy.signerAddress.toLowerCase())
+      throw new Error("Privy signature signer mismatch");
+    await this.assertAuthority(certificate);
+    const refreshed = await this.getPolicy();
+    if (refreshed.fingerprint !== policy.fingerprint)
+      throw new Error("Wallet policy changed during signing");
+    assertRiskCertificate(certificate, refreshed, this.now());
+    return result.signature;
   }
-
   async simulateAndSend(
-    action: WalletAction,
+    raw: WalletAction,
     context: AuthorizationContext,
   ): Promise<WalletTransactionResult> {
     requireAuthorization(context);
-    enforce(action, this.options.policy, this.now());
-    enforceMethod(this.options.policy, "eth_call");
-    enforceMethod(this.options.policy, "eth_sendTransaction");
-    await this.client.wallets().rpc(this.options.walletId, {
-      method: "eth_call",
-      params: [
+    const action = walletActionSchema.parse(raw),
+      policy = await this.getPolicy();
+    // Dynamic ABI layouts are decoded below, not trusted as caller metadata.
+    const policyForLayout = {
+      ...policy,
+      calldataRules: [
         {
-          to: action.to,
-          data: action.data,
-          value: `0x${BigInt(action.value).toString(16)}`,
-        },
-        "latest",
-      ],
-      authorization_context: context,
-    });
-    const result = await this.client.wallets().rpc(this.options.walletId, {
-      method: "eth_sendTransaction",
-      params: [
-        {
-          to: action.to,
-          data: action.data,
-          value: `0x${BigInt(action.value).toString(16)}`,
+          selector: selector(action.data),
+          wordCount: (action.data.length - 10) / 64,
         },
       ],
-      authorization_context: context,
-    });
+    };
+    enforce(action, policyForLayout, this.now());
+    enforceMethod(policy, "eth_call");
+    enforceMethod(policy, "eth_sendTransaction");
+    if (action.operation === "ROUTER_EXECUTE") {
+      const decoded = decodeFunctionData({
+        abi: routerAbi,
+        data: action.data as Hex,
+      });
+      if (decoded.functionName !== "execute")
+        throw new Error("Unapproved router method");
+      const [intent, , proposal] = decoded.args;
+      if (
+        intent.policyId.toLowerCase() !== policy.policyId.toLowerCase() ||
+        intent.deadline < BigInt(this.now()) ||
+        intent.deadline > BigInt(policy.validUntil) ||
+        proposal.deadline > BigInt(policy.validUntil)
+      )
+        throw new Error("Execution policy or deadline mismatch");
+      for (const token of [
+        intent.traderInputToken,
+        intent.traderOutputToken,
+        proposal.feeToken,
+      ])
+        if (
+          !policy.approvedAssets.some(
+            (asset) => asset.toLowerCase() === token.toLowerCase(),
+          )
+        )
+          throw new Error("Decoded asset is not approved");
+      for (const amount of [
+        proposal.traderInputAmount,
+        proposal.traderOutputAmount +
+          proposal.solverFeeAmount +
+          proposal.protocolFeeAmount,
+      ])
+        if (amount > BigInt(policy.maximumTokenAmount))
+          throw new Error("Decoded token cap exceeded");
+      if (
+        encodeFunctionData({
+          abi: routerAbi,
+          functionName: "execute",
+          args: decoded.args,
+        }).toLowerCase() !== action.data.toLowerCase()
+      )
+        throw new Error("Noncanonical router calldata");
+    } else {
+      const decoded = decodeFunctionData({
+        abi: riskRegistryAbi,
+        data: action.data as Hex,
+      });
+      const [c, bounds, signature] = decoded.args;
+      const modes = ["NORMAL", "CAUTIOUS", "SHOCK", "PAUSED"] as const;
+      const certificate = assertRiskCertificate(
+        {
+          policyId: c.policyId,
+          chainId: policy.chainId,
+          verifyingContract: policy.riskRegistry,
+          signatureVersion: 2,
+          riskMode: modes[c.riskMode]!,
+          activeBounds: [...bounds],
+          activeBoundsHash: c.activeBoundsHash,
+          maximumTradeValue: c.maximumTradeValue.toString(),
+          sourceDigest: c.sourceDigest,
+          reasonCode: c.reasonCode,
+          issuedAt: Number(c.issuedAt),
+          expiresAt: Number(c.expiresAt),
+          nonce: c.nonce.toString(),
+          watchtower: c.watchtower,
+          watchtowerAuthorizationEpoch:
+            c.watchtowerAuthorizationEpoch.toString(),
+          policyNonce: c.policyNonce.toString(),
+          signature,
+        },
+        policy,
+        this.now(),
+      );
+      if (
+        encodeRiskSubmission(certificate).toLowerCase() !==
+        action.data.toLowerCase()
+      )
+        throw new Error("Noncanonical risk calldata");
+      await this.assertAuthority(certificate);
+    }
+    await this.assertChain(policy.chainId);
+    const transaction = {
+      to: action.to,
+      data: action.data,
+      value: `0x${BigInt(action.value).toString(16)}`,
+    };
+    const simulation = await this.options.rpc.request("eth_call", [
+      { ...transaction, from: policy.signerAddress },
+      "latest",
+    ]);
+    if (
+      typeof simulation !== "string" ||
+      !/^0x([0-9a-fA-F]{2})*$/.test(simulation) ||
+      simulation.length !== (action.operation === "RISK_CERTIFICATE" ? 66 : 194)
+    )
+      throw new Error("Invalid simulation result");
+    const latest = await this.getPolicy();
+    if (
+      latest.fingerprint !== policy.fingerprint ||
+      latest.revoked ||
+      latest.paused ||
+      this.now() >= latest.validUntil
+    )
+      throw new Error("Wallet policy changed during simulation");
+    const result = await this.client
+      .wallets()
+      .ethereum()
+      .sendTransaction(this.options.walletId, {
+        caip2: `eip155:${policy.chainId}`,
+        params: { transaction },
+        authorization_context: context,
+        idempotency_key: `aurka:${fingerprint({ ...policy, policyId: action.data })}`,
+      });
+    if (
+      result.caip2 !== `eip155:${policy.chainId}` ||
+      !/^0x[0-9a-fA-F]{64}$/.test(result.hash)
+    )
+      throw new Error("Malformed Privy transaction response");
     return {
       walletId: this.options.walletId,
       status: "SUBMITTED",
-      transactionHash: responseString(result, "transaction hash"),
-      policyFingerprint: this.options.policy.fingerprint,
+      transactionHash: result.hash,
+      policyFingerprint: policy.fingerprint,
     };
   }
 }
-
 export async function createPrivyNodeClientFromEnv(): Promise<PrivyNodeClient> {
-  const appId = process.env.PRIVY_APP_ID;
-  const appSecret = process.env.PRIVY_APP_SECRET;
+  const appId = process.env.PRIVY_APP_ID,
+    appSecret = process.env.PRIVY_APP_SECRET;
   if (!appId || !appSecret)
     throw new Error(
       "PRIVY_APP_ID and PRIVY_APP_SECRET are required at runtime",
     );
-  const module = await import("@privy-io/node");
-  return new module.PrivyClient({
-    appId,
-    appSecret,
-  }) as unknown as PrivyNodeClient;
+  const { PrivyClient } = await import("@privy-io/node");
+  return new PrivyClient({ appId, appSecret });
 }

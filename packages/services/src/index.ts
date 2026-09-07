@@ -8,3 +8,6 @@ export * from "./observability.js";
 export * from "./service.js";
 export * from "./risk-service.js";
 export * from "./solver/index.js";
+
+export * from "./risk-worker.js";
+export * from "./risk-registry.js";

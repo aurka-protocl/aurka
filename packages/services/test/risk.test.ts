@@ -5,102 +5,14 @@ import {
   createApiServer,
   listenApiServer,
 } from "../src/api/server.js";
-import { FIXTURE_ADDRESSES, FIXTURE_POSITION_ID } from "../src/fixture.js";
-import { hashBytes } from "../src/solver/hash.js";
+import { FIXTURE_POSITION_ID } from "../src/fixture.js";
 import { AurkaService } from "../src/service.js";
 
-const BLOCK_HASH = `0x${"10".repeat(32)}`;
-
-function request(sourceId: string, metricValue: string) {
-  return {
-    id: `${sourceId}:100`,
-    sourceId,
-    sourceKind: "FIXTURE",
-    chainId: 31337,
-    deploymentId: "fixture-deployment",
-    schemaVersion: "risk-v1",
-    queryVersion: "observations-v1",
-    signal: "DEX_LIQUIDITY",
-    metricValue,
-    sampleSize: "10",
-    affectedAssets: [FIXTURE_ADDRESSES.usdc],
-    indexedBlock: "100",
-    indexedBlockHash: BLOCK_HASH,
-    observedAt: 200,
-    retrievedAt: 200,
-    finality: "FINAL",
-    payloadHash: hashBytes(`payload:${sourceId}`),
-    payload: { sourceId, metricValue },
-  };
-}
-
-function body() {
-  const bounds = [
-    {
-      token: FIXTURE_ADDRESSES.usdc,
-      minimumWeightBps: 5_500,
-      maximumWeightBps: 10_000,
-      paused: false,
-    },
-    {
-      token: FIXTURE_ADDRESSES.weth,
-      minimumWeightBps: 0,
-      maximumWeightBps: 3_500,
-      paused: false,
-    },
-    {
-      token: FIXTURE_ADDRESSES.link,
-      minimumWeightBps: 0,
-      maximumWeightBps: 1_500,
-      paused: false,
-    },
-  ];
-  return {
-    positionId: FIXTURE_POSITION_ID,
-    observations: [request("dex-a", "-10"), request("dex-b", "-10")],
-    configuration: {
-      version: "risk-v1",
-      maxObservationAgeSeconds: 120,
-      maxIndexedLagBlocks: 2,
-      minimumSampleSize: "10",
-      requiredQuorum: 2,
-      failSafeMode: "CAUTIOUS",
-      recoveryQuorum: 2,
-      cooldownSeconds: 30,
-      thresholds: [
-        {
-          signal: "DEX_LIQUIDITY",
-          cautiousAt: "-10",
-          shockAt: "-20",
-          pauseAt: "-30",
-          affectedAssets: [FIXTURE_ADDRESSES.usdc],
-          reasonCode: "LIQUIDITY_DECLINE",
-        },
-      ],
-      boundSets: [
-        { mode: "NORMAL", maximumTradeValue: "50000", activeBounds: bounds },
-        { mode: "CAUTIOUS", maximumTradeValue: "37500", activeBounds: bounds },
-        { mode: "SHOCK", maximumTradeValue: "20000", activeBounds: bounds },
-        {
-          mode: "PAUSED",
-          maximumTradeValue: "0",
-          activeBounds: bounds.map((item) => ({ ...item, paused: true })),
-        },
-      ],
-    },
-    hardMaximumTradeValue: "50000",
-    hardBounds: bounds,
-    chainId: 31337,
-    deploymentId: "fixture-deployment",
-    canonicalBlock: "100",
-    canonicalBlockHashes: { "100": BLOCK_HASH },
-    nowSeconds: 200,
-  };
-}
+import { body, request } from "./risk-fixture.js";
 
 describe("risk API persistence boundary", () => {
-  it("evaluates through the idempotent API and exposes the effective state", async () => {
-    const service = new AurkaService();
+  it("evaluates through the idempotent API and separates proposed and unavailable effective state", async () => {
+    const service = new AurkaService({ riskNow: () => 200 });
     const handle = createApiServer({ service });
     await listenApiServer(handle, 0);
     const address = handle.server.address();
@@ -136,9 +48,93 @@ describe("risk API persistence boundary", () => {
       expect(
         ((await risk.json()) as { data: { effective: { mode: string } } }).data
           .effective.mode,
-      ).toBe("CAUTIOUS");
+      ).toBe(null);
     } finally {
       await closeApiServer(handle);
     }
   });
+});
+
+it("fails safe when one alarming source is below quorum", () => {
+  const service = new AurkaService({ riskNow: () => 200 });
+  try {
+    const input = body();
+    input.observations = [request("one", "-30")];
+    expect(service.riskService.evaluate(input).evaluation).toMatchObject({
+      mode: "CAUTIOUS",
+      failSafe: true,
+    });
+  } finally {
+    service.close();
+  }
+});
+it("preserves recovery cooldown across service instances and rejects impossible bounds", () => {
+  let now = 200;
+  const service = new AurkaService({ riskNow: () => now });
+  try {
+    const input = body();
+    input.observations = [request("a", "-20"), request("b", "-20")];
+    expect(service.riskService.evaluate(input).evaluation.mode).toBe("SHOCK");
+    const second = new AurkaService({
+      database: service.database,
+      seedFixture: false,
+      riskNow: () => now,
+    });
+    input.observations = [request("a", "0"), request("b", "0")];
+    expect(second.riskService.evaluate(input).evaluation.mode).toBe("SHOCK");
+    now = 230;
+    input.nowSeconds = 230;
+    expect(second.riskService.evaluate(input).evaluation.mode).toBe("NORMAL");
+    const invalid = body();
+    invalid.positionId = "missing";
+    expect(() => second.riskService.evaluate(invalid)).toThrow(
+      "Position was not found",
+    );
+  } finally {
+    service.close();
+  }
+  const invalidService = new AurkaService({ riskNow: () => 200 });
+  try {
+    const invalid = body();
+    invalid.configuration.boundSets[1]!.activeBounds = invalid.hardBounds.map(
+      (b) => ({ ...b, maximumWeightBps: b.minimumWeightBps }),
+    );
+    expect(() => invalidService.riskService.evaluate(invalid)).toThrow(
+      "valid portfolio",
+    );
+  } finally {
+    invalidService.close();
+  }
+});
+it("reclaims an abandoned job and fences its previous owner", () => {
+  const service = new AurkaService();
+  try {
+    const r = service.repository;
+    r.ensureRiskJob("job", FIXTURE_POSITION_ID, 100);
+    const first = r.claimRiskJob("job", 100)!;
+    expect(r.claimRiskJob("job", 101)).toBeUndefined();
+    const second = r.claimRiskJob("job", 220)!;
+    expect(second.attempt).toBe(first.attempt + 1);
+    r.releaseRiskJob("job", first.attempt, 0);
+    expect(r.ownsRiskJob("job", second.attempt)).toBe(true);
+  } finally {
+    service.close();
+  }
+});
+
+it("isolates public proposal state from trusted worker recovery state", () => {
+  const service = new AurkaService({ riskNow: () => 200 });
+  try {
+    const publicInput = body();
+    publicInput.configuration.version = "public-config";
+    publicInput.observations = [request("a", "-30"), request("b", "-30")];
+    expect(service.riskService.evaluate(publicInput).evaluation.mode).toBe(
+      "PAUSED",
+    );
+    expect(service.riskService.evaluate(body(), "worker").evaluation.mode).toBe(
+      "CAUTIOUS",
+    );
+  } finally {
+    service.close();
+  }
 });

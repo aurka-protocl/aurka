@@ -17,14 +17,17 @@
     "build": "tsc -p tsconfig.build.json",
     "clean": "rm -rf dist coverage",
     "test": "vitest run",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "subgraph:build": "graph codegen subgraph/subgraph.yaml --output-dir subgraph/generated && graph build subgraph/subgraph.yaml --output-dir subgraph/build"
   },
   "dependencies": {
     "@noble/hashes": "^2.4.0",
-    "zod": "catalog:"
+    "zod": "catalog:",
+    "@graphprotocol/graph-ts": "0.38.2"
   },
   "devDependencies": {
     "@types/node": "^24.3.0",
-    "vitest": "5.0.0"
+    "vitest": "5.0.0",
+    "@graphprotocol/graph-cli": "0.98.1"
   }
 }

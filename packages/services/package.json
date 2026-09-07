@@ -33,7 +33,10 @@
     "@noble/hashes": "^2.4.0",
     "better-sqlite3": "^12.4.1",
     "drizzle-orm": "^0.45.2",
-    "zod": "catalog:"
+    "zod": "catalog:",
+    "@aurka/watchtower": "workspace:*",
+    "@aurka/wallet": "workspace:*",
+    "viem": "2.56.3"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",

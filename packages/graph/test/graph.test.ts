@@ -56,7 +56,11 @@ describe("Graph signal source", () => {
       return response({
         data: {
           observations:
-            page === 1 ? [row("a"), row("b")] : [row("b"), row("c")],
+            page === 1
+              ? [row("a"), row("b")]
+              : page === 2
+                ? [row("b"), row("c")]
+                : [],
           _meta: {
             deployment: "QmDeployment",
             hasIndexingErrors: false,
@@ -74,6 +78,7 @@ describe("Graph signal source", () => {
       sourceKind: "DEX_SUBGRAPH",
       nowSeconds: 110,
       canonical: {
+        getChainId: async () => 31337,
         getLatestBlock: async () => 1n,
         getBlockHash: async () => HASH_1,
       },
@@ -86,7 +91,11 @@ describe("Graph signal source", () => {
       finality: "FINAL",
       payloadHash: graphObservationPayloadHash(row("a").payload),
     });
-    expect(requests).toEqual(["Bearer server-only", "Bearer server-only"]);
+    expect(requests).toEqual([
+      "Bearer server-only",
+      "Bearer server-only",
+      "Bearer server-only",
+    ]);
   });
 
   it("rejects GraphQL partial errors and noncanonical metadata", async () => {
@@ -120,8 +129,10 @@ describe("Graph signal source", () => {
       source.fetchObservations({
         sourceId: "fixture-dex",
         sourceKind: "FIXTURE",
+        finalityBlock: 1n,
         nowSeconds: 110,
         canonical: {
+          getChainId: async () => 31337,
           getLatestBlock: async () => 1n,
           getBlockHash: async () => HASH_1,
         },
@@ -171,12 +182,109 @@ describe("Graph signal source", () => {
       new GraphSignalSource(malformed, "fixture-dex").fetchObservations({
         sourceId: "fixture-dex",
         sourceKind: "FIXTURE",
+        finalityBlock: 1n,
         nowSeconds: 110,
         canonical: {
+          getChainId: async () => 31337,
           getLatestBlock: async () => 1n,
           getBlockHash: async () => HASH_1,
         },
       }),
     ).rejects.toThrow("Graph query failed");
   });
+});
+
+it("requires finality proof and rejects rows newer than metadata", async () => {
+  const source = new GraphSignalSource(
+    new GraphClient(config(), {
+      fetch: async () =>
+        response({
+          data: {
+            observations: [{ ...row("a"), indexedBlock: "2" }],
+            _meta: {
+              deployment: "QmDeployment",
+              hasIndexingErrors: false,
+              block: { number: 1, hash: HASH_1 },
+            },
+          },
+        }),
+    }),
+    "test",
+  );
+  const options = {
+    sourceId: "test",
+    sourceKind: "AURKA_SUBGRAPH" as const,
+    nowSeconds: 110,
+    canonical: {
+      getChainId: async () => 31337,
+      getLatestBlock: async () => 2n,
+      getBlockHash: async () => HASH_1,
+    },
+  };
+  await expect(source.fetchObservations(options)).rejects.toThrow(
+    "finality block",
+  );
+  await expect(
+    source.fetchObservations({ ...options, finalityBlock: 1n }),
+  ).rejects.toThrow("exceeds metadata");
+});
+
+it("normalizes real Uniswap v4 hourly fields using integer units", async () => {
+  const poolId = `0x${"22".repeat(32)}`,
+    pool = {
+      id: poolId,
+      token0: { id: ADDRESS },
+      token1: { id: `0x${"33".repeat(20)}` },
+    };
+  const client = new GraphClient(
+    { ...config(), maxObservationAgeSeconds: 3600 },
+    {
+      fetch: async (_url, init) => {
+        expect(init.body).toContain("poolHourDatas");
+        return response({
+          data: {
+            _meta: {
+              deployment: "QmDeployment",
+              hasIndexingErrors: false,
+              block: { number: 1, hash: HASH_1 },
+            },
+            poolHourDatas: [
+              {
+                id: "current",
+                periodStartUnix: 3600,
+                liquidity: "80",
+                volumeUSD: "12.3456789",
+                txCount: "10",
+                pool,
+              },
+              {
+                id: "previous",
+                periodStartUnix: 0,
+                liquidity: "100",
+                volumeUSD: "10",
+                txCount: "10",
+                pool,
+              },
+            ],
+          },
+        });
+      },
+    },
+  );
+  const { UniswapV4SignalSource } = await import("../src/uniswap-v4.js");
+  const observations = await new UniswapV4SignalSource(
+    client,
+    poolId,
+  ).fetchObservations({
+    sourceId: "uniswap-v4",
+    sourceKind: "DEX_SUBGRAPH",
+    nowSeconds: 7300,
+    finalityBlock: 1n,
+    canonical: {
+      getChainId: async () => 31337,
+      getLatestBlock: async () => 1n,
+      getBlockHash: async () => HASH_1,
+    },
+  });
+  expect(observations.map((o) => o.metricValue)).toEqual(["-2000", "12345678"]);
 });

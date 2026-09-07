@@ -11,10 +11,15 @@ dataSources:
       address: "0x0000000000000000000000000000000000000001"
       abi: AurkaSwapVMRouter
       startBlock: 0
+    context:
+      chainId:
+        type: BigInt
+        data: "31337"
     mapping:
       kind: ethereum/events
       apiVersion: 0.0.9
       language: wasm/assemblyscript
+      file: ./src/graph-mapping.ts
       entities:
         - TradeExecuted
         - FeesRouted
@@ -39,10 +44,15 @@ dataSources:
       address: "0x0000000000000000000000000000000000000002"
       abi: RiskModeRegistry
       startBlock: 0
+    context:
+      chainId:
+        type: BigInt
+        data: "31337"
     mapping:
       kind: ethereum/events
       apiVersion: 0.0.9
       language: wasm/assemblyscript
+      file: ./src/graph-mapping.ts
       entities:
         - RiskModeChanged
         - PolicyMutation
@@ -57,7 +67,7 @@ dataSources:
           handler: handleRiskModeChanged
         - event:
             WatchtowerAuthorizationChanged(indexed bytes32,indexed address,bool)
-          handler: handlePolicyMutation
+          handler: handleTradeExecuted
   - kind: ethereum
     name: AurkaPolicyRegistry
     network: localhost
@@ -65,10 +75,15 @@ dataSources:
       address: "0x0000000000000000000000000000000000000003"
       abi: AurkaPolicyRegistry
       startBlock: 0
+    context:
+      chainId:
+        type: BigInt
+        data: "31337"
     mapping:
       kind: ethereum/events
       apiVersion: 0.0.9
       language: wasm/assemblyscript
+      file: ./src/graph-mapping.ts
       entities:
         - PolicyMutation
         - RiskObservation
@@ -79,38 +94,38 @@ dataSources:
         - event:
             PolicyCreated(indexed bytes32,indexed address,indexed
             address,uint256)
-          handler: handlePolicyMutation
+          handler: handlePolicyCreated
         - event:
             AssetBoundsUpdated(indexed bytes32,indexed
             address,uint16,uint16,uint256)
-          handler: handlePolicyMutation
+          handler: handleAssetBoundsUpdated
         - event:
             AssetAdded(indexed bytes32,indexed
             address,uint8,uint16,uint16,uint256)
-          handler: handlePolicyMutation
+          handler: handleAssetAdded
         - event: MaximumTransactionValueUpdated(indexed bytes32,uint256,uint256)
-          handler: handlePolicyMutation
+          handler: handleMaximumTransactionValueUpdated
         - event: FeeConfigurationUpdated(indexed bytes32,uint256)
-          handler: handlePolicyMutation
+          handler: handleFeeConfigurationUpdated
         - event: PauseStatusUpdated(indexed bytes32,bool,uint256)
-          handler: handlePolicyMutation
+          handler: handlePauseStatusUpdated
         - event:
             TreasuryUpdated(indexed bytes32,indexed address,indexed
             address,uint256)
-          handler: handlePolicyMutation
+          handler: handleTreasuryUpdated
         - event:
             GovernanceTransferStarted(indexed bytes32,indexed address,indexed
             address)
-          handler: handlePolicyMutation
+          handler: handleGovernanceTransferStarted
         - event:
             GovernanceTransferred(indexed bytes32,indexed address,indexed
             address,uint256)
-          handler: handlePolicyMutation
+          handler: handleGovernanceTransferred
         - event:
             SettlementConfigurationUpdated(indexed bytes32,indexed
             bytes32,bytes32,indexed address,uint256)
-          handler: handlePolicyMutation
+          handler: handleSettlementConfigurationUpdated
         - event:
             PriceProtectionConfigurationUpdated(indexed
             bytes32,uint64,uint16,uint256)
-          handler: handlePolicyMutation
+          handler: handlePriceProtectionConfigurationUpdated

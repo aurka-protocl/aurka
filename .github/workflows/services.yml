@@ -37,11 +37,12 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile --ignore-scripts=false
-      - run: pnpm --filter @aurka/shared build
+      - run: pnpm --filter @aurka/services... build
       - run: pnpm --filter @aurka/services db:check
       - run: pnpm --filter @aurka/services typecheck
       - run: pnpm --filter @aurka/services test
       - run: pnpm --filter @aurka/services build
+      - run: pnpm --filter @aurka/graph subgraph:build
       - run: pnpm format:check
       - run: pnpm lint
 

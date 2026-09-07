@@ -1,3 +1,4 @@
+import type { PrepareIntentRequest } from "@aurka/shared";
 import {
   calculatePortfolioValuation,
   computeCapacityEpochId,
@@ -271,6 +272,30 @@ export class FixtureProvider implements SolverSnapshotProvider {
     private readonly bundle: FixtureBundle = createCanonicalFixture(),
   ) {}
 
+  async prepareIntent(
+    input: PrepareIntentRequest,
+  ): Promise<AtomicSettlementIntent> {
+    if (input.positionId !== this.bundle.snapshot.positionId)
+      throw new Error("Unknown position");
+    const fields = {
+      trader: input.trader,
+      traderInputToken: input.traderInputToken,
+      traderOutputToken: input.traderOutputToken,
+      requestedValue: input.requestedValue,
+      minimumTraderOutputValue: input.minimumTraderOutputValue,
+      nonce: input.nonce,
+      deadline: input.deadline,
+    };
+    const intent = {
+      ...this.bundle.intent,
+      ...fields,
+      intentId: hashBytes(JSON.stringify(input)),
+      exactInput: false,
+      allowPartialFill: true,
+    };
+    await this.getSnapshot(intent);
+    return intent;
+  }
   async getSnapshot(intent: AtomicSettlementIntent): Promise<SolverSnapshot> {
     if (intent.policyId !== this.bundle.snapshot.policyId)
       throw new Error("Unknown policy");
@@ -398,5 +423,52 @@ export class DeterministicRouterSimulator implements RouterSimulator {
       };
     }
     return { status: "SUCCEEDED" as const, gasEstimate: 220_000n };
+  }
+}
+
+/** Interactive local demo clock; deterministic tests use FixtureProvider directly. */
+export class LocalDemoProvider implements SolverSnapshotProvider {
+  async getPositionSnapshot(positionId: string): Promise<SolverSnapshot> {
+    if (positionId !== FIXTURE_POSITION_ID)
+      throw new Error("Unknown demo position");
+    return createCanonicalFixture({ nowSeconds: this.now() }).snapshot;
+  }
+  private readonly prepared = new Map<
+    string,
+    { provider: FixtureProvider; expiresAt: number }
+  >();
+  constructor(
+    private readonly now: () => number = () => Math.floor(Date.now() / 1000),
+  ) {}
+  async prepareIntent(
+    input: PrepareIntentRequest,
+  ): Promise<AtomicSettlementIntent> {
+    const now = this.now();
+    for (const [id, item] of this.prepared)
+      if (item.expiresAt <= now) this.prepared.delete(id);
+    if (this.prepared.size >= 1000)
+      throw new Error("Local demo preparation capacity reached");
+    const provider = new FixtureProvider(
+      createCanonicalFixture({ nowSeconds: now }),
+    );
+    const intent = await provider.prepareIntent({
+      ...input,
+      deadline: Math.min(input.deadline, now + 60),
+    });
+    this.prepared.set(intent.intentId, {
+      provider,
+      expiresAt: Math.min(input.deadline, now + 60),
+    });
+    return intent;
+  }
+  async getSnapshot(intent: AtomicSettlementIntent): Promise<SolverSnapshot> {
+    const entry = this.prepared.get(intent.intentId);
+    if (!entry || entry.expiresAt <= this.now())
+      throw new Error("Local demo snapshot expired; request a new quote");
+    const snapshot = await entry.provider.getSnapshot(intent);
+    return {
+      ...snapshot,
+      priceProtection: { ...snapshot.priceProtection, nowSeconds: this.now() },
+    };
   }
 }

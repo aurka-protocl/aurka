@@ -34,8 +34,8 @@ documentation:
 Graph finality is not inferred from a subgraph response alone. The adapter
 compares `_meta.block` and every observation block against an injected canonical
 chain reader, configured lag/finality limits, and block hashes. The documented
-Graph block-hash limitation for non-final state is why an observation can be
-`SAFE` or rejected rather than being treated as final.
+Graph block-hash limitation for non-final state is why normalization alone
+reports `UNFINALIZED`; only the checked source query can report `FINAL`.
 
 The initial DEX source is `fixture-dex-v1` on Anvil/Foundry chain `31337` only.
 There is no production DEX subgraph ID, network, or live smoke test selected in
@@ -128,3 +128,39 @@ local settlement fixtures. `contracts/script/deploy-settlement.sh` supports
 simulation-first deployment when registry and Aqua addresses are supplied by
 environment variables. Live-network integration is intentionally separate and
 manual; no CI job receives production keys or broadcasts funds.
+
+## Integration corrections — 2026-09-07
+
+`pnpm --filter @aurka/graph subgraph:build` now performs Graph code generation
+and compiles the actual AssemblyScript mapping to WASM. Its handlers persist
+trade, fee, policy, risk-mode and execution-observation entities. The manifest
+still targets fixture chain 31337 and fixture addresses. Compilation and fixture
+normalization tests do not establish indexing against a deployed Graph node.
+
+`GraphSignalSource` queries `riskObservations` and `_meta` at an explicit
+RPC-proven finalized block. It verifies chain identity, deployment, canonical
+hashes, freshness and lag. Normalization alone yields `UNFINALIZED`; it cannot
+prove chain finality. Observation payload bytes are decoded before validation.
+
+`UniswapV4SignalSource` implements the official
+[Uniswap v4 PoolHourData schema](https://github.com/Uniswap/v4-subgraph/blob/main/schema.graphql).
+Operators must select the deployment, chain and bytes32 pool ID. It uses two
+consecutive completed hours at the finalized snapshot. Liquidity change is
+signed basis points relative to the preceding hour; volume is integer USD
+micro-units, truncated at six decimal places. Zero liquidity baselines, missing
+hours, stale data and noncanonical metadata are rejected. Thresholds must use
+these units. Two signals from one source do not constitute two independent
+quorum members. No live deployment or economic calibration has been validated.
+
+The Privy adapter uses the installed `@privy-io/node@0.34.0` native
+`wallets().ethereum().signTypedData` and `sendTransaction` methods, their actual
+snake-case authorization/domain fields, and native `signature`/`hash` results.
+It signs only a structured v2 risk certificate after validating domain, policy,
+preapproved bounds hash, cap, expiry, nonce and authorization epoch. It recovers
+the signer, refreshes policy/authority around signing, decodes exact Solidity
+calldata, verifies chain identity, runs `eth_call`, and checks policy again
+before sending. Retries use a deterministic Privy idempotency key. Server
+request authorization must follow the pinned SDK and
+[Privy's server authorization guidance](https://docs.privy.io/controls/authorization-keys/using-owners/sign/signing-on-the-server).
+Mocked native-client tests establish request compatibility; real Privy policies,
+authorization signatures and live calls remain deployment validation gates.

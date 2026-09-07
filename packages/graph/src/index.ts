@@ -53,10 +53,27 @@ export const graphObservationRowSchema = z
     metricValue: z.string().regex(/^-?(0|[1-9][0-9]*)$/),
     sampleSize: uintSchema,
     affectedAssets: z.array(addressSchema),
-    observedAt: z.number().int().nonnegative().safe(),
+    observedAt: z.coerce.number().int().nonnegative().safe(),
     indexedBlock: uintSchema,
     indexedBlockHash: bytes32Schema,
-    payload: z.record(z.string(), z.unknown()),
+    payload: z.preprocess(
+      (value) => {
+        if (typeof value !== "string") return value;
+        try {
+          return JSON.parse(
+            new TextDecoder().decode(
+              Uint8Array.from(
+                value.replace(/^0x/, "").match(/../g) ?? [],
+                (part) => Number.parseInt(part, 16),
+              ),
+            ),
+          ) as unknown;
+        } catch {
+          return value;
+        }
+      },
+      z.record(z.string(), z.unknown()),
+    ),
   })
   .strict();
 
@@ -106,6 +123,7 @@ export type GraphFetch = (
 ) => Promise<GraphFetchResponse>;
 
 export interface CanonicalChainReader {
+  getChainId(): Promise<number>;
   getLatestBlock(): Promise<bigint>;
   getBlockHash(blockNumber: bigint): Promise<string | undefined>;
 }
@@ -223,11 +241,11 @@ const observationsResponseSchema = z
   })
   .strict();
 
-const OBSERVATIONS_QUERY = `query AurkaRiskObservations($first: Int!, $lastId: ID!) {
-  observations(first: $first, where: { id_gt: $lastId }, orderBy: id, orderDirection: asc) {
+const OBSERVATIONS_QUERY = `query AurkaRiskObservations($first: Int!, $lastId: ID!, $block: Int!, $since: BigInt!) {
+  observations: riskObservations(block: {number: $block}, first: $first, where: { id_gt: $lastId, observedAt_gte: $since }, orderBy: id, orderDirection: asc) {
     id signal metricValue sampleSize affectedAssets observedAt indexedBlock indexedBlockHash payload
   }
-  _meta { deployment hasIndexingErrors block { number hash timestamp } }
+  _meta(block: {number: $block}) { deployment hasIndexingErrors block { number hash timestamp } }
 }`;
 
 export interface ObservationQueryOptions {
@@ -248,6 +266,12 @@ export class GraphSignalSource {
     options: ObservationQueryOptions,
   ): Promise<readonly RiskObservation[]> {
     const config = this.client.getConfig();
+    if ((await options.canonical.getChainId()) !== config.chainId)
+      throw new Error("Graph canonical chain mismatch");
+    if (options.finalityBlock === undefined)
+      throw new Error("An RPC-proven finality block is required");
+    if (options.finalityBlock < 0n || options.finalityBlock > 2147483647n)
+      throw new Error("Finality block exceeds Graph Int range");
     if (options.sourceId !== this.sourceId)
       throw new Error("Graph source identifier mismatch");
     const result: RiskObservation[] = [];
@@ -256,7 +280,14 @@ export class GraphSignalSource {
     for (;;) {
       const page = await this.client.query(
         OBSERVATIONS_QUERY,
-        { first: config.pageSize, lastId },
+        {
+          first: config.pageSize,
+          lastId,
+          block: Number(options.finalityBlock),
+          since: String(
+            Math.max(0, options.nowSeconds - config.maxObservationAgeSeconds),
+          ),
+        },
         observationsResponseSchema,
       );
       if (page.meta.deployment !== config.deploymentId)
@@ -288,6 +319,10 @@ export class GraphSignalSource {
         seen.add(row.id);
         added += 1;
         const rowBlock = BigInt(row.indexedBlock);
+        if (rowBlock > indexedBlock || rowBlock > options.finalityBlock)
+          throw new Error(
+            "Graph observation is not final or exceeds metadata block",
+          );
         if (rowBlock > chainLatest)
           throw new Error("Graph observation is from the future");
         if (chainLatest - rowBlock > BigInt(config.maxIndexedLagBlocks))
@@ -322,7 +357,8 @@ export class GraphSignalSource {
           payloadHash: payloadHash(row.payload),
         });
       }
-      if (added === 0 || added < config.pageSize) break;
+      if (added === 0 && page.data.observations.length >= config.pageSize)
+        throw new Error("Graph pagination did not advance");
       if (page.data.observations.length < config.pageSize) break;
       const nextId = page.data.observations.at(-1)?.id;
       if (nextId === undefined || nextId === lastId) break;
@@ -364,7 +400,7 @@ export class GraphObservationAdapter implements DexSignalAdapter<GraphObservatio
       schemaVersion: this.config.schemaVersion,
       queryVersion: this.config.queryVersion,
       retrievedAt: context.retrievedAt,
-      finality: "FINAL",
+      finality: "UNFINALIZED",
       payloadHash: payloadHash(input.payload),
     };
   }
@@ -397,3 +433,4 @@ export class AurkaProtocolSignalAdapter extends GraphObservationAdapter {
 }
 
 export const graphObservationPayloadHash = payloadHash;
+export { UniswapV4SignalSource } from "./uniswap-v4.js";

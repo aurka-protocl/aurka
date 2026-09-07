@@ -8,6 +8,7 @@ const environmentSchema = z.object({
   PORT: z.coerce.number().int().min(1).max(65_535).default(8787),
   DATABASE_URL: z.string().min(1).default(":memory:"),
   CHAIN_ID: z.coerce.number().int().positive().safe().default(31_337),
+  RISK_RUNTIME_MODULE: z.string().min(1).optional(),
   RPC_URL: z.string().url().optional(),
   SETTLEMENT_CONTRACT: z
     .string()

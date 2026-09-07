@@ -363,7 +363,19 @@ export const policyRelations = relations(policies, ({ many }) => ({
   riskCertificates: many(riskCertificates),
 }));
 
+export const riskStates = sqliteTable("risk_states", {
+  positionId: text("position_id").primaryKey(),
+  stateJson: text("state_json").notNull(),
+});
+
+export const riskWorkflows = sqliteTable("risk_workflows", {
+  positionId: text("position_id").primaryKey(),
+  payloadJson: text("payload_json").notNull(),
+});
+
 export const schema = {
+  riskWorkflows,
+  riskStates,
   positions,
   policies,
   managedAssets,
