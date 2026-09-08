@@ -1,3 +1,13 @@
+import {
+  LocalChainSnapshotProvider,
+  positionForSnapshot,
+  contractEpoch,
+  contractPriceInput,
+  POSITION_ID,
+  POLICY_ID,
+  POSITION_ID_HASH,
+  STRATEGY_HASH,
+} from "./chain-snapshot.mjs";
 /* global URL, clearTimeout, console, process, setTimeout */
 
 import assert from "node:assert/strict";
@@ -17,13 +27,7 @@ import {
 import { mnemonicToAccount } from "viem/accounts";
 
 import { AurkaClient, AurkaError } from "../../sdk/dist/index.js";
-import {
-  calculatePortfolioValuation,
-  computeCapacityEpochId,
-  computePortfolioPriceSnapshotHash,
-  computeSettlementPriceSnapshotHash,
-  protocolEventTopic,
-} from "@aurka/shared";
+import { protocolEventTopic } from "@aurka/shared";
 import {
   AurkaService,
   ChainEventIndexer,
@@ -32,8 +36,6 @@ import {
   ServiceDatabase,
   closeApiServer,
   createApiServer,
-  hashCanonical,
-  hashAquaBalances,
   hashBytes,
   listenApiServer,
   signDigest,
@@ -42,11 +44,6 @@ import {
 const ROOT = path.resolve(new URL("../../..", import.meta.url).pathname);
 const CHAIN_ID = 31_337;
 const MNEMONIC = "test test test test test test test test test test test junk";
-const POSITION_ID = "position:local-settlement-e2e";
-const POLICY_ID = hashBytes("policy:local-settlement-e2e");
-const POSITION_ID_HASH = hashBytes(POSITION_ID);
-const STRATEGY_HASH = hashBytes("strategy:local-settlement-e2e");
-const ZERO_HASH = `0x${"00".repeat(32)}`;
 const MAX_VALUE = 50_000n;
 const REQUESTED_VALUE = 200_000n;
 const RECEIPT_TIMEOUT_MS = 20_000;
@@ -84,29 +81,13 @@ function check(condition, message) {
 }
 
 function asObject(value, index, field) {
-  if (value && typeof value === "object" && field in value) return value[field];
-  return value?.[index];
+  return value && typeof value === "object" && field in value
+    ? value[field]
+    : value?.[index];
 }
-
-function bytes32Address(address) {
-  return `0x${address.slice(2).toLowerCase().padStart(64, "0")}`;
-}
-
 function pow10(decimals) {
   return 10n ** BigInt(decimals);
 }
-
-function ceilDiv(numerator, denominator) {
-  return numerator === 0n ? 0n : (numerator - 1n) / denominator + 1n;
-}
-
-function valueToRaw(value, asset) {
-  return ceilDiv(
-    value * pow10(asset.decimals) * pow10(asset.priceDecimals),
-    asset.price * pow10(0),
-  );
-}
-
 function withTimeout(promise, milliseconds, label) {
   let timer;
   const timeout = new Promise((_, reject) => {
@@ -207,384 +188,6 @@ async function read(publicClient, contract, functionName, args) {
     functionName,
     args,
   });
-}
-
-function policyFrom(raw) {
-  const fee = raw?.fee ?? raw?.[9];
-  return {
-    treasury: asObject(raw, 0, "treasury"),
-    governance: asObject(raw, 1, "governance"),
-    maximumTransactionValue: BigInt(
-      asObject(raw, 3, "maximumTransactionValue"),
-    ),
-    nonce: BigInt(asObject(raw, 4, "nonce")),
-    priceMaxAgeSeconds: Number(asObject(raw, 5, "priceMaxAgeSeconds")),
-    maximumPriceDeviationBps: Number(
-      asObject(raw, 6, "maximumPriceDeviationBps"),
-    ),
-    paused: Boolean(asObject(raw, 7, "paused")),
-    fee: {
-      baseFeeBps: Number(asObject(fee, 0, "baseFeeBps")),
-      slopeBps: Number(asObject(fee, 1, "slopeBps")),
-      maximumFeeBps: Number(asObject(fee, 2, "maximumFeeBps")),
-      treasuryBaseFeeBps: Number(asObject(fee, 3, "treasuryBaseFeeBps")),
-      solverFeeBps: Number(asObject(fee, 4, "solverFeeBps")),
-      protocolFeeBps: Number(asObject(fee, 5, "protocolFeeBps")),
-      treasuryFeeRecipient: asObject(fee, 6, "treasuryFeeRecipient"),
-      protocolFeeRecipient: asObject(fee, 7, "protocolFeeRecipient"),
-    },
-  };
-}
-
-class LocalChainSnapshotProvider {
-  constructor(publicClient, contracts, solverAddress) {
-    this.publicClient = publicClient;
-    this.contracts = contracts;
-    this.solverAddress = solverAddress;
-  }
-
-  async getPositionSnapshot(positionId) {
-    const snapshot = await this.currentSnapshot();
-    if (positionId !== snapshot.positionId)
-      throw new Error("Unknown local position");
-    return snapshot;
-  }
-
-  async prepareIntent(input) {
-    const snapshot = await this.currentSnapshot();
-    if (input.positionId !== snapshot.positionId)
-      throw new Error("Unknown local position");
-    const intent = {
-      intentId: hashBytes(JSON.stringify(input)),
-      policyId: snapshot.policyId,
-      positionIdHash: POSITION_ID_HASH,
-      trader: input.trader,
-      traderInputToken: input.traderInputToken,
-      traderOutputToken: input.traderOutputToken,
-      requestedValue: input.requestedValue,
-      minimumTraderOutputValue: input.minimumTraderOutputValue,
-      exactInput: false,
-      allowPartialFill: true,
-      deadline: input.deadline,
-      nonce: input.nonce,
-      balanceSnapshot: snapshot.balancesHash,
-      priceSnapshot: computeSettlementPriceSnapshotHash(
-        snapshot.priceProtection,
-      ),
-      aquaStrategyHash: snapshot.aquaStrategyHash,
-    };
-    await this.getSnapshot(intent);
-    return intent;
-  }
-
-  async getSnapshot(intent) {
-    const snapshot = await this.currentSnapshot();
-    if (intent.policyId.toLowerCase() !== snapshot.policyId.toLowerCase())
-      throw new Error("Unknown policy");
-    if (intent.positionIdHash.toLowerCase() !== POSITION_ID_HASH.toLowerCase())
-      throw new Error("Unknown position");
-    if (
-      intent.aquaStrategyHash.toLowerCase() !==
-      snapshot.aquaStrategyHash.toLowerCase()
-    )
-      throw new Error("Unauthorized Aqua strategy");
-    if (
-      intent.traderInputToken.toLowerCase() !==
-        snapshot.capacityEpoch.traderInputToken.toLowerCase() ||
-      intent.traderOutputToken.toLowerCase() !==
-        snapshot.capacityEpoch.traderOutputToken.toLowerCase()
-    )
-      throw new Error("Unsupported local settlement direction");
-    if (
-      intent.balanceSnapshot.toLowerCase() !==
-      snapshot.balancesHash.toLowerCase()
-    )
-      throw new Error("Balance snapshot is stale");
-    if (
-      intent.priceSnapshot.toLowerCase() !==
-      computeSettlementPriceSnapshotHash(snapshot.priceProtection).toLowerCase()
-    )
-      throw new Error("Price snapshot is stale");
-    return snapshot;
-  }
-
-  async currentSnapshot() {
-    const { policyRegistry, aqua, oracle, router, erc20Abi } = this.contracts;
-    const block = await this.publicClient.getBlock();
-    const rawPolicy = await read(
-      this.publicClient,
-      policyRegistry,
-      "getPolicy",
-      [POLICY_ID],
-    );
-    const chainPolicy = policyFrom(rawPolicy);
-    const tokenAddresses = await read(
-      this.publicClient,
-      policyRegistry,
-      "assets",
-      [POLICY_ID],
-    );
-    const fee = chainPolicy.fee;
-    const managedAssets = [];
-    const prices = [];
-    const balances = [];
-    for (const tokenAddress of tokenAddresses) {
-      const symbol = await read(
-        this.publicClient,
-        { address: tokenAddress, abi: erc20Abi },
-        "symbol",
-      );
-      const boundsRaw = await read(
-        this.publicClient,
-        policyRegistry,
-        "assetBounds",
-        [POLICY_ID, tokenAddress],
-      );
-      const priceRaw = await read(this.publicClient, oracle, "getPrice", [
-        tokenAddress,
-      ]);
-      const balanceRaw = await read(this.publicClient, aqua, "rawBalances", [
-        chainPolicy.treasury,
-        router.address,
-        STRATEGY_HASH,
-        tokenAddress,
-      ]);
-      const bounds = {
-        decimals: Number(asObject(boundsRaw, 0, "decimals")),
-        minimumWeightBps: Number(asObject(boundsRaw, 1, "minimumWeightBps")),
-        maximumWeightBps: Number(asObject(boundsRaw, 2, "maximumWeightBps")),
-      };
-      const price = {
-        token: tokenAddress,
-        snapshotId: asObject(priceRaw, 3, "snapshotId"),
-        price: BigInt(asObject(priceRaw, 0, "price")),
-        priceDecimals: Number(asObject(priceRaw, 1, "priceDecimals")),
-        observedAt: Number(asObject(priceRaw, 2, "observedAt")),
-      };
-      const balance = BigInt(asObject(balanceRaw, 0, "balance"));
-      managedAssets.push({
-        token: tokenAddress,
-        symbol,
-        balance,
-        decimals: bounds.decimals,
-        price: price.price,
-        priceDecimals: price.priceDecimals,
-        minimumWeightBps: bounds.minimumWeightBps,
-        maximumWeightBps: bounds.maximumWeightBps,
-      });
-      prices.push(price);
-      balances.push(balance);
-    }
-    const portfolio = calculatePortfolioValuation(managedAssets, 0);
-    const inputAsset = managedAssets.find(
-      (asset) => asset.token.toLowerCase() === tokenAddresses[1].toLowerCase(),
-    );
-    const outputAsset = managedAssets.find(
-      (asset) => asset.token.toLowerCase() === tokenAddresses[0].toLowerCase(),
-    );
-    check(inputAsset && outputAsset, "Local settlement pair is not managed");
-    const inputPrice = prices.find(
-      (price) => price.token.toLowerCase() === inputAsset.token.toLowerCase(),
-    );
-    const outputPrice = prices.find(
-      (price) => price.token.toLowerCase() === outputAsset.token.toLowerCase(),
-    );
-    check(inputPrice && outputPrice, "Local settlement prices are incomplete");
-    const blockTimestamp = Number(block.timestamp);
-    const priceProtection = {
-      traderInputReferencePrice: inputPrice,
-      traderInputExecutionPrice: inputPrice,
-      traderOutputReferencePrice: outputPrice,
-      traderOutputExecutionPrice: outputPrice,
-      approvedTraderInputSnapshotId: inputPrice.snapshotId,
-      approvedTraderOutputSnapshotId: outputPrice.snapshotId,
-      // These provisional values are replaced by the proposal-specific raw
-      // amounts in buildRouterTransactionRequest. They are still derived from
-      // the deployed token scales and approved prices.
-      traderInputAmount: valueToRaw(MAX_VALUE, inputAsset),
-      traderOutputAmount: valueToRaw(MAX_VALUE, outputAsset),
-      traderInputDecimals: inputAsset.decimals,
-      traderOutputDecimals: outputAsset.decimals,
-      valueDecimals: 0,
-      nowSeconds: blockTimestamp,
-      maximumPriceAgeSeconds: chainPolicy.priceMaxAgeSeconds,
-      maximumPriceDeviationBps: chainPolicy.maximumPriceDeviationBps,
-    };
-    const priceSnapshot = computeSettlementPriceSnapshotHash(priceProtection);
-    const portfolioPriceSnapshot = computePortfolioPriceSnapshotHash(prices);
-    const balancesHash = hashAquaBalances(
-      managedAssets.map((asset) => asset.token),
-      balances,
-    );
-    const capacityEpoch = {
-      positionId: POSITION_ID,
-      traderInputToken: inputAsset.token,
-      traderOutputToken: outputAsset.token,
-      balanceSnapshot: balancesHash,
-      priceSnapshot,
-      portfolioPriceSnapshot,
-      policyNonce: chainPolicy.nonce,
-      riskCertificateHash: ZERO_HASH,
-      aquaStrategyHash: STRATEGY_HASH,
-      capacityBaselineValue: chainPolicy.maximumTransactionValue,
-      consumedBefore: 0n,
-      chainId: BigInt(CHAIN_ID),
-      verifyingContract: router.address,
-    };
-    const portfolioSnapshot = {
-      positionId: POSITION_ID,
-      blockNumber: block.number.toString(),
-      observedAt: blockTimestamp,
-      nav: portfolio.nav.toString(),
-      valueDecimals: portfolio.valueDecimals,
-      assets: portfolio.assets.map((asset) => ({
-        token: asset.token,
-        symbol: asset.symbol,
-        decimals: asset.decimals,
-        balance: asset.balance.toString(),
-        price: asset.price.toString(),
-        priceDecimals: asset.priceDecimals,
-        value: asset.value.toString(),
-        weightBps: Number(asset.weightBps),
-      })),
-      snapshotHash: hashCanonical(portfolio),
-    };
-    return {
-      positionId: POSITION_ID,
-      chainId: CHAIN_ID,
-      verifyingContract: router.address,
-      policyId: POLICY_ID,
-      policy: {
-        maximumTransactionValue: chainPolicy.maximumTransactionValue,
-        assets: managedAssets.map((asset) => ({
-          token: asset.token,
-          minimumWeightBps: asset.minimumWeightBps,
-          maximumWeightBps: asset.maximumWeightBps,
-        })),
-      },
-      fee: {
-        baseFeeBps: fee.baseFeeBps,
-        slopeBps: fee.slopeBps,
-        maximumFeeBps: fee.maximumFeeBps,
-        treasuryBaseFeeBps: fee.treasuryBaseFeeBps,
-        solverFeeBps: fee.solverFeeBps,
-        protocolFeeBps: fee.protocolFeeBps,
-      },
-      feeAccounting: {
-        feeToken: outputAsset.token,
-        feePaymentMode: "OUTPUT_TOKEN",
-        treasuryRecipient: chainPolicy.treasury,
-        solverRecipient: this.solverAddress,
-        protocolRecipient: fee.protocolFeeRecipient,
-      },
-      riskMode: "NORMAL",
-      riskCertificateHash: ZERO_HASH,
-      policyNonce: chainPolicy.nonce.toString(),
-      portfolio,
-      portfolioSnapshot,
-      capacityEpoch,
-      capacityEpochId: computeCapacityEpochId(capacityEpoch),
-      priceProtection,
-      snapshotBlock: block.number,
-      aquaStrategyHash: STRATEGY_HASH,
-      balancesHash,
-      rawAmountsForValue: (traderInputValue, treasuryOutputValue) => ({
-        traderInputAmount: valueToRaw(traderInputValue, inputAsset),
-        traderOutputAmount: valueToRaw(treasuryOutputValue, outputAsset),
-      }),
-      outputAmountForValue: (value) => valueToRaw(value, outputAsset),
-    };
-  }
-}
-
-function positionForSnapshot(snapshot, registry, treasury) {
-  return {
-    id: snapshot.positionId,
-    name: "AURKA local settlement E2E treasury",
-    chainId: snapshot.chainId,
-    owner: treasury,
-    treasury,
-    policy: {
-      id: snapshot.policyId,
-      chainId: snapshot.chainId,
-      registry,
-      treasury,
-      governance: treasury,
-      assets: snapshot.portfolio.assets.map((asset) => ({
-        token: asset.token,
-        symbol: asset.symbol ?? "ASSET",
-        decimals: asset.decimals,
-        minimumWeightBps: Number(asset.minimumWeightBps),
-        maximumWeightBps: Number(asset.maximumWeightBps),
-      })),
-      maximumTransactionValue:
-        snapshot.policy.maximumTransactionValue.toString(),
-      quoteTtlSeconds: 60,
-      priceMaxAgeSeconds: snapshot.priceProtection.maximumPriceAgeSeconds,
-      maximumPriceDeviationBps: Number(
-        snapshot.priceProtection.maximumPriceDeviationBps,
-      ),
-      fee: {
-        baseFeeBps: Number(snapshot.fee.baseFeeBps),
-        slopeBps: Number(snapshot.fee.slopeBps),
-        maximumFeeBps: Number(snapshot.fee.maximumFeeBps),
-        treasuryBaseFeeBps: Number(snapshot.fee.treasuryBaseFeeBps),
-        solverFeeBps: Number(snapshot.fee.solverFeeBps),
-        protocolFeeBps: Number(snapshot.fee.protocolFeeBps),
-        treasuryFeeRecipient: treasury,
-        protocolFeeRecipient: snapshot.feeAccounting.protocolRecipient,
-      },
-      nonce: snapshot.policyNonce,
-      paused: false,
-    },
-    riskMode: "NORMAL",
-    currentPortfolio: snapshot.portfolioSnapshot,
-    createdAt: snapshot.priceProtection.nowSeconds,
-    updatedAt: snapshot.priceProtection.nowSeconds,
-  };
-}
-
-function contractEpoch(snapshot) {
-  return {
-    positionIdHash: POSITION_ID_HASH,
-    traderInputTokenId: bytes32Address(snapshot.capacityEpoch.traderInputToken),
-    traderOutputTokenId: bytes32Address(
-      snapshot.capacityEpoch.traderOutputToken,
-    ),
-    balanceSnapshot: snapshot.capacityEpoch.balanceSnapshot,
-    priceSnapshot: snapshot.capacityEpoch.priceSnapshot,
-    portfolioPriceSnapshot: snapshot.capacityEpoch.portfolioPriceSnapshot,
-    policyNonce: snapshot.capacityEpoch.policyNonce,
-    riskCertificateHash: snapshot.capacityEpoch.riskCertificateHash,
-    aquaStrategyHash: snapshot.capacityEpoch.aquaStrategyHash,
-    capacityBaseline: snapshot.capacityEpoch.capacityBaselineValue,
-    consumedBefore: snapshot.capacityEpoch.consumedBefore,
-    chainId: snapshot.capacityEpoch.chainId,
-    verifyingContract: snapshot.capacityEpoch.verifyingContract,
-    capacityEpochId: snapshot.capacityEpochId,
-  };
-}
-
-function contractPriceInput(snapshot) {
-  const price = snapshot.priceProtection;
-  return {
-    traderInputToken: price.traderInputReferencePrice.token,
-    traderOutputToken: price.traderOutputReferencePrice.token,
-    traderInputReferencePrice: price.traderInputReferencePrice,
-    traderInputExecutionPrice: price.traderInputExecutionPrice,
-    traderOutputReferencePrice: price.traderOutputReferencePrice,
-    traderOutputExecutionPrice: price.traderOutputExecutionPrice,
-    approvedTraderInputSnapshotId: price.approvedTraderInputSnapshotId,
-    approvedTraderOutputSnapshotId: price.approvedTraderOutputSnapshotId,
-    traderInputAmount: price.traderInputAmount,
-    traderOutputAmount: price.traderOutputAmount,
-    traderInputDecimals: price.traderInputDecimals,
-    traderOutputDecimals: price.traderOutputDecimals,
-    valueDecimals: price.valueDecimals,
-    currentTime: BigInt(price.nowSeconds),
-    maximumPriceAgeSeconds: price.maximumPriceAgeSeconds,
-    maximumPriceDeviationBps: price.maximumPriceDeviationBps,
-  };
 }
 
 function receiptLogs(logs, routerAddress) {
@@ -1380,7 +983,21 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  console.error(error instanceof Error ? error.message : error);
-  process.exitCode = 1;
-});
+export {
+  artifact,
+  deploy,
+  write,
+  read,
+  receiptLogs,
+  blockObservedLogs,
+  stopProcess,
+};
+
+if (
+  process.argv[1] &&
+  path.resolve(process.argv[1]) === new URL(import.meta.url).pathname
+)
+  main().catch((error) => {
+    console.error(error instanceof Error ? error.message : error);
+    process.exitCode = 1;
+  });

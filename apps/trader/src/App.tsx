@@ -1,3 +1,4 @@
+import ForkSpace from "./pages/ForkSpace";
 import {
   BrowserRouter as Router,
   Navigate,
@@ -12,6 +13,12 @@ import History from "./pages/History";
 import Status from "./pages/Status";
 
 function App() {
+  if (import.meta.env.VITE_AURKA_MODE === "fork")
+    return (
+      <main className="min-h-screen bg-slate-950 p-4 sm:p-8">
+        <ForkSpace />
+      </main>
+    );
   return (
     <Router>
       <Layout>

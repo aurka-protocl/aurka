@@ -17,3 +17,5 @@ contracts/out/
 
 packages/graph/subgraph/generated/
 packages/graph/subgraph/build/
+
+.fork-space/

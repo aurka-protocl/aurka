@@ -19,7 +19,10 @@
     "integration:graph-node": "pnpm build && forge build && pnpm --filter @aurka/graph subgraph:build && pnpm --filter @aurka/services exec node scripts/local-graph-node-e2e.mjs",
     "lint": "eslint .",
     "test": "pnpm -r --if-present test",
-    "typecheck": "pnpm -r --if-present typecheck"
+    "typecheck": "pnpm -r --if-present typecheck",
+    "fork:start": "pnpm build && forge build && node --env-file=.env packages/services/scripts/fork-space.mjs",
+    "fork:reset": "pnpm build && forge build && node --env-file=.env packages/services/scripts/fork-space.mjs --reset",
+    "integration:fork-wallet": "node packages/services/scripts/fork-wallet-e2e.mjs"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
