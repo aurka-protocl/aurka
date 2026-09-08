@@ -1,0 +1,168 @@
+{
+  "chainId": 31337,
+  "rpcUrl": "http://127.0.0.1:8545",
+  "policyRegistry": "0x8888888888888888888888888888888888888888",
+  "riskRegistry": "0x9999999999999999999999999999999999999999",
+  "router": "0x7777777777777777777777777777777777777777",
+  "walletId": "fixture-risk-wallet",
+  "walletPolicyReference": "fixture-risk-policy-v1",
+  "finalityMaxAgeSeconds": 1000,
+  "certificateLifetimeSeconds": 300,
+  "renewalLeadSeconds": 60,
+  "positions": [
+    {
+      "positionId": "position:canonical",
+      "policyId": "0x0101010101010101010101010101010101010101010101010101010101010101",
+      "watchtower": "0x4444444444444444444444444444444444444444",
+      "deploymentId": "fixture-deployment",
+      "configuration": {
+        "version": "risk-v1",
+        "maxObservationAgeSeconds": 120,
+        "maxIndexedLagBlocks": 2,
+        "minimumSampleSize": "10",
+        "requiredQuorum": 2,
+        "failSafeMode": "CAUTIOUS",
+        "recoveryQuorum": 2,
+        "cooldownSeconds": 30,
+        "thresholds": [
+          {
+            "signal": "DEX_LIQUIDITY",
+            "cautiousAt": "-10",
+            "shockAt": "-20",
+            "pauseAt": "-30",
+            "affectedAssets": ["0x1111111111111111111111111111111111111111"],
+            "reasonCode": "LIQUIDITY_DECLINE"
+          }
+        ],
+        "boundSets": [
+          {
+            "mode": "NORMAL",
+            "maximumTradeValue": "50000",
+            "activeBounds": [
+              {
+                "token": "0x1111111111111111111111111111111111111111",
+                "minimumWeightBps": 5500,
+                "maximumWeightBps": 10000,
+                "paused": false
+              },
+              {
+                "token": "0x2222222222222222222222222222222222222222",
+                "minimumWeightBps": 0,
+                "maximumWeightBps": 3500,
+                "paused": false
+              },
+              {
+                "token": "0x3333333333333333333333333333333333333333",
+                "minimumWeightBps": 0,
+                "maximumWeightBps": 1500,
+                "paused": false
+              }
+            ]
+          },
+          {
+            "mode": "CAUTIOUS",
+            "maximumTradeValue": "37500",
+            "activeBounds": [
+              {
+                "token": "0x1111111111111111111111111111111111111111",
+                "minimumWeightBps": 5500,
+                "maximumWeightBps": 10000,
+                "paused": false
+              },
+              {
+                "token": "0x2222222222222222222222222222222222222222",
+                "minimumWeightBps": 0,
+                "maximumWeightBps": 3500,
+                "paused": false
+              },
+              {
+                "token": "0x3333333333333333333333333333333333333333",
+                "minimumWeightBps": 0,
+                "maximumWeightBps": 1500,
+                "paused": false
+              }
+            ]
+          },
+          {
+            "mode": "SHOCK",
+            "maximumTradeValue": "20000",
+            "activeBounds": [
+              {
+                "token": "0x1111111111111111111111111111111111111111",
+                "minimumWeightBps": 5500,
+                "maximumWeightBps": 10000,
+                "paused": false
+              },
+              {
+                "token": "0x2222222222222222222222222222222222222222",
+                "minimumWeightBps": 0,
+                "maximumWeightBps": 3500,
+                "paused": false
+              },
+              {
+                "token": "0x3333333333333333333333333333333333333333",
+                "minimumWeightBps": 0,
+                "maximumWeightBps": 1500,
+                "paused": false
+              }
+            ]
+          },
+          {
+            "mode": "PAUSED",
+            "maximumTradeValue": "0",
+            "activeBounds": [
+              {
+                "token": "0x1111111111111111111111111111111111111111",
+                "minimumWeightBps": 5500,
+                "maximumWeightBps": 10000,
+                "paused": true
+              },
+              {
+                "token": "0x2222222222222222222222222222222222222222",
+                "minimumWeightBps": 0,
+                "maximumWeightBps": 3500,
+                "paused": true
+              },
+              {
+                "token": "0x3333333333333333333333333333333333333333",
+                "minimumWeightBps": 0,
+                "maximumWeightBps": 1500,
+                "paused": true
+              }
+            ]
+          }
+        ]
+      },
+      "approvedConfigurationHash": "0x71dbe16fa8f5a4d75900c82485792cd72b0972e7bf13dc4bec676f0bac6fca44",
+      "approvedHardBoundsHash": "0xdb8e171b055e7909da45c382663a4ed98d6136b8959f6b5c253b601c83a05a7d",
+      "sources": [
+        {
+          "sourceId": "fixture-a",
+          "sourceKind": "FIXTURE",
+          "endpoint": "http://fixture.invalid/graphql",
+          "deploymentId": "fixture-deployment",
+          "schemaVersion": "risk-v1",
+          "queryVersion": "observations-v1",
+          "timeoutMs": 10000,
+          "attempts": 1,
+          "pageSize": 100,
+          "maxObservationAgeSeconds": 120,
+          "maxIndexedLagBlocks": 2
+        },
+        {
+          "sourceId": "fixture-b",
+          "sourceKind": "FIXTURE",
+          "endpoint": "http://fixture.invalid/graphql",
+          "deploymentId": "fixture-deployment",
+          "schemaVersion": "risk-v1",
+          "queryVersion": "observations-v1",
+          "timeoutMs": 10000,
+          "attempts": 1,
+          "pageSize": 100,
+          "maxObservationAgeSeconds": 120,
+          "maxIndexedLagBlocks": 2
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,152 @@
+name: Protected integration smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Trusted branch to validate (must be main)
+        required: true
+        default: main
+        type: string
+      mode:
+        description: External checks to run
+        required: true
+        default: read-only
+        type: choice
+        options:
+          - read-only
+          - write-smoke
+      confirm_write:
+        description:
+          Type AUTHORIZE_AURKA_PROTECTED_WRITE only for a separately approved
+          write review
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: protected-integration-smoke
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    name: Verify trusted ref and environment gates
+    runs-on: ubuntu-latest
+    steps:
+      - name: Reject fork and untrusted ref dispatches
+        env:
+          REQUESTED_REF: ${{ inputs.ref }}
+          WORKFLOW_REF: ${{ github.ref }}
+          WORKFLOW_REPOSITORY: ${{ github.repository }}
+          EVENT_REPOSITORY: ${{ github.event.repository.full_name }}
+        run: |
+          set -euo pipefail
+          test "$REQUESTED_REF" = main
+          test "$WORKFLOW_REF" = refs/heads/main
+          test "$WORKFLOW_REPOSITORY" = "$EVENT_REPOSITORY"
+
+      - name: Verify required-reviewer protection is configured
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          SMOKE_MODE: ${{ inputs.mode }}
+        run: |
+          set -euo pipefail
+          case "$SMOKE_MODE" in
+            read-only) environment=aurka-protected-integration ;;
+            write-smoke) environment=aurka-authorized-write-smoke ;;
+            *) exit 1 ;;
+          esac
+          payload="$(gh api "repos/${REPOSITORY}/environments/${environment}")"
+          reviewers="$(jq '[.protection_rules[]? | select(.type == "required_reviewers") | .reviewers[]?] | length' <<<"$payload")"
+          test "$reviewers" -gt 0
+
+  read-only:
+    name: Read-only RPC, Graph, and wallet-policy checks
+    needs: preflight
+    if: ${{ needs.preflight.result == 'success' && inputs.mode == 'read-only' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: aurka-protected-integration
+    env:
+      AURKA_SMOKE_MODE: read-only
+      AURKA_RPC_URL: ${{ secrets.AURKA_RPC_URL }}
+      AURKA_CHAIN_ID: ${{ vars.AURKA_CHAIN_ID }}
+      AURKA_SETTLEMENT_CONTRACT: ${{ vars.AURKA_SETTLEMENT_CONTRACT }}
+      AURKA_POLICY_REGISTRY: ${{ vars.AURKA_POLICY_REGISTRY }}
+      AURKA_RISK_REGISTRY: ${{ vars.AURKA_RISK_REGISTRY }}
+      AURKA_GRAPH_ENDPOINT: ${{ vars.AURKA_GRAPH_ENDPOINT }}
+      AURKA_GRAPH_DEPLOYMENT_ID: ${{ vars.AURKA_GRAPH_DEPLOYMENT_ID }}
+      AURKA_GRAPH_MAX_AGE_SECONDS: ${{ vars.AURKA_GRAPH_MAX_AGE_SECONDS }}
+      AURKA_GRAPH_API_KEY: ${{ secrets.AURKA_GRAPH_API_KEY }}
+      AURKA_WALLET_POLICY_URL: ${{ vars.AURKA_WALLET_POLICY_URL }}
+      AURKA_WALLET_ID: ${{ vars.AURKA_WALLET_ID }}
+      AURKA_WALLET_POLICY_TOKEN: ${{ secrets.AURKA_WALLET_POLICY_TOKEN }}
+    steps:
+      - name: Check out trusted main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.13.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - name: Install workspace dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts=false
+
+      - name: Run protected read-only smoke
+        run: |
+          mkdir -p artifacts
+          AURKA_ARTIFACT_DIR=artifacts node packages/services/scripts/protected-smoke.mjs
+
+      - name: Upload protected smoke result
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: protected-read-only-${{ github.run_id }}
+          path: artifacts/
+          if-no-files-found: ignore
+
+  write-smoke:
+    name: Explicitly gated write smoke
+    needs: preflight
+    if:
+      ${{ needs.preflight.result == 'success' && inputs.mode == 'write-smoke' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: aurka-authorized-write-smoke
+    steps:
+      - name: Check out trusted main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.13.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - name: Install workspace dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts=false
+
+      - name: Keep write mode explicit and fail closed
+        env:
+          AURKA_SMOKE_MODE: write-smoke
+          AURKA_WRITE_CONFIRMATION: ${{ inputs.confirm_write }}
+        run: node packages/services/scripts/protected-smoke.mjs

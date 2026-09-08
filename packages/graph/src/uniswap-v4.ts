@@ -66,7 +66,10 @@ export class UniswapV4SignalSource {
       page.meta.deployment !== config.deploymentId ||
       page.meta.hasIndexingErrors ||
       BigInt(page.meta.block.number) !== block ||
-      page.meta.block.hash.toLowerCase() !== canonicalHash?.toLowerCase()
+      page.meta.block.hash === undefined ||
+      page.meta.block.hash === null ||
+      canonicalHash === undefined ||
+      page.meta.block.hash.toLowerCase() !== canonicalHash.toLowerCase()
     )
       throw new Error("DEX metadata is not canonical");
     const [current, previous] = page.data.poolHourDatas;
@@ -98,8 +101,8 @@ export class UniswapV4SignalSource {
       sourceKind: "DEX_SUBGRAPH" as const,
       chainId: config.chainId,
       deploymentId: config.deploymentId,
-      schemaVersion: "uniswap-v4-pool-hour-v1",
-      queryVersion: "completed-hours-v1",
+      schemaVersion: config.schemaVersion,
+      queryVersion: config.queryVersion,
       sampleSize: current.txCount,
       affectedAssets: [current.pool.token0.id, current.pool.token1.id],
       indexedBlock: block.toString(),

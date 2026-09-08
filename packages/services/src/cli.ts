@@ -8,6 +8,7 @@ import { ServiceDatabase } from "./db/database.js";
 import { createApiServer, listenApiServer } from "./api/server.js";
 import { AurkaService } from "./service.js";
 import { JsonRpcHttpTransport } from "./solver/rpc.js";
+import type { ReadinessProbeSet } from "./readiness.js";
 
 const config = loadConfig();
 const command = process.argv[2] ?? "serve";
@@ -39,6 +40,12 @@ if (command === "migrate" || command === "check") {
       database,
       chainId: config.CHAIN_ID,
       indexConfirmations: config.INDEX_CONFIRMATIONS,
+      maxIndexerLagBlocks: config.INDEXER_MAX_LAG_BLOCKS,
+      rpcFinalityMaxAgeSeconds: config.RPC_FINALITY_MAX_AGE_SECONDS,
+      readiness: {
+        probeTimeoutMs: config.READINESS_PROBE_TIMEOUT_MS,
+        cacheTtlSeconds: config.READINESS_CACHE_TTL_SECONDS,
+      },
       ...(!config.RPC_URL ? { provider: new LocalDemoProvider() } : {}),
       ...(config.SETTLEMENT_CONTRACT
         ? { settlementContract: config.SETTLEMENT_CONTRACT }
@@ -58,6 +65,7 @@ if (command === "migrate" || command === "check") {
         positions: string[];
         readRisk?: RegistryRiskReader;
         riskRegistry?: string;
+        readiness?: ReadinessProbeSet;
       }>;
     };
     if (typeof runtime.createRiskRuntime !== "function")
@@ -69,6 +77,19 @@ if (command === "migrate" || command === "check") {
       typeof configured.worker?.tick !== "function"
     )
       throw new Error("Invalid risk runtime");
+    handle.service.configureReadiness({
+      mode: "live",
+      expectedChainId: config.CHAIN_ID,
+      requirements: {
+        rpc: true,
+        indexer: true,
+        sources: true,
+        worker: true,
+        signer: true,
+        registry: true,
+      },
+      ...(configured.readiness ? { probes: configured.readiness } : {}),
+    });
     if (configured.riskRegistry)
       handle.service.riskService.configureCertificateRegistry(
         configured.riskRegistry,

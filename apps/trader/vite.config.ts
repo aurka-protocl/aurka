@@ -13,7 +13,7 @@ export default defineConfig({
     port: 3002,
     proxy: {
       "/api": {
-        target: "http://127.0.0.1:8787",
+        target: process.env.AURKA_SERVICE_URL ?? "http://127.0.0.1:8787",
         rewrite: (path) => path.replace(/^\/api/, ""),
         changeOrigin: true,
       },

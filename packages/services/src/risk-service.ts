@@ -2,6 +2,7 @@ import type { z } from "zod";
 import {
   riskEvaluateRequestSchema,
   riskCertificateRequestSchema,
+  riskConfigurationSchema,
   riskPositionResponseSchema,
   hashActiveBounds,
   hashRiskCertificate,
@@ -403,6 +404,9 @@ export class RiskService {
         activeBounds: [],
         observedAt: null,
       },
+      configuration: stored.configuration
+        ? riskConfigurationSchema.parse(stored.configuration)
+        : null,
       proposed: stored.evaluation ?? null,
       certificate,
       certificateState:

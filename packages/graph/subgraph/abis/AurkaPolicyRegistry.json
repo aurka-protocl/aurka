@@ -16,12 +16,6 @@
       },
       {
         "indexed": false,
-        "internalType": "uint8",
-        "name": "decimals",
-        "type": "uint8"
-      },
-      {
-        "indexed": false,
         "internalType": "uint16",
         "name": "minimumWeightBps",
         "type": "uint16"

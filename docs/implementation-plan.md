@@ -19,24 +19,32 @@ accounting, integrated price protection, and a hashed persistent capacity epoch
 as recorded in AURKA-004. The canonical direct fill is 50,000 gross for a
 200,000 request; the treasury post-state is computed including fee revenue.
 
-4. **Atomic settlement (AURKA-005, complete):** the direct pairwise router
-   verifies signed intent/proposal commitments, effective policy/risk state,
-   approved price snapshots, directional capacity epochs, exact Aqua token
-   deltas, fees, and the fee-inclusive final portfolio atomically. The local
-   `AURKA_DIRECT_PAIR_V1` program is an allowlisted deterministic equivalent;
-   live upstream integration remains separately gated. Multi-route optimization
-   and application integrations do not belong to this milestone.
+4. **Atomic settlement (AURKA-005, local milestone complete; release blocked):**
+   the direct pairwise router verifies signed intent/proposal commitments,
+   effective policy/risk state, approved price snapshots, directional capacity
+   epochs, exact Aqua token deltas, fees, and the fee-inclusive final portfolio
+   atomically. The local `AURKA_DIRECT_PAIR_V1` program is an allowlisted
+   deterministic equivalent; live upstream integration remains separately gated.
+   Multi-route optimization and application integrations do not belong to this
+   milestone.
 5. **Solvers and services (AURKA-006, local milestone complete):** implement the
    deterministic direct solver, closed optimized-solver boundary, validated
    `/v1` API, SQLite/Drizzle persistence, monitoring, and idempotent/reorg-aware
    indexing. Live RPC, production signing, and external integrations remain
    separately gated.
-6. **Risk and wallet integrations:** add Graph-backed watchtower signals and the
-   Privy wallet adapter behind narrow, testable interfaces.
-7. **SDK and application:** expose discovery, quotes, proposals, risk, and
+6. **Risk and wallet integrations (AURKA-007, local implementation complete;
+   release blocked):** add Graph-backed watchtower signals and the Privy wallet
+   adapter behind narrow, testable interfaces. Live deployment, real policy,
+   protected-smoke, and independent-review gates remain open.
+7. **SDK and application (AURKA-008, local implementation complete; release
+   blocked by AURKA-007):** expose discovery, quotes, proposals, risk, and
    execution through the SDK and build the treasury/trader interfaces.
-8. **System verification:** complete integration and end-to-end coverage,
-   containers, CI workflows, deployment scripts, and operational documentation.
+8. **System verification (AURKA-009 through AURKA-014, local gates complete;
+   final release gate AURKA-015 blocked):** complete integration and end-to-end
+   coverage, containers, CI workflows, deployment scripts, and operational
+   documentation. Local evidence is recorded in
+   [`docs/release-gates.md`](./release-gates.md); live and independent evidence
+   remain separate.
 
 External integration phases begin with a fresh review of the corresponding
 official APIs and repositories. Live tests stay isolated from deterministic CI

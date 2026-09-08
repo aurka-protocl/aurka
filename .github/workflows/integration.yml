@@ -1,0 +1,271 @@
+name: System integration
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: integration-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  local-settlement:
+    name: Signed local settlement
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      AURKA_ANVIL_PID_FILE:
+        /tmp/aurka-ci-settlement-${{ github.run_id }}-${{ github.run_attempt
+        }}.pid
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.13.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.2.3
+
+      - name: Install workspace dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts=false
+
+      - name: Run signed local settlement and projection check
+        run: |
+          set -o pipefail
+          mkdir -p artifacts
+          pnpm integration:local-settlement 2>&1 | tee artifacts/local-settlement.log
+
+      - name: Stop scoped local chain after cancellation/failure
+        if: ${{ always() }}
+        run: |
+          set +e
+          if [ -s "$AURKA_ANVIL_PID_FILE" ]; then
+            pid="$(head -n 1 "$AURKA_ANVIL_PID_FILE")"
+            if [ -r "/proc/$pid/cmdline" ] && tr '\0' ' ' < "/proc/$pid/cmdline" | grep -Eq '(^|/)anvil( |$)'; then
+              kill "$pid"
+            fi
+          fi
+
+      - name: Upload settlement diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: local-settlement-${{ github.run_id }}
+          path: artifacts/
+          if-no-files-found: ignore
+
+  graph-node:
+    name: Actual local Graph Node indexing
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      AURKA_GRAPH_PROJECT:
+        aurka-ci-graph-${{ github.run_id }}-${{ github.run_attempt }}
+      AURKA_ANVIL_PID_FILE:
+        /tmp/aurka-ci-graph-${{ github.run_id }}-${{ github.run_attempt }}.pid
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.13.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.2.3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Install workspace dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts=false
+
+      - name: Run actual Graph Node indexing and reorg check
+        run: |
+          set -o pipefail
+          mkdir -p artifacts
+          pnpm integration:graph-node 2>&1 | tee artifacts/graph-node.log
+
+      - name: Remove disposable Graph Node resources
+        if: ${{ always() }}
+        run: |
+          set +e
+          for container in $(docker ps -aq --filter "label=com.docker.compose.project=${AURKA_GRAPH_PROJECT}"); do
+            docker rm -f "$container"
+          done
+          for volume in $(docker volume ls -q --filter "label=com.docker.compose.project=${AURKA_GRAPH_PROJECT}"); do
+            docker volume rm "$volume"
+          done
+          for network in $(docker network ls -q --filter "label=com.docker.compose.project=${AURKA_GRAPH_PROJECT}"); do
+            docker network rm "$network"
+          done
+          if [ -s "$AURKA_ANVIL_PID_FILE" ]; then
+            pid="$(head -n 1 "$AURKA_ANVIL_PID_FILE")"
+            if [ -r "/proc/$pid/cmdline" ] && tr '\0' ' ' < "/proc/$pid/cmdline" | grep -Eq '(^|/)anvil( |$)'; then
+              kill "$pid"
+            fi
+          fi
+
+      - name: Upload Graph Node diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: graph-node-${{ github.run_id }}
+          path: artifacts/
+          if-no-files-found: ignore
+
+  runtime-readiness:
+    name: Composed runtime and readiness
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      AURKA_READINESS_PROJECT:
+        aurka-ci-readiness-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.13.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - name: Install workspace dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts=false
+
+      - name: Build workspace dependencies
+        run: pnpm build
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Exercise runtime and readiness failure/recovery checks
+        run: |
+          set -o pipefail
+          mkdir -p artifacts
+          pnpm --filter @aurka/services test -- readiness.test.ts risk-runtime.test.ts 2>&1 | tee artifacts/readiness-runtime-tests.log
+
+      - name: Validate and start the service composition
+        run: |
+          set -euo pipefail
+          cleanup() {
+            trap - EXIT INT TERM
+            docker compose -p "$AURKA_READINESS_PROJECT" -f docker-compose.services.yml logs --no-color > artifacts/services.log 2>&1 || true
+            docker compose -p "$AURKA_READINESS_PROJECT" -f docker-compose.services.yml down -v --remove-orphans || true
+          }
+          trap cleanup EXIT INT TERM
+          docker compose -p "$AURKA_READINESS_PROJECT" -f docker-compose.services.yml config --quiet
+          docker compose -p "$AURKA_READINESS_PROJECT" -f docker-compose.services.yml up --build -d
+          container="${AURKA_READINESS_PROJECT}-aurka-services-1"
+          for attempt in $(seq 1 60); do
+            health="$(docker inspect --format '{{.State.Health.Status}}' "$container" 2>/dev/null || true)"
+            if [ "$health" = healthy ]; then break; fi
+            if [ "$health" = unhealthy ]; then
+              docker compose -p "$AURKA_READINESS_PROJECT" -f docker-compose.services.yml logs --no-color
+              exit 1
+            fi
+            if [ "$attempt" = 60 ]; then
+              docker compose -p "$AURKA_READINESS_PROJECT" -f docker-compose.services.yml logs --no-color
+              exit 1
+            fi
+            sleep 2
+          done
+          curl --fail --silent --show-error http://127.0.0.1:8787/health | tee artifacts/health.json
+          curl --fail --silent --show-error http://127.0.0.1:8787/ready | tee artifacts/readiness.json
+          node --input-type=module -e 'const body=await (await fetch("http://127.0.0.1:8787/ready")).json(); if(body.ok !== true || body.data.status !== "ready" || body.data.checks.database.state !== "healthy") process.exit(1);'
+
+      - name: Upload readiness diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: runtime-readiness-${{ github.run_id }}
+          path: artifacts/
+          if-no-files-found: ignore
+
+  browser-smoke:
+    name: Browser system smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      AURKA_BROWSER_PID_FILE:
+        /tmp/aurka-ci-browser-${{ github.run_id }}-${{ github.run_attempt
+        }}.pids
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.13.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - name: Install workspace dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts=false
+
+      - name: Build workspace dependencies
+        run: pnpm build
+
+      - name: Install the pinned Chromium runtime
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Run tracked browser smoke
+        run: |
+          set -o pipefail
+          mkdir -p artifacts
+          AURKA_ARTIFACT_DIR=artifacts pnpm --filter @aurka/services exec node scripts/browser-smoke.mjs 2>&1 | tee artifacts/browser-smoke.log
+
+      - name: Stop scoped browser processes after cancellation/failure
+        if: ${{ always() }}
+        run: |
+          set +e
+          if [ -s "$AURKA_BROWSER_PID_FILE" ]; then
+            while read -r pid; do
+              if [ -r "/proc/$pid/cmdline" ] && tr '\0' ' ' < "/proc/$pid/cmdline" | grep -Eq '(pnpm|vite|tsx|node)'; then
+                kill -- -"$pid"
+              fi
+            done < "$AURKA_BROWSER_PID_FILE"
+          fi
+
+      - name: Upload browser diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-smoke-${{ github.run_id }}
+          path: artifacts/
+          if-no-files-found: ignore

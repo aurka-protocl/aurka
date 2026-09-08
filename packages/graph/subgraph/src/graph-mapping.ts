@@ -41,11 +41,14 @@ export function handleFeesRouted(event: ethereum.Event): void {
     "proposalHash",
     Value.fromBytes(event.parameters[0].value.toBytes()),
   );
-  entity.set("feeToken", Value.fromBytes(event.parameters[1].value.toBytes()));
-  entity.set("solver", Value.fromBytes(event.parameters[2].value.toBytes()));
+  entity.set(
+    "feeToken",
+    Value.fromBytes(event.parameters[1].value.toAddress()),
+  );
+  entity.set("solver", Value.fromBytes(event.parameters[2].value.toAddress()));
   entity.set(
     "protocolRecipient",
-    Value.fromBytes(event.parameters[3].value.toBytes()),
+    Value.fromBytes(event.parameters[3].value.toAddress()),
   );
   entity.set(
     "solverAmount",
@@ -80,15 +83,18 @@ export function handleTradeExecuted(event: ethereum.Event): void {
     "capacityEpochId",
     Value.fromBytes(event.parameters[4].value.toBytes()),
   );
-  entity.set("trader", Value.fromBytes(event.parameters[5].value.toBytes()));
-  entity.set("treasury", Value.fromBytes(event.parameters[6].value.toBytes()));
+  entity.set("trader", Value.fromBytes(event.parameters[5].value.toAddress()));
+  entity.set(
+    "treasury",
+    Value.fromBytes(event.parameters[6].value.toAddress()),
+  );
   entity.set(
     "traderInputToken",
-    Value.fromBytes(event.parameters[7].value.toBytes()),
+    Value.fromBytes(event.parameters[7].value.toAddress()),
   );
   entity.set(
     "traderOutputToken",
-    Value.fromBytes(event.parameters[8].value.toBytes()),
+    Value.fromBytes(event.parameters[8].value.toAddress()),
   );
   entity.set(
     "traderInputValue",
@@ -137,8 +143,8 @@ export function handleTradeExecuted(event: ethereum.Event): void {
   observation.set(
     "affectedAssets",
     Value.fromBytesArray([
-      event.parameters[7].value.toBytes(),
-      event.parameters[8].value.toBytes(),
+      event.parameters[7].value.toAddress(),
+      event.parameters[8].value.toAddress(),
     ]),
   );
   observation.set("indexedBlock", Value.fromBigInt(event.block.number));
@@ -149,7 +155,21 @@ export function handleTradeExecuted(event: ethereum.Event): void {
     "payload",
     Value.fromBytes(
       Bytes.fromUTF8(
-        '{"transactionHash":"' + event.transaction.hash.toHexString() + '"}',
+        '{"transactionHash":"' +
+          event.transaction.hash.toHexString() +
+          '","policyId":"' +
+          event.parameters[0].value.toBytes().toHexString() +
+          '","intentHash":"' +
+          event.parameters[2].value.toBytes().toHexString() +
+          '","proposalHash":"' +
+          event.parameters[3].value.toBytes().toHexString() +
+          '","traderInputValue":"' +
+          event.parameters[9].value.toBigInt().toString() +
+          '","traderOutputValue":"' +
+          event.parameters[10].value.toBigInt().toString() +
+          '","totalFeeAmount":"' +
+          event.parameters[12].value.toBigInt().toString() +
+          '"}',
       ),
     ),
   );
@@ -170,19 +190,73 @@ export function handleRiskModeChanged(event: ethereum.Event): void {
   entity.set("nonce", Value.fromBigInt(event.parameters[4].value.toBigInt()));
   entity.set(
     "watchtower",
-    Value.fromBytes(event.parameters[5].value.toBytes()),
+    Value.fromBytes(event.parameters[5].value.toAddress()),
   );
   entity.set(
     "certificateHash",
     Value.fromBytes(event.parameters[6].value.toBytes()),
   );
   save("RiskModeChanged", entity);
+  const observation = new Entity();
+  const id = entity.get("id")!.toString();
+  observation.set("id", Value.fromString(id));
+  observation.set("sourceId", Value.fromString("aurka-protocol"));
+  observation.set("sourceKind", Value.fromString("AURKA_SUBGRAPH"));
+  observation.set(
+    "chainId",
+    Value.fromBigInt(dataSource.context().getBigInt("chainId")),
+  );
+  observation.set("deploymentId", Value.fromString("manifest"));
+  observation.set("schemaVersion", Value.fromString("risk-v1"));
+  observation.set("queryVersion", Value.fromString("observations-v1"));
+  observation.set("signal", Value.fromString("BOUNDARY_PRESSURE"));
+  observation.set(
+    "metricValue",
+    Value.fromBigInt(event.parameters[2].value.toBigInt()),
+  );
+  observation.set("sampleSize", Value.fromBigInt(BigInt.fromI32(1)));
+  observation.set("affectedAssets", Value.fromBytesArray(new Array<Bytes>()));
+  observation.set("indexedBlock", Value.fromBigInt(event.block.number));
+  observation.set("indexedBlockHash", Value.fromBytes(event.block.hash));
+  observation.set("observedAt", Value.fromBigInt(event.block.timestamp));
+  observation.set("payloadHash", Value.fromBytes(event.transaction.hash));
+  observation.set(
+    "payload",
+    Value.fromBytes(
+      Bytes.fromUTF8(
+        '{"transactionHash":"' +
+          event.transaction.hash.toHexString() +
+          '","policyId":"' +
+          event.parameters[0].value.toBytes().toHexString() +
+          '","riskMode":' +
+          event.parameters[1].value.toI32().toString() +
+          ',"maximumTradeValue":"' +
+          event.parameters[2].value.toBigInt().toString() +
+          '","certificateHash":"' +
+          event.parameters[6].value.toBytes().toHexString() +
+          '"}',
+      ),
+    ),
+  );
+  save("RiskObservation", observation);
+}
+export function handleWatchtowerAuthorizationChanged(
+  event: ethereum.Event,
+): void {
+  const entity = base(event);
+  entity.set("policyId", Value.fromBytes(event.parameters[0].value.toBytes()));
+  entity.set("eventName", Value.fromString("WatchtowerAuthorizationChanged"));
+  // The authorization event has no policy nonce. A zero value distinguishes
+  // it from nonce-bearing policy mutations while retaining the event payload.
+  entity.set("nonce", Value.fromBigInt(BigInt.zero()));
+  entity.set("payload", Value.fromBytes(event.transaction.input));
+  save("PolicyMutation", entity);
 }
 export function handleAssetAdded(event: ethereum.Event): void {
   const entity = base(event);
   entity.set("policyId", Value.fromBytes(event.parameters[0].value.toBytes()));
   entity.set("eventName", Value.fromString("AssetAdded"));
-  entity.set("nonce", Value.fromBigInt(event.parameters[5].value.toBigInt()));
+  entity.set("nonce", Value.fromBigInt(event.parameters[4].value.toBigInt()));
   entity.set("payload", Value.fromBytes(event.transaction.input));
   save("PolicyMutation", entity);
 }

@@ -1,4 +1,7 @@
-import type { PrepareIntentRequest } from "@aurka/shared";
+import type {
+  PrepareIntentRequest,
+  PrepareTokenIntentRequest,
+} from "@aurka/shared";
 import type {
   AtomicSettlementIntent,
   AtomicSettlementProposal,
@@ -86,6 +89,10 @@ export interface SolvedProposal {
 export interface SolverSnapshotProvider {
   getPositionSnapshot?(positionId: string): Promise<SolverSnapshot>;
   prepareIntent?(input: PrepareIntentRequest): Promise<AtomicSettlementIntent>;
+  /** Converts a user-facing token amount at the provider's authoritative snapshot. */
+  prepareTokenIntent?(
+    input: PrepareTokenIntentRequest,
+  ): Promise<AtomicSettlementIntent>;
   getSnapshot(intent: AtomicSettlementIntent): Promise<SolverSnapshot>;
 }
 

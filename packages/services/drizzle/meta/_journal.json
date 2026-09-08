@@ -50,6 +50,13 @@
       "when": 1788825600002,
       "tag": "0006_risk_workflows",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1788825600003,
+      "tag": "0007_activity",
+      "breakpoints": true
     }
   ]
 }

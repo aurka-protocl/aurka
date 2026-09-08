@@ -71,4 +71,6 @@ The trader can prepare an intent, quote, solve, and request unsigned execution
 calldata after supplying an external trader signature. It does not broadcast.
 Unavailable balances, P&L, history feeds and effective risk are labeled as such.
 See [SDK usage](packages/sdk/README.md), [API semantics](docs/api.md), and
-[watchtower runtime requirements](docs/risk-watchtower.md).
+[watchtower runtime requirements](docs/risk-watchtower.md). For the complete
+local product journey, measured demo values, manual acceptance checklist, and
+issue template, see the [product walkthrough](docs/product-walkthrough.md).

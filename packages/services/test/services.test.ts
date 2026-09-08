@@ -95,6 +95,18 @@ function tradePayload(consumedAfter: string): Record<string, unknown> {
   };
 }
 
+function feePayload(): Record<string, unknown> {
+  return {
+    proposalHash: `0x${"42".repeat(32)}`,
+    feeToken: FIXTURE_ADDRESSES.usdc,
+    solver: FIXTURE_ADDRESSES.solver,
+    protocolRecipient: FIXTURE_ADDRESSES.protocol,
+    solverAmount: "25",
+    protocolAmount: "25",
+    treasuryAmount: "184",
+  };
+}
+
 function abiWord(value: string | bigint): string {
   if (typeof value === "string" && /^0x[0-9a-fA-F]{40}$/.test(value)) {
     return "0x" + "0".repeat(24) + value.slice(2).toLowerCase();
@@ -195,6 +207,53 @@ async function json(response: Response): Promise<ApiBody> {
 }
 
 describe("AURKA service solver", () => {
+  it("reports source-backed directional capacity with its constraint and expiry", async () => {
+    const service = new AurkaService();
+    const fixture = createCanonicalFixture();
+    try {
+      const capacity = await service.getCapacity(
+        FIXTURE_POSITION_ID,
+        fixture.intent.traderInputToken,
+        fixture.intent.traderOutputToken,
+      );
+      expect(capacity).toMatchObject({
+        positionId: FIXTURE_POSITION_ID,
+        traderInputToken: fixture.intent.traderInputToken,
+        traderOutputToken: fixture.intent.traderOutputToken,
+        maximumValue: "50000",
+        remainingValue: "50000",
+        consumedBefore: "0",
+        bindingConstraint: "TRANSACTION_CAP",
+        calculatedAtBlock: "100",
+        expiresAt: 260,
+      });
+      expect(capacity.capacityEpochId).toBe(fixture.snapshot.capacityEpochId);
+    } finally {
+      service.close();
+    }
+  });
+
+  it("converts a human token amount at the provider snapshot before preparing an intent", async () => {
+    const service = new AurkaService();
+    const fixture = createCanonicalFixture();
+    try {
+      const intent = await service.prepareTokenIntent({
+        positionId: FIXTURE_POSITION_ID,
+        trader: fixture.intent.trader,
+        traderInputToken: fixture.intent.traderInputToken,
+        traderOutputToken: fixture.intent.traderOutputToken,
+        requestedTraderInputAmount: "200000",
+        minimumTraderOutputValue: "0",
+        nonce: "9",
+        deadline: fixture.intent.deadline,
+      });
+      expect(intent.requestedValue).toBe("200000");
+      expect(intent.traderInputToken).toBe(fixture.intent.traderInputToken);
+    } finally {
+      service.close();
+    }
+  });
+
   it("matches the shared canonical vector and rejects an unauthorised partial fill", async () => {
     const service = new AurkaService();
     const fixture = createCanonicalFixture();
@@ -842,6 +901,96 @@ describe("AURKA HTTP API", () => {
 });
 
 describe("AURKA event projection", () => {
+  it("browses prepared attempts without counting their estimated fee", async () => {
+    const service = new AurkaService();
+    const fixture = createCanonicalFixture();
+    try {
+      const submitted = await service.submitIntent(fixture.intent);
+      const solved = await service.solve(fixture.intent);
+      await service.execute(submitted.intentHash, solved.proposalHash);
+      const page = service.listActivity({ limit: 20 });
+      expect(page.items).toHaveLength(1);
+      expect(page.items[0]).toMatchObject({
+        status: "PREPARED",
+        source: "SERVICE_PREPARATION",
+        feeState: "ESTIMATE",
+      });
+      expect(
+        service.getFeeSummary(FIXTURE_POSITION_ID).confirmedSettlementCount,
+      ).toBe(0);
+    } finally {
+      service.close();
+    }
+  });
+
+  it("joins canonical fee and trade logs, then excludes an orphaned settlement", () => {
+    const database = new ServiceDatabase();
+    const service = new AurkaService({ database, seedFixture: true });
+    const indexer = new ChainEventIndexer(service.repository);
+    const fee = eventLog({
+      transactionHash: `0x${"91".repeat(32)}`,
+      logIndex: 0,
+      name: "FeesRouted",
+      payload: feePayload(),
+    });
+    const trade = eventLog({
+      blockNumber: "2",
+      blockHash: `0x${"11".repeat(32)}`,
+      transactionHash: fee.transactionHash,
+      logIndex: 1,
+      name: "TradeExecuted",
+      payload: tradePayload("50000"),
+    });
+    try {
+      indexer.ingest([fee, trade]);
+      expect(service.listActivity({ limit: 20 }).items[0]).toMatchObject({
+        status: "CONFIRMED",
+        feeState: "EARNED",
+      });
+      expect(service.getFeeSummary(FIXTURE_POSITION_ID).items[0]).toMatchObject(
+        { treasuryAmount: "184", settlementCount: 1 },
+      );
+
+      indexer.ingest([{ ...trade, removed: true }]);
+      expect(service.listActivity({ limit: 20 }).items[0]).toMatchObject({
+        status: "ORPHANED",
+        feeState: "NONE",
+      });
+      expect(
+        service.getFeeSummary(FIXTURE_POSITION_ID).confirmedSettlementCount,
+      ).toBe(0);
+    } finally {
+      service.close();
+    }
+  });
+
+  it("keeps activity cursor boundaries stable when preparation timestamps tie", async () => {
+    const service = new AurkaService();
+    const fixture = createCanonicalFixture();
+    try {
+      for (const suffix of ["07", "08"]) {
+        const intent = {
+          ...fixture.intent,
+          intentId: `0x${suffix.repeat(32)}`,
+        };
+        const submitted = await service.submitIntent(intent);
+        const solved = await service.solve(intent);
+        await service.execute(submitted.intentHash, solved.proposalHash);
+      }
+      const first = service.listActivity({ limit: 1 });
+      expect(first.items).toHaveLength(1);
+      expect(first.nextCursor).not.toBeNull();
+      const second = service.listActivity({
+        limit: 1,
+        cursor: first.nextCursor ?? undefined,
+      });
+      expect(second.items).toHaveLength(1);
+      expect(second.items[0]?.id).not.toBe(first.items[0]?.id);
+    } finally {
+      service.close();
+    }
+  });
+
   it("is idempotent and rebuilds derived capacity after a removed log", () => {
     const database = new ServiceDatabase();
     const repositoryService = new AurkaService({ database, seedFixture: true });

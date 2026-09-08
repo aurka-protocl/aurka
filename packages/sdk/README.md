@@ -22,9 +22,9 @@ Transport failures use `NETWORK_ERROR`; a timeout covering headers and body uses
 `TIMEOUT`; malformed JSON or a schema mismatch uses `INVALID_RESPONSE`.
 
 Available methods: `health`, `readiness`, `listPositions`, `getPosition`,
-`getCapacity`, `prepareIntent`, `submitIntent`, `getIntent`, `listProposals`,
-`quote`, `solve`, `execute`, `getExecution`, `evaluateRisk`,
-`saveRiskCertificate`, and `getRiskPosition`.
+`getCapacity`, `prepareIntent`, `prepareIntentFromTokenAmount`, `submitIntent`,
+`getIntent`, `listProposals`, `quote`, `solve`, `execute`, `getExecution`,
+`evaluateRisk`, `saveRiskCertificate`, and `getRiskPosition`.
 
 `prepareIntent` accepts a position, trader/token addresses, requested and
 minimum output values, nonce, and deadline. The server provider supplies
@@ -35,10 +35,19 @@ unsigned intent to `quote` or `solve`; supply the external trader signature to
 request and does not broadcast. Amounts remain decimal strings in the shared
 schema's units.
 
+`prepareIntentFromTokenAmount` is the guided-flow boundary. It accepts a raw
+input-token amount and asks the configured provider to convert it at the
+authoritative snapshot before returning the intent. The app can format the
+amount with the token’s declared decimals, but it does not calculate a quote or
+assume a symbol’s conventional decimals.
+
 `getRiskPosition` separates `proposed`, signed `certificate`, and `effective`.
 Without a verified registry read, `effective.source` is `UNAVAILABLE` and its
 mode/cap are null. A certificate is not active merely because it was saved.
-Readiness reports unknown indexer lag as null; fixture readiness is not a live
+Readiness returns timestamped per-dependency checks with explicit
+`configured`/`healthy`/`unhealthy`/`unknown`/`disabled` states. Required live
+checks must be measured healthy; unknown indexer lag remains null. Fixture
+readiness is limited to local database-backed capabilities and is not a live
 production readiness claim. Certificate storage requires a configured risk
 registry on the service.
 

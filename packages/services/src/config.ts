@@ -20,6 +20,30 @@ const environmentSchema = z.object({
     .nonnegative()
     .max(100)
     .default(2),
+  INDEXER_MAX_LAG_BLOCKS: z.coerce
+    .number()
+    .int()
+    .nonnegative()
+    .max(1_000_000)
+    .default(20),
+  RPC_FINALITY_MAX_AGE_SECONDS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(86_400)
+    .default(120),
+  READINESS_PROBE_TIMEOUT_MS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(120_000)
+    .default(2_000),
+  READINESS_CACHE_TTL_SECONDS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(3_600)
+    .default(5),
 });
 
 export type ServiceConfig = z.infer<typeof environmentSchema>;

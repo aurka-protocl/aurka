@@ -45,10 +45,14 @@ describe("risk API persistence boundary", () => {
       expect(replay.status).toBe(200);
       const risk = await fetch(`${base}/v1/risk/${FIXTURE_POSITION_ID}`);
       expect(risk.status).toBe(200);
-      expect(
-        ((await risk.json()) as { data: { effective: { mode: string } } }).data
-          .effective.mode,
-      ).toBe(null);
+      const riskData = (await risk.json()) as {
+        data: {
+          effective: { mode: string | null };
+          configuration: { cooldownSeconds: number } | null;
+        };
+      };
+      expect(riskData.data.effective.mode).toBe(null);
+      expect(riskData.data.configuration?.cooldownSeconds).toBe(30);
     } finally {
       await closeApiServer(handle);
     }

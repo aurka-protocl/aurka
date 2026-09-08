@@ -1,9 +1,14 @@
-import type { PrepareIntentRequest } from "@aurka/shared";
+import type {
+  PrepareIntentRequest,
+  PrepareTokenIntentRequest,
+} from "@aurka/shared";
 import {
   calculateDirectionalCapacity,
   executionSchema,
   positionSchema,
   quoteSchema,
+  type ActivityItem,
+  type FeeSummary,
   type AtomicSettlementIntent,
   type AtomicSettlementProposal,
   type DirectionalCapacity,
@@ -14,7 +19,12 @@ import {
 } from "@aurka/shared";
 
 import { ServiceDatabase } from "./db/database.js";
-import { ServiceRepository, type Page } from "./db/repository.js";
+import {
+  ServiceRepository,
+  type ActivityQuery,
+  type FeeSummaryQuery,
+  type Page,
+} from "./db/repository.js";
 import {
   FIXTURE_ADDRESSES,
   FIXTURE_POLICY_ID,
@@ -42,8 +52,16 @@ import type {
 } from "./solver/types.js";
 import { Eip1193RouterSimulator, type Eip1193Transport } from "./solver/rpc.js";
 import { RiskService } from "./risk-service.js";
+import {
+  ReadinessMonitor,
+  type ReadinessConfiguration,
+  type RpcReadiness,
+  type IndexerReadiness,
+} from "./readiness.js";
 
 export type UnsignedTransactionRequest = RouterTransactionRequest;
+
+const serviceNow = (): number => Math.floor(Date.now() / 1000);
 
 export interface ServiceOptions {
   readonly riskNow?: () => number;
@@ -54,6 +72,9 @@ export interface ServiceOptions {
   readonly chainId?: number;
   readonly settlementContract?: string;
   readonly indexConfirmations?: number;
+  readonly maxIndexerLagBlocks?: number;
+  readonly rpcFinalityMaxAgeSeconds?: number;
+  readonly readiness?: ReadinessConfiguration;
   readonly routerSimulator?: RouterSimulator;
   readonly rpcTransport?: Eip1193Transport;
 }
@@ -62,6 +83,8 @@ export interface ServiceRuntimeDiagnostics {
   readonly chainId: number;
   readonly settlementContract: string | undefined;
   readonly indexConfirmations: number;
+  readonly maxIndexerLagBlocks: number;
+  readonly rpcFinalityMaxAgeSeconds: number;
   readonly rpc: "fixture-only" | "configured";
 }
 
@@ -136,8 +159,11 @@ export class AurkaService {
   readonly riskService: RiskService;
   readonly runtime: ServiceRuntimeDiagnostics;
   readonly rpcTransport: Eip1193Transport | undefined;
+  readonly readiness: ReadinessMonitor;
+  private readonly now: () => number;
 
   constructor(options: ServiceOptions = {}) {
+    this.now = options.riskNow ?? serviceNow;
     this.rpcTransport = options.rpcTransport;
     this.database = options.database ?? new ServiceDatabase();
     this.repository = new ServiceRepository(this.database.db);
@@ -146,8 +172,27 @@ export class AurkaService {
       chainId: options.chainId ?? 31_337,
       settlementContract: options.settlementContract,
       indexConfirmations: options.indexConfirmations ?? 2,
+      maxIndexerLagBlocks: options.maxIndexerLagBlocks ?? 20,
+      rpcFinalityMaxAgeSeconds: options.rpcFinalityMaxAgeSeconds ?? 120,
       rpc: options.rpcTransport ? "configured" : "fixture-only",
     };
+    this.readiness = new ReadinessMonitor(
+      {
+        mode: options.rpcTransport ? "live" : "fixture",
+        expectedChainId: this.runtime.chainId,
+        maxIndexerLagBlocks: this.runtime.maxIndexerLagBlocks,
+        ...(options.readiness ?? {}),
+        probes: {
+          ...(options.rpcTransport ? { rpc: () => this.probeRpc() } : {}),
+          ...(options.rpcTransport
+            ? { indexer: () => this.probeIndexer() }
+            : {}),
+          ...options.readiness?.probes,
+        },
+        database: () => this.probeDatabase(),
+      },
+      this.now,
+    );
     const sourceProvider: SolverSnapshotProvider =
       options.provider ?? new FixtureProvider();
     const validateSnapshot = (snapshot: SolverSnapshot): SolverSnapshot => {
@@ -189,6 +234,15 @@ export class AurkaService {
             },
           }
         : {}),
+      ...(sourceProvider.prepareTokenIntent
+        ? {
+            prepareTokenIntent: async (input: PrepareTokenIntentRequest) => {
+              const intent = await sourceProvider.prepareTokenIntent!(input);
+              await this.provider.getSnapshot(intent);
+              return intent;
+            },
+          }
+        : {}),
       getSnapshot: async (intent) => {
         const snapshot = await sourceProvider.getSnapshot(intent);
         return validateSnapshot(snapshot);
@@ -211,6 +265,211 @@ export class AurkaService {
 
   close(): void {
     this.database.close();
+  }
+
+  configureReadiness(configuration: ReadinessConfiguration): void {
+    this.readiness.configure(configuration);
+  }
+
+  getReadiness() {
+    return this.readiness.snapshot();
+  }
+
+  private probeDatabase() {
+    const started = performance.now();
+    const result = this.database.sqlite.prepare("SELECT 1 AS ready").get() as
+      { ready?: number } | undefined;
+    if (result?.ready !== 1) throw new Error("database_probe_failed");
+    return {
+      state: "healthy" as const,
+      observedAt: this.now(),
+      reason: null,
+      latencyMs: Math.max(0, Math.round(performance.now() - started)),
+    };
+  }
+
+  private async probeRpc(): Promise<RpcReadiness> {
+    if (!this.rpcTransport)
+      return {
+        state: "disabled",
+        observedAt: null,
+        reason: "disabled",
+        chainId: null,
+        expectedChainId: this.runtime.chainId,
+        latestBlock: null,
+        canonicalBlock: null,
+        canonicalBlockHash: null,
+        finalizedBlock: null,
+        finalizedBlockHash: null,
+        finalizedAt: null,
+      };
+    const parseHex = (value: unknown, label: string): bigint => {
+      if (typeof value !== "string" || !/^0x[0-9a-fA-F]+$/.test(value))
+        throw new Error(`Malformed ${label}`);
+      return BigInt(value);
+    };
+    const chain = Number(
+      parseHex(
+        await this.rpcTransport.request({
+          method: "eth_chainId",
+          params: [],
+        }),
+        "chain ID",
+      ),
+    );
+    if (!Number.isSafeInteger(chain) || chain !== this.runtime.chainId)
+      throw new Error("rpc_chain_mismatch");
+    const latestBlock = parseHex(
+      await this.rpcTransport.request({
+        method: "eth_blockNumber",
+        params: [],
+      }),
+      "latest block",
+    );
+    const latest = await this.rpcTransport.request({
+      method: "eth_getBlockByNumber",
+      params: ["latest", false],
+    });
+    const finalized = await this.rpcTransport.request({
+      method: "eth_getBlockByNumber",
+      params: ["finalized", false],
+    });
+    if (!latest || typeof latest !== "object")
+      throw new Error("latest_head_unavailable");
+    if (!finalized || typeof finalized !== "object")
+      throw new Error("finalized_head_unavailable");
+    const latestValue = latest as {
+      number?: unknown;
+      hash?: unknown;
+    };
+    const finalizedValue = finalized as {
+      number?: unknown;
+      hash?: unknown;
+      timestamp?: unknown;
+    };
+    const latestNumber = parseHex(latestValue.number, "latest block number");
+    const finalizedNumber = parseHex(
+      finalizedValue.number,
+      "finalized block number",
+    );
+    const latestHash = latestValue.hash;
+    const finalizedHash = finalizedValue.hash;
+    const timestamp = parseHex(finalizedValue.timestamp, "finalized timestamp");
+    if (
+      typeof latestHash !== "string" ||
+      !/^0x[0-9a-fA-F]{64}$/.test(latestHash) ||
+      typeof finalizedHash !== "string" ||
+      !/^0x[0-9a-fA-F]{64}$/.test(finalizedHash) ||
+      finalizedNumber > latestNumber ||
+      latestNumber !== latestBlock
+    )
+      throw new Error("invalid_canonical_head");
+    if (timestamp > BigInt(this.now()))
+      throw new Error("finalized_head_from_future");
+    if (
+      BigInt(this.now()) - timestamp >
+      BigInt(this.runtime.rpcFinalityMaxAgeSeconds)
+    )
+      throw new Error("finalized_head_stale");
+    return {
+      state: "healthy",
+      observedAt: this.now(),
+      reason: null,
+      chainId: chain,
+      expectedChainId: this.runtime.chainId,
+      latestBlock: latestBlock.toString(),
+      canonicalBlock: latestNumber.toString(),
+      canonicalBlockHash: latestHash,
+      finalizedBlock: finalizedNumber.toString(),
+      finalizedBlockHash: finalizedHash,
+      finalizedAt: Number(timestamp),
+    };
+  }
+
+  private async probeIndexer(): Promise<IndexerReadiness> {
+    if (!this.rpcTransport || !this.runtime.settlementContract)
+      return {
+        state: "unknown",
+        observedAt: null,
+        reason: "indexer_not_configured",
+        checkpointBlock: null,
+        checkpointHash: null,
+        latestBlock: null,
+        lagBlocks: null,
+      };
+    const latestValue = await this.rpcTransport.request({
+      method: "eth_blockNumber",
+      params: [],
+    });
+    if (
+      typeof latestValue !== "string" ||
+      !/^0x[0-9a-fA-F]+$/.test(latestValue)
+    )
+      throw new Error("latest_block_unavailable");
+    const latest = BigInt(latestValue);
+    const checkpoint = this.repository.getCheckpoint(
+      this.runtime.chainId,
+      this.runtime.settlementContract,
+    );
+    if (!checkpoint)
+      return {
+        state: "unknown",
+        observedAt: this.now(),
+        reason: "indexer_checkpoint_unavailable",
+        checkpointBlock: null,
+        checkpointHash: null,
+        latestBlock: latest.toString(),
+        lagBlocks: null,
+      };
+    const checkpointBlock = BigInt(checkpoint.blockNumber);
+    if (checkpointBlock > latest)
+      return {
+        state: "unhealthy",
+        observedAt: this.now(),
+        reason: "indexer_checkpoint_ahead",
+        checkpointBlock: checkpoint.blockNumber,
+        checkpointHash: checkpoint.blockHash,
+        latestBlock: latest.toString(),
+        lagBlocks: null,
+      };
+    const canonical = await this.rpcTransport.request({
+      method: "eth_getBlockByNumber",
+      params: [`0x${checkpointBlock.toString(16)}`, false],
+    });
+    const canonicalHash =
+      canonical && typeof canonical === "object"
+        ? (canonical as { hash?: unknown }).hash
+        : undefined;
+    if (
+      typeof canonicalHash !== "string" ||
+      !/^0x[0-9a-fA-F]{64}$/.test(canonicalHash) ||
+      canonicalHash.toLowerCase() !== checkpoint.blockHash.toLowerCase()
+    )
+      return {
+        state: "unhealthy",
+        observedAt: this.now(),
+        reason: "indexer_checkpoint_reorged",
+        checkpointBlock: checkpoint.blockNumber,
+        checkpointHash: checkpoint.blockHash,
+        latestBlock: latest.toString(),
+        lagBlocks: Number(latest - checkpointBlock),
+      };
+    const lag = latest - checkpointBlock;
+    return {
+      state:
+        lag <= BigInt(this.runtime.maxIndexerLagBlocks)
+          ? "healthy"
+          : "unhealthy",
+      observedAt: this.now(),
+      reason:
+        lag <= BigInt(this.runtime.maxIndexerLagBlocks)
+          ? null
+          : "indexer_lag_exceeded",
+      checkpointBlock: checkpoint.blockNumber,
+      checkpointHash: checkpoint.blockHash,
+      latestBlock: latest.toString(),
+      lagBlocks: Number(lag),
+    };
   }
 
   listPositions(limit: number, cursor?: string): Page<Position> {
@@ -281,6 +540,19 @@ export class AurkaService {
     const intentHash = hashIntent(intent, snapshot);
     this.repository.saveIntent(intent, intentHash);
     return { intent, intentHash };
+  }
+
+  async prepareTokenIntent(
+    input: PrepareTokenIntentRequest,
+  ): Promise<AtomicSettlementIntent> {
+    this.getPosition(input.positionId);
+    if (!this.provider.prepareTokenIntent)
+      throw new ServiceError(
+        "PREPARATION_UNAVAILABLE",
+        "The configured provider does not support token-amount preparation",
+        503,
+      );
+    return this.provider.prepareTokenIntent(input);
   }
 
   async quote(intent: AtomicSettlementIntent): Promise<Quote> {
@@ -436,6 +708,21 @@ export class AurkaService {
     return execution;
   }
 
+  listActivity(query: ActivityQuery): Page<ActivityItem> {
+    return this.repository.listActivity(query);
+  }
+
+  getFeeSummary(
+    positionId: string,
+    query: Omit<FeeSummaryQuery, "chainId"> = {},
+  ): FeeSummary {
+    const position = this.getPosition(positionId);
+    return this.repository.getFeeSummary(position.id, {
+      chainId: position.chainId,
+      ...query,
+    });
+  }
+
   projectEvent(event: ProtocolEvent): void {
     this.repository.projectEvent(event);
   }
@@ -455,6 +742,7 @@ export class AurkaService {
       chainId: snapshot.chainId,
       intentHash: proposal.intentHash,
       proposalHash: hashProposal(proposal, snapshot),
+      submissionState: "PREPARED",
       selectedSolver: proposal.solver,
       traderInputToken: intent.traderInputToken,
       traderOutputToken: intent.traderOutputToken,

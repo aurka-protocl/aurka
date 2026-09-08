@@ -64,18 +64,64 @@ export interface RiskWorkerOptions {
   certificateLifetimeSeconds?: number;
   renewalLeadSeconds?: number;
 }
+
+export interface RiskWorkerDiagnostics {
+  readonly lastAttemptAt: number | null;
+  readonly lastCompletedAt: number | null;
+  readonly leaseExpiresAt: number | null;
+  readonly inFlight: boolean;
+  readonly lastError: "worker_failed" | null;
+}
+function assertCertificateContext(
+  certificate: RiskCertificate,
+  context: RegistryContext,
+): void {
+  if (
+    !context.authorized ||
+    certificate.policyNonce !== context.policyNonce ||
+    certificate.watchtowerAuthorizationEpoch !== context.authorizationEpoch ||
+    certificate.verifyingContract.toLowerCase() !==
+      context.registry.toLowerCase() ||
+    certificate.watchtower.toLowerCase() !== context.watchtower.toLowerCase() ||
+    certificate.chainId !== context.chainId
+  )
+    throw new Error("Risk registry authority changed");
+}
 /** Durable outbox: persist signatures before sending, and reuse identical calldata on retry. */
 export class RiskCertificateWorker {
   private readonly now: () => number;
+  private lastAttemptAt: number | null = null;
+  private lastCompletedAt: number | null = null;
+  private leaseExpiresAt: number | null = null;
+  private inFlight = false;
+  private lastError: "worker_failed" | null = null;
   constructor(private readonly options: RiskWorkerOptions) {
     this.now = options.now ?? (() => Math.floor(Date.now() / 1000));
+  }
+  getDiagnostics(): RiskWorkerDiagnostics {
+    return {
+      lastAttemptAt: this.lastAttemptAt,
+      lastCompletedAt: this.lastCompletedAt,
+      leaseExpiresAt: this.leaseExpiresAt,
+      inFlight: this.inFlight,
+      lastError: this.lastError,
+    };
   }
   async tick(positionId: string): Promise<void> {
     const { repository, risk, wallet, sources } = this.options,
       id = `worker:${positionId}`;
+    const startedAt = this.now();
+    this.lastAttemptAt = startedAt;
+    this.inFlight = true;
+    this.lastError = null;
     repository.ensureRiskJob(id, positionId, this.now());
     const claim = repository.claimRiskJob(id, this.now());
-    if (!claim) return;
+    if (!claim) {
+      this.inFlight = false;
+      this.lastCompletedAt = this.now();
+      return;
+    }
+    this.leaseExpiresAt = this.now() + 120;
     const owns = () => {
       if (!repository.ownsRiskJob(id, claim.attempt))
         throw new Error("Risk worker lease was replaced");
@@ -218,6 +264,12 @@ export class RiskCertificateWorker {
           watchtowerAuthorizationEpoch: context.authorizationEpoch,
           policyNonce: context.policyNonce,
         };
+        // Re-read mutable authority immediately before signing. The wallet
+        // adapter repeats this check, but the worker must also protect fake and
+        // operator-supplied adapters from signing a stale epoch or nonce.
+        const signingContext = await sources.context(positionId);
+        owns();
+        assertCertificateContext(certificate, signingContext);
         const signature = await wallet.signTypedData(
           certificate,
           await this.options.authorize(certificate),
@@ -244,6 +296,11 @@ export class RiskCertificateWorker {
         expiresAt: workflow.certificate.expiresAt,
         policyFingerprint: policy.fingerprint,
       };
+      // A separate read closes the sign-to-submit race. No certificate is
+      // submitted if policy or watchtower authority changed in that window.
+      const submissionContext = await sources.context(positionId);
+      owns();
+      assertCertificateContext(workflow.certificate, submissionContext);
       const authorization = await this.options.authorize(action);
       owns();
       const sent = await wallet.simulateAndSend(action, authorization);
@@ -262,6 +319,7 @@ export class RiskCertificateWorker {
         false,
       );
     } catch (error) {
+      this.lastError = "worker_failed";
       if (repository.ownsRiskJob(id, claim.attempt))
         repository.saveRiskAuditEvent({
           id: `${id}:${claim.attempt}:failed`,
@@ -273,6 +331,9 @@ export class RiskCertificateWorker {
       throw error;
     } finally {
       repository.releaseRiskJob(id, claim.attempt, this.now() + 10);
+      this.inFlight = false;
+      this.lastCompletedAt = this.lastError ? this.lastCompletedAt : this.now();
+      this.leaseExpiresAt = null;
     }
   }
 }

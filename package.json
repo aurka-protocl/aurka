@@ -14,6 +14,9 @@
     "clean": "pnpm -r --if-present clean",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
+    "integration:browser-smoke": "pnpm build && pnpm --filter @aurka/services exec node scripts/browser-smoke.mjs",
+    "integration:local-settlement": "pnpm build && forge build && pnpm --filter @aurka/services exec node scripts/local-settlement-e2e.mjs",
+    "integration:graph-node": "pnpm build && forge build && pnpm --filter @aurka/graph subgraph:build && pnpm --filter @aurka/services exec node scripts/local-graph-node-e2e.mjs",
     "lint": "eslint .",
     "test": "pnpm -r --if-present test",
     "typecheck": "pnpm -r --if-present typecheck"
@@ -21,6 +24,7 @@
   "devDependencies": {
     "@eslint/js": "10.0.1",
     "eslint": "10.10.0",
+    "playwright": "1.55.0",
     "prettier": "3.9.6",
     "typescript": "5.9.3",
     "typescript-eslint": "8.69.0"

@@ -217,6 +217,7 @@ export const executions = sqliteTable(
   "executions",
   {
     transactionHash: text("transaction_hash").primaryKey(),
+    positionId: text("position_id").notNull(),
     intentHash: text("intent_hash").notNull(),
     proposalHash: text("proposal_hash").notNull(),
     status: text("status").notNull(),
@@ -228,6 +229,53 @@ export const executions = sqliteTable(
     uniqueIndex("executions_intent_proposal_idx").on(
       table.intentHash,
       table.proposalHash,
+    ),
+  ],
+);
+
+/**
+ * One projected settlement joins the router's TradeExecuted and FeesRouted
+ * logs. The raw logs remain authoritative; this table is a bounded read model
+ * used for activity pagination and fee aggregation.
+ */
+export const settlementRecords = sqliteTable(
+  "settlement_records",
+  {
+    id: text("id").primaryKey(),
+    chainId: integer("chain_id").notNull(),
+    contract: text("contract").notNull(),
+    transactionHash: text("transaction_hash").notNull(),
+    blockNumber: text("block_number").notNull(),
+    blockHash: text("block_hash").notNull(),
+    proposalHash: text("proposal_hash").notNull(),
+    positionIdHash: text("position_id_hash"),
+    positionId: text("position_id"),
+    intentHash: text("intent_hash"),
+    tradeEventId: text("trade_event_id"),
+    feeEventId: text("fee_event_id"),
+    tradeJson: text("trade_json"),
+    feeJson: text("fee_json"),
+    orphaned: integer("orphaned", { mode: "boolean" }).notNull(),
+    observedAt: createdAt("observed_at"),
+    updatedAt: createdAt("updated_at"),
+  },
+  (table) => [
+    uniqueIndex("settlement_records_proposal_idx").on(
+      table.chainId,
+      table.contract,
+      table.transactionHash,
+      table.proposalHash,
+    ),
+    index("settlement_records_activity_idx").on(
+      table.chainId,
+      table.positionId,
+      table.observedAt,
+      table.id,
+    ),
+    index("settlement_records_status_idx").on(
+      table.chainId,
+      table.orphaned,
+      table.observedAt,
     ),
   ],
 );
@@ -389,6 +437,7 @@ export const schema = {
   proposals,
   quotes,
   executions,
+  settlementRecords,
   capacityEpochs,
   agentIdentities,
   indexingCheckpoints,

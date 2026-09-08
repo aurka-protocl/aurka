@@ -1,6 +1,8 @@
 # AURKA integration boundaries
 
 Status: reviewed for AURKA-005 and AURKA-007; local deterministic adapters only.
+The AURKA-012 candidate and policy decision record is in
+[`aurka-012-integration-spec.md`](./aurka-012-integration-spec.md).
 
 ## Graph and Privy pin (AURKA-007)
 
@@ -60,9 +62,13 @@ implemented:
 - The [SwapVM SDK](https://github.com/1inch/swap-vm-sdk) documents the current
   `AquaSwapVMRouter` reference address as
   `0x111111338c5091e8440b67b168bae16a668ac0de`.
-- The [Aqua documentation](https://github.com/1inch/aqua) documents the
-  network-specific Aqua deployment; the commonly published reference address is
-  `0x499943e74fb0ce105688beee8ef2abec5d936d31`.
+- The current [Aqua README](https://github.com/1inch/aqua) lists the Aqua
+  registry reference as `0x1111113ccf1426a8e30e2bff5e005d929bf6a90a` and the
+  SwapVM router reference as `0x111111338c5091e8440b67b168bae16a668ac0de`.
+
+The older `0x499943...` Aqua address previously recorded here is retained only
+as historical research; it is not a current target. Every reference address
+still requires chain-specific bytecode, immutables, and deployment verification.
 
 The addresses above are reference data, not settlement targets in this
 repository. Automated tests never broadcast to or call a live network.
@@ -152,6 +158,45 @@ hours, stale data and noncanonical metadata are rejected. Thresholds must use
 these units. Two signals from one source do not constitute two independent
 quorum members. No live deployment or economic calibration has been validated.
 
+## AURKA-011 actual Graph Node integration
+
+The repository now has a real local indexing check at
+`packages/services/scripts/local-graph-node-e2e.mjs`. It starts a disposable
+Anvil chain, deploys the actual AURKA registries/router and fixture contracts,
+starts Graph Node/Postgres/IPFS with pinned images (`graph-node:v0.41.2`,
+`postgres:14.11`, `kubo:v0.17.0`), creates a temporary manifest from the
+deployed addresses and start blocks, then deploys it with the official
+[Graph CLI deployment flow](https://thegraph.com/docs/en/subgraphs/guides/near/).
+GraphQL, admin, status, and IPFS ports are random loopback bindings; the
+container reaches Anvil through `host.docker.internal`. Every process, network,
+database, and temporary manifest is removed on success or failure.
+
+Run it from the repository root:
+
+```bash
+pnpm integration:graph-node
+```
+
+The command proves persisted `PolicyMutation`, `RiskModeChanged`, `FeesRouted`,
+`TradeExecuted`, and `RiskObservation` entities from real receipt events. It
+also checks same-transaction log indexes, normalized fee units, payload bytes,
+deployment identity, two actual observation rows across ID-cursor pages,
+`observedAt` filtering, lag rejection, and orphan removal after an Anvil
+rewind/replacement. The consumer query uses an RPC-supplied boundary block;
+Anvil does not provide production finalized/safe semantics, so the harness
+reports the boundary as local `FINAL` only and makes no live-chain finality
+claim.
+
+Graph Node `v0.41.2` may return null historical `_meta.block.hash` and
+`timestamp` fields. `GraphSignalSource` therefore requires the historical block
+number and deployment/error metadata, while canonical RPC hashes and each
+mapping-written `indexedBlockHash` remain mandatory reorg evidence. This keeps
+the local compatibility check explicit without treating the latest subgraph head
+as finalized. The
+[Graph Node tooling documentation](https://thegraph.com/docs/en/indexing/tooling/graph-node/)
+also advises keeping admin/status/Postgres private; this harness binds those
+interfaces only to loopback and uses no credentials.
+
 The Privy adapter uses the installed `@privy-io/node@0.34.0` native
 `wallets().ethereum().signTypedData` and `sendTransaction` methods, their actual
 snake-case authorization/domain fields, and native `signature`/`hash` results.
@@ -164,3 +209,28 @@ request authorization must follow the pinned SDK and
 [Privy's server authorization guidance](https://docs.privy.io/controls/authorization-keys/using-owners/sign/signing-on-the-server).
 Mocked native-client tests establish request compatibility; real Privy policies,
 authorization signatures and live calls remain deployment validation gates.
+
+## AURKA-010 trusted watchtower runtime
+
+`@aurka/services/risk-runtime` provides the server-only composition for the
+certificate worker. It binds canonical RPC readers, reviewed Graph sources, the
+pinned Privy wallet adapter, and request-specific authorization behind
+`createRiskRuntime(service)`. The default CLI remains credential-free and does
+not start the worker unless `RISK_RUNTIME_MODULE` is explicitly configured.
+
+The configuration contract and environment names are documented in
+`docs/risk-watchtower.md`. It requires distinct policy-registry, risk-registry
+and router addresses, explicit position/policy mappings, approved configuration
+and hard-bounds hashes, source deployment/query versions, freshness/lag budgets,
+and server wallet references. Secrets are referenced by environment-variable
+name or server module; they are not part of `RISK_POSITIONS_JSON`.
+
+Run the local composition test with:
+
+```bash
+pnpm --filter @aurka/services test -- risk-runtime.test.ts
+```
+
+This proves adapter composition and recovery against fake transports only. No
+live deployment, selected Graph endpoint, Privy policy, or production
+transaction is asserted by the repository.

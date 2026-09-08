@@ -1,5 +1,6 @@
 import type { PrepareIntentRequest } from "@aurka/shared";
 import {
+  calculateAssetValueDown,
   calculatePortfolioValuation,
   computeCapacityEpochId,
   computePortfolioPriceSnapshotHash,
@@ -10,6 +11,7 @@ import {
   type FeeAccounting,
   type FinancialFeeConfig,
   type FinancialPolicy,
+  type PrepareTokenIntentRequest,
   type PortfolioSnapshot,
   type PriceSnapshot,
   type RiskMode,
@@ -296,6 +298,36 @@ export class FixtureProvider implements SolverSnapshotProvider {
     await this.getSnapshot(intent);
     return intent;
   }
+  async prepareTokenIntent(
+    input: PrepareTokenIntentRequest,
+  ): Promise<AtomicSettlementIntent> {
+    const asset = this.bundle.snapshot.portfolio.assets.find(
+      (candidate) =>
+        candidate.token.toLowerCase() === input.traderInputToken.toLowerCase(),
+    );
+    if (!asset) throw new Error("Unsupported input token");
+    const requestedValue = calculateAssetValueDown(
+      {
+        balance: input.requestedTraderInputAmount,
+        decimals: asset.decimals,
+        price: asset.price,
+        priceDecimals: asset.priceDecimals,
+      },
+      this.bundle.snapshot.portfolio.valueDecimals,
+    );
+    if (requestedValue === 0n)
+      throw new Error("Token amount is too small for settlement value units");
+    return this.prepareIntent({
+      positionId: input.positionId,
+      trader: input.trader,
+      traderInputToken: input.traderInputToken,
+      traderOutputToken: input.traderOutputToken,
+      requestedValue: requestedValue.toString(),
+      minimumTraderOutputValue: input.minimumTraderOutputValue,
+      nonce: input.nonce,
+      deadline: input.deadline,
+    });
+  }
   async getSnapshot(intent: AtomicSettlementIntent): Promise<SolverSnapshot> {
     if (intent.policyId !== this.bundle.snapshot.policyId)
       throw new Error("Unknown policy");
@@ -452,6 +484,27 @@ export class LocalDemoProvider implements SolverSnapshotProvider {
       createCanonicalFixture({ nowSeconds: now }),
     );
     const intent = await provider.prepareIntent({
+      ...input,
+      deadline: Math.min(input.deadline, now + 60),
+    });
+    this.prepared.set(intent.intentId, {
+      provider,
+      expiresAt: Math.min(input.deadline, now + 60),
+    });
+    return intent;
+  }
+  async prepareTokenIntent(
+    input: PrepareTokenIntentRequest,
+  ): Promise<AtomicSettlementIntent> {
+    const now = this.now();
+    for (const [id, item] of this.prepared)
+      if (item.expiresAt <= now) this.prepared.delete(id);
+    if (this.prepared.size >= 1000)
+      throw new Error("Local demo preparation capacity reached");
+    const provider = new FixtureProvider(
+      createCanonicalFixture({ nowSeconds: now }),
+    );
+    const intent = await provider.prepareTokenIntent({
       ...input,
       deadline: Math.min(input.deadline, now + 60),
     });

@@ -1,11 +1,18 @@
 import { z } from "zod";
 
 import {
+  activityItemSchema,
+  activityStatusSchema,
+  feeSummarySchema,
+} from "./activity.js";
+import {
   addressSchema,
   bytes32Schema,
+  chainIdSchema,
   paginationSchema,
   uint256StringSchema,
   identifierSchema,
+  unixTimestampSchema,
 } from "./primitives.js";
 import { positionSchema } from "./portfolio.js";
 import { executionSchema } from "./execution.js";
@@ -109,18 +116,125 @@ export const healthResponseSchema = z
     status: z.literal("ok"),
     service: z.string().min(1),
     version: z.string().min(1),
+    observedAt: unixTimestampSchema,
+  })
+  .strict();
+
+export const diagnosticStateSchema = z.enum([
+  "configured",
+  "healthy",
+  "unhealthy",
+  "unknown",
+  "disabled",
+]);
+
+const diagnosticCheckSchema = z
+  .object({
+    state: diagnosticStateSchema,
+    observedAt: unixTimestampSchema.nullable(),
+    reason: z.string().min(1).max(128).nullable(),
+  })
+  .strict();
+
+const blockHeadSchema = diagnosticCheckSchema
+  .extend({
+    chainId: z.number().int().positive().safe().nullable(),
+    expectedChainId: z.number().int().positive().safe().nullable(),
+    latestBlock: uint256StringSchema.nullable(),
+    canonicalBlock: uint256StringSchema.nullable(),
+    canonicalBlockHash: bytes32Schema.nullable(),
+    finalizedBlock: uint256StringSchema.nullable(),
+    finalizedBlockHash: bytes32Schema.nullable(),
+    finalizedAt: unixTimestampSchema.nullable(),
+  })
+  .strict();
+
+const databaseCheckSchema = diagnosticCheckSchema
+  .extend({
+    latencyMs: z.number().nonnegative().safe().nullable(),
+  })
+  .strict();
+
+const indexerCheckSchema = diagnosticCheckSchema
+  .extend({
+    checkpointBlock: uint256StringSchema.nullable(),
+    checkpointHash: bytes32Schema.nullable(),
+    latestBlock: uint256StringSchema.nullable(),
+    lagBlocks: z.number().int().nonnegative().safe().nullable(),
+  })
+  .strict();
+
+const sourceDiagnosticSchema = diagnosticCheckSchema
+  .extend({
+    sourceId: identifierSchema,
+    lastObservedAt: unixTimestampSchema.nullable(),
+    indexedBlock: uint256StringSchema.nullable(),
+    lagBlocks: z.number().int().nonnegative().safe().nullable(),
+  })
+  .strict();
+
+const sourcesCheckSchema = diagnosticCheckSchema
+  .extend({
+    sources: z.array(sourceDiagnosticSchema),
+  })
+  .strict();
+
+const workerCheckSchema = diagnosticCheckSchema
+  .extend({
+    lastAttemptAt: unixTimestampSchema.nullable(),
+    lastCompletedAt: unixTimestampSchema.nullable(),
+    leaseExpiresAt: unixTimestampSchema.nullable(),
+    inFlight: z.boolean(),
+  })
+  .strict();
+
+const signerCheckSchema = diagnosticCheckSchema
+  .extend({
+    address: addressSchema.nullable(),
+    enabled: z.boolean().nullable(),
+    revoked: z.boolean().nullable(),
+    expiresAt: unixTimestampSchema.nullable(),
+    policyFingerprint: bytes32Schema.nullable(),
+  })
+  .strict();
+
+const registryCheckSchema = diagnosticCheckSchema
+  .extend({
+    source: z.enum(["REGISTRY", "UNAVAILABLE"]).nullable(),
+    mode: z.enum(["NORMAL", "CAUTIOUS", "SHOCK", "PAUSED"]).nullable(),
+    effectiveObservedAt: unixTimestampSchema.nullable(),
   })
   .strict();
 
 export const readinessResponseSchema = z
   .object({
     status: z.enum(["ready", "not_ready"]),
+    mode: z.enum(["fixture", "live"]),
+    observedAt: unixTimestampSchema,
+    checks: z
+      .object({
+        database: databaseCheckSchema,
+        rpc: blockHeadSchema,
+        indexer: indexerCheckSchema,
+        sources: sourcesCheckSchema,
+        worker: workerCheckSchema,
+        signer: signerCheckSchema,
+        registry: registryCheckSchema,
+      })
+      .strict(),
+    reasons: z.array(z.string().min(1).max(160)).max(50),
+    // Legacy summary fields remain available to older clients. The detailed
+    // checks above are authoritative and distinguish configuration from
+    // measured health.
     database: z.enum(["ok", "error"]),
     rpc: z.enum(["fixture-only", "configured", "error"]),
     indexerLagBlocks: z.number().int().nonnegative().safe().nullable(),
     risk: z.enum(["not_configured", "unverified"]),
   })
   .strict();
+
+export type HealthResponse = z.infer<typeof healthResponseSchema>;
+export type ReadinessResponse = z.infer<typeof readinessResponseSchema>;
 
 export const submitIntentResponseSchema = z
   .object({
@@ -157,11 +271,59 @@ export const executeResponseSchema = z
 
 export const positionsResponseSchema = paginatedSchema(positionSchema);
 export const proposalsResponseSchema = z.array(atomicSettlementProposalSchema);
+export const activityResponseSchema = paginatedSchema(activityItemSchema);
+
+export const activityQuerySchema = paginationSchema
+  .extend({
+    positionId: identifierSchema.optional(),
+    chainId: z.coerce.number().pipe(chainIdSchema).optional(),
+    status: activityStatusSchema.optional(),
+    from: z.coerce.number().pipe(unixTimestampSchema).optional(),
+    to: z.coerce.number().pipe(unixTimestampSchema).optional(),
+  })
+  .strict()
+  .superRefine((query, context) => {
+    if (
+      query.from !== undefined &&
+      query.to !== undefined &&
+      query.from > query.to
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "Activity start time must not be after end time",
+        path: ["from"],
+      });
+    }
+  });
+
+export const feeSummaryQuerySchema = z
+  .object({
+    from: z.coerce.number().pipe(unixTimestampSchema).optional(),
+    to: z.coerce.number().pipe(unixTimestampSchema).optional(),
+  })
+  .strict()
+  .superRefine((query, context) => {
+    if (
+      query.from !== undefined &&
+      query.to !== undefined &&
+      query.from > query.to
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "Fee-summary start time must not be after end time",
+        path: ["from"],
+      });
+    }
+  });
+export const feeSummaryResponseSchema = feeSummarySchema;
 
 export const riskEvaluateRequestSchema = z
   .object({
     positionId: identifierSchema,
     observations: z.array(riskObservationSchema),
+    // Trusted runtimes use this to preserve source outages as fail-safe input.
+    // Public callers may only make an evaluation tighter by supplying it.
+    sourceFailures: z.array(identifierSchema).max(100).default([]),
     configuration: riskConfigurationSchema,
     hardMaximumTradeValue: uint256StringSchema,
     hardBounds: z.array(activeAssetBoundSchema),
@@ -213,6 +375,9 @@ export const riskPositionResponseSchema = z
         observedAt: z.number().int().nonnegative().nullable(),
       })
       .strict(),
+    // This is the versioned operator configuration used by the latest
+    // evaluation. It is nullable when no evaluation has been persisted yet.
+    configuration: riskConfigurationSchema.nullable(),
     proposed: riskEvaluationSchema.nullable(),
     certificate: riskCertificateSchema.nullable(),
     certificateState: z.enum([
@@ -256,3 +421,20 @@ export const prepareIntentRequestSchema = z
   })
   .strict();
 export type PrepareIntentRequest = z.infer<typeof prepareIntentRequestSchema>;
+
+/** Human-facing preparation input; the service converts token units at its committed snapshot. */
+export const prepareTokenIntentRequestSchema = z
+  .object({
+    positionId: identifierSchema,
+    trader: addressSchema,
+    traderInputToken: addressSchema,
+    traderOutputToken: addressSchema,
+    requestedTraderInputAmount: uint256StringSchema,
+    minimumTraderOutputValue: uint256StringSchema,
+    nonce: uint256StringSchema,
+    deadline: z.number().int().positive().safe(),
+  })
+  .strict();
+export type PrepareTokenIntentRequest = z.infer<
+  typeof prepareTokenIntentRequestSchema
+>;

@@ -24,6 +24,8 @@ export const executionSchema = z
     chainId: z.number().int().positive().safe(),
     intentHash: bytes32Schema,
     proposalHash: bytes32Schema,
+    /** Prepared means unsigned/not broadcast; submitted means a real tx exists. */
+    submissionState: z.enum(["PREPARED", "SUBMITTED"]).optional(),
     selectedSolver: addressSchema,
     traderInputToken: addressSchema,
     traderOutputToken: addressSchema,

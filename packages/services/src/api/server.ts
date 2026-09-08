@@ -8,13 +8,18 @@ import {
 import { URL } from "node:url";
 
 import {
+  activityQuerySchema,
+  activityResponseSchema,
   prepareIntentRequestSchema,
+  prepareTokenIntentRequestSchema,
   apiFailureSchema,
   apiResponseSchema,
   directionalCapacitySchema,
   executeRequestSchema,
   executeResponseSchema,
   executionSchema,
+  feeSummaryQuerySchema,
+  feeSummaryResponseSchema,
   healthResponseSchema,
   listRequestSchema,
   paginatedSchema,
@@ -214,7 +219,9 @@ export function openApi(): Record<string, unknown> {
     ["/health", "get", undefined, healthResponseSchema],
     ["/ready", "get", undefined, readinessResponseSchema],
     ["/v1/positions", "get", undefined, positionsResponseSchema],
+    ["/v1/activity", "get", undefined, activityResponseSchema],
     ["/v1/positions/{id}", "get", undefined, positionSchema],
+    ["/v1/positions/{id}/fees", "get", undefined, feeSummaryResponseSchema],
     [
       "/v1/positions/{id}/capacity",
       "get",
@@ -225,6 +232,12 @@ export function openApi(): Record<string, unknown> {
       "/v1/intents/prepare",
       "post",
       prepareIntentRequestSchema,
+      atomicSettlementIntentSchema,
+    ],
+    [
+      "/v1/intents/prepare-token",
+      "post",
+      prepareTokenIntentRequestSchema,
       atomicSettlementIntentSchema,
     ],
     [
@@ -276,6 +289,30 @@ export function openApi(): Record<string, unknown> {
           schema: { type: "integer", minimum: 1, maximum: 100 },
         },
         { name: "cursor", in: "query", schema: { type: "string" } },
+      );
+    if (path === "/v1/activity")
+      parameters.push(
+        { name: "positionId", in: "query", schema: { type: "string" } },
+        {
+          name: "chainId",
+          in: "query",
+          schema: { type: "integer", minimum: 1 },
+        },
+        {
+          name: "status",
+          in: "query",
+          schema: {
+            type: "string",
+            enum: ["PREPARED", "PENDING", "CONFIRMED", "FAILED", "ORPHANED"],
+          },
+        },
+        { name: "from", in: "query", schema: { type: "integer", minimum: 0 } },
+        { name: "to", in: "query", schema: { type: "integer", minimum: 0 } },
+      );
+    if (path === "/v1/positions/{id}/fees")
+      parameters.push(
+        { name: "from", in: "query", schema: { type: "integer", minimum: 0 } },
+        { name: "to", in: "query", schema: { type: "integer", minimum: 0 } },
       );
     if (path.endsWith("/capacity"))
       for (const name of ["traderInputToken", "traderOutputToken"])
@@ -331,48 +368,20 @@ async function handle(
       sendSuccess(
         response,
         200,
-        { status: "ok", service: "aurka-services", version: "0.1.0" },
+        {
+          status: "ok",
+          service: "aurka-services",
+          version: "0.1.0",
+          observedAt: Math.floor(Date.now() / 1000),
+        },
         request,
         healthResponseSchema,
       );
       return;
     }
     if (method === "GET" && path === "/ready") {
-      const ready = service.database.sqlite
-        .prepare("SELECT 1 AS ready")
-        .get() as { ready: number };
-      let rpc: "fixture-only" | "configured" | "error" = "fixture-only";
-      if (service.rpcTransport) {
-        try {
-          const chain = await service.rpcTransport.request({
-            method: "eth_chainId",
-            params: [],
-          });
-          if (
-            typeof chain !== "string" ||
-            !/^0x[0-9a-fA-F]+$/.test(chain) ||
-            BigInt(chain) !== BigInt(service.runtime.chainId)
-          )
-            throw new Error("RPC chain mismatch");
-          rpc = "configured";
-        } catch {
-          rpc = "error";
-        }
-      }
-      sendSuccess(
-        response,
-        200,
-        {
-          status:
-            ready.ready === 1 && rpc === "fixture-only" ? "ready" : "not_ready",
-          database: ready.ready === 1 ? "ok" : "error",
-          rpc,
-          indexerLagBlocks: null,
-          risk: service.riskService.diagnostics,
-        },
-        request,
-        readinessResponseSchema,
-      );
+      const readiness = await service.getReadiness();
+      sendSuccess(response, 200, readiness, request, readinessResponseSchema);
       return;
     }
     if (method === "GET" && path === "/openapi.json") {
@@ -393,6 +402,31 @@ async function handle(
         ),
         request,
         positionsResponseSchema,
+      );
+      return;
+    }
+
+    if (method === "GET" && path === "/v1/activity") {
+      const query = activityQuerySchema.parse(queryValues(url));
+      sendSuccess(
+        response,
+        200,
+        service.listActivity(query),
+        request,
+        activityResponseSchema,
+      );
+      return;
+    }
+
+    const feeSummaryMatch = path.match(/^\/v1\/positions\/([^/]+)\/fees$/);
+    if (method === "GET" && feeSummaryMatch) {
+      const query = feeSummaryQuerySchema.parse(queryValues(url));
+      sendSuccess(
+        response,
+        200,
+        service.getFeeSummary(decodeURIComponent(feeSummaryMatch[1]!), query),
+        request,
+        feeSummaryResponseSchema,
       );
       return;
     }
@@ -446,6 +480,12 @@ async function handle(
           503,
         );
       const intent = await service.provider.prepareIntent(input);
+      sendSuccess(response, 200, intent, request, atomicSettlementIntentSchema);
+      return;
+    }
+    if (method === "POST" && path === "/v1/intents/prepare-token") {
+      const input = prepareTokenIntentRequestSchema.parse(payload);
+      const intent = await service.prepareTokenIntent(input);
       sendSuccess(response, 200, intent, request, atomicSettlementIntentSchema);
       return;
     }

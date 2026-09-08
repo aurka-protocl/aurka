@@ -30,8 +30,11 @@ export const graphMetaSchema = z
     block: z
       .object({
         number: z.number().int().nonnegative().safe(),
-        hash: bytes32Schema,
-        timestamp: z.number().int().nonnegative().safe().optional(),
+        // Graph Node returns null for historical _meta block hash/timestamp
+        // on some local deployments. Row-level indexedBlockHash plus the
+        // canonical RPC reader still provide the required reorg proof.
+        hash: bytes32Schema.nullable().optional(),
+        timestamp: z.number().int().nonnegative().safe().nullable().optional(),
       })
       .strict(),
   })
@@ -297,7 +300,9 @@ export class GraphSignalSource {
       const chainLatest = await options.canonical.getLatestBlock();
       const indexedBlock = BigInt(page.meta.block.number);
       if (indexedBlock > chainLatest)
-        throw new Error("Graph index is ahead of the canonical chain");
+        throw new Error(
+          `Graph index is ahead of the canonical chain (${indexedBlock} > ${chainLatest})`,
+        );
       if (chainLatest - indexedBlock > BigInt(config.maxIndexedLagBlocks))
         throw new Error("Graph index is outside the configured lag bound");
       if (
@@ -307,8 +312,11 @@ export class GraphSignalSource {
         throw new Error("Graph result is not final");
       const canonicalMetaHash =
         await options.canonical.getBlockHash(indexedBlock);
+      if (canonicalMetaHash === undefined)
+        throw new Error("Graph metadata block is not canonical");
       if (
-        canonicalMetaHash === undefined ||
+        page.meta.block.hash !== undefined &&
+        page.meta.block.hash !== null &&
         canonicalMetaHash.toLowerCase() !== page.meta.block.hash.toLowerCase()
       )
         throw new Error("Graph metadata block is not canonical");

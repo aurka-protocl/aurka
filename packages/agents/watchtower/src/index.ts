@@ -341,6 +341,8 @@ function validateTightening(
 
 export interface EvaluateRiskInput {
   readonly observations: readonly WatchtowerObservation[];
+  /** Source failures are explicit fail-safe inputs, not fabricated observations. */
+  readonly sourceFailures?: readonly string[];
   readonly configuration: WatchtowerConfiguration;
   readonly hardMaximumTradeValue: string;
   readonly hardBounds: readonly WatchtowerBound[];
@@ -369,6 +371,9 @@ export function evaluateRisk(input: EvaluateRiskInput): WatchtowerEvaluation {
     watchtowerBoundSchema.parse(item),
   );
   const previousMode = input.currentState?.mode ?? "NORMAL";
+  const sourceFailures = [
+    ...new Set((input.sourceFailures ?? []).map((source) => String(source))),
+  ].sort();
   const seen = new Set<string>();
   const invalidReasons: string[] = [];
   const valid = observations.filter((observation) => {
@@ -437,7 +442,8 @@ export function evaluateRisk(input: EvaluateRiskInput): WatchtowerEvaluation {
           .map((observation) => observation.sourceId),
       ).size < configuration.requiredQuorum,
   );
-  const failSafe = missingCoverage || invalidReasons.length > 0;
+  const failSafe =
+    sourceFailures.length > 0 || missingCoverage || invalidReasons.length > 0;
   if (
     failSafe &&
     riskModeRank(desired) < riskModeRank(configuration.failSafeMode)
@@ -497,6 +503,7 @@ export function evaluateRisk(input: EvaluateRiskInput): WatchtowerEvaluation {
   const sourceDigest = digest({
     version: configuration.version,
     observations: [...valid].sort((a, b) => a.id.localeCompare(b.id)),
+    sourceFailures,
   });
   const activeBoundsHash = hashActiveBounds(selectedBounds);
   const reasonCode = failSafe
@@ -507,7 +514,7 @@ export function evaluateRisk(input: EvaluateRiskInput): WatchtowerEvaluation {
     version: configuration.version,
     mode: desired,
     reasonCode,
-    evidenceSummary: `${valid.length} valid observations from ${sources.size} sources${invalidReasons.length === 0 ? "" : `; rejected ${[...new Set(invalidReasons)].sort().join(",")}`}`,
+    evidenceSummary: `${valid.length} valid observations from ${sources.size} sources${sourceFailures.length === 0 ? "" : `; failed ${sourceFailures.join(",")}`}${invalidReasons.length === 0 ? "" : `; rejected ${[...new Set(invalidReasons)].sort().join(",")}`}`,
     selectedBounds,
     maximumTradeValue: selected.maximumTradeValue.toString(),
     activeBoundsHash,

@@ -1,16 +1,18 @@
-FROM node:22-bookworm-slim
+FROM node:22.14.0-bookworm-slim
 
 WORKDIR /app
 RUN corepack enable && corepack prepare pnpm@10.13.1 --activate
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
 COPY packages/shared/package.json packages/shared/package.json
+COPY packages/graph/package.json packages/graph/package.json
 COPY packages/services/package.json packages/services/package.json
 COPY packages/wallet/package.json packages/wallet/package.json
 COPY packages/agents/watchtower/package.json packages/agents/watchtower/package.json
 RUN pnpm install --frozen-lockfile --ignore-scripts=false
 
 COPY packages/shared packages/shared
+COPY packages/graph packages/graph
 COPY packages/services packages/services
 COPY packages/wallet packages/wallet
 COPY packages/agents/watchtower packages/agents/watchtower

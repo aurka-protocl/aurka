@@ -15,6 +15,10 @@
     "./server": {
       "types": "./dist/server.js",
       "import": "./dist/server.js"
+    },
+    "./risk-runtime": {
+      "types": "./dist/risk-runtime.d.ts",
+      "import": "./dist/risk-runtime.js"
     }
   },
   "scripts": {
@@ -23,12 +27,15 @@
     "db:migrate": "tsx src/cli.ts migrate",
     "db:check": "tsx src/cli.ts check",
     "generate:router-fixture": "pnpm build && node scripts/generate-router-calldata-fixture.mjs",
+    "integration:local-settlement": "pnpm --dir ../.. integration:local-settlement",
+    "integration:graph-node": "pnpm --dir ../.. integration:graph-node",
     "start": "tsx src/cli.ts serve",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
     "@aurka/shared": "workspace:*",
+    "@aurka/graph": "workspace:*",
     "@noble/curves": "^2.4.0",
     "@noble/hashes": "^2.4.0",
     "better-sqlite3": "^12.4.1",

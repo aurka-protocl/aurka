@@ -1,15 +1,31 @@
-import { and, asc, desc, eq, gt, lte, or, sql } from "drizzle-orm";
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  gt,
+  gte,
+  isNotNull,
+  lte,
+  or,
+  sql,
+} from "drizzle-orm";
 
 import {
+  activityItemSchema,
   atomicSettlementIntentSchema,
   atomicSettlementProposalSchema,
   executionSchema,
+  feeSummarySchema,
   parseProtocolEventPayload,
   positionSchema,
   protocolEventSchema,
   quoteSchema,
   type AtomicSettlementIntent,
   type AtomicSettlementProposal,
+  type ActivityItem,
+  type ActivityStatus,
+  type FeeSummary,
   type Execution,
   type Position,
   type ProtocolEvent,
@@ -38,6 +54,7 @@ import {
   riskStates,
   riskWorkflows,
   riskAuditEvents,
+  settlementRecords,
   walletPolicies,
 } from "./schema.js";
 import type { ServiceDrizzleDatabase } from "./database.js";
@@ -47,6 +64,37 @@ const json = (value: unknown): string => JSON.stringify(value);
 const parse = <T>(value: string): T => JSON.parse(value) as T;
 const now = (): number => Math.floor(Date.now() / 1000);
 
+interface ActivityCursor {
+  readonly timestamp: number;
+  readonly id: string;
+}
+
+function encodeActivityCursor(cursor: ActivityCursor): string {
+  return Buffer.from(JSON.stringify(cursor), "utf8").toString("base64url");
+}
+
+function decodeActivityCursor(
+  value: string | undefined,
+): ActivityCursor | undefined {
+  if (!value) return undefined;
+  try {
+    const parsed = JSON.parse(
+      Buffer.from(value, "base64url").toString("utf8"),
+    ) as Partial<ActivityCursor>;
+    if (
+      typeof parsed.timestamp !== "number" ||
+      !Number.isSafeInteger(parsed.timestamp) ||
+      parsed.timestamp < 0 ||
+      typeof parsed.id !== "string" ||
+      parsed.id.length === 0
+    )
+      return undefined;
+    return { timestamp: parsed.timestamp, id: parsed.id };
+  } catch {
+    return undefined;
+  }
+}
+
 export interface Page<T> {
   readonly items: readonly T[];
   readonly nextCursor: string | null;
@@ -55,6 +103,22 @@ export interface Page<T> {
 export interface EventPage {
   readonly items: readonly ProtocolEvent[];
   readonly nextCursor: string | null;
+}
+
+export interface ActivityQuery {
+  readonly chainId?: number | undefined;
+  readonly positionId?: string | undefined;
+  readonly status?: ActivityStatus | undefined;
+  readonly from?: number | undefined;
+  readonly to?: number | undefined;
+  readonly limit: number;
+  readonly cursor?: string | undefined;
+}
+
+export interface FeeSummaryQuery {
+  readonly chainId?: number | undefined;
+  readonly from?: number | undefined;
+  readonly to?: number | undefined;
 }
 
 export interface IndexedBlockHeader {
@@ -544,6 +608,7 @@ export class ServiceRepository {
 
   getRiskPosition(positionId: string): {
     readonly evaluation: Record<string, unknown> | undefined;
+    readonly configuration: Record<string, unknown> | undefined;
     readonly certificate: Record<string, unknown> | undefined;
     readonly certificateStatus: string | undefined;
   } {
@@ -553,6 +618,13 @@ export class ServiceRepository {
       .where(eq(positions.id, positionId))
       .get();
     const evaluation = this.getLatestRiskEvaluation(positionId);
+    const evaluationRow = this.db
+      .select({ configurationJson: riskEvaluations.configurationJson })
+      .from(riskEvaluations)
+      .where(eq(riskEvaluations.positionId, positionId))
+      .orderBy(desc(riskEvaluations.evaluatedAt), sql`rowid DESC`)
+      .limit(1)
+      .get();
     const certificateRow = position
       ? this.db
           .select()
@@ -564,6 +636,9 @@ export class ServiceRepository {
       : undefined;
     return {
       evaluation,
+      configuration: evaluationRow
+        ? parse<Record<string, unknown>>(evaluationRow.configurationJson)
+        : undefined,
       certificate: certificateRow
         ? parse<Record<string, unknown>>(certificateRow.certificateJson)
         : undefined,
@@ -757,6 +832,7 @@ export class ServiceRepository {
       .insert(executions)
       .values({
         transactionHash: value.transactionHash,
+        positionId: value.initialPortfolio.positionId,
         intentHash: value.intentHash,
         proposalHash: value.proposalHash,
         status: value.status,
@@ -782,6 +858,413 @@ export class ServiceRepository {
       .where(eq(executions.transactionHash, hash))
       .get();
     return row ? executionSchema.parse(parse(row.executionJson)) : undefined;
+  }
+
+  listActivity(query: ActivityQuery): Page<ActivityItem> {
+    const cursor = decodeActivityCursor(query.cursor);
+    const sourceLimit = Math.min(201, query.limit * 2 + 1);
+    const executionRows = this.db
+      .select()
+      .from(executions)
+      .where(
+        and(
+          query.chainId === undefined
+            ? undefined
+            : sql`json_extract(${executions.executionJson}, '$.chainId') = ${query.chainId}`,
+          query.positionId === undefined || query.positionId === ""
+            ? undefined
+            : eq(executions.positionId, query.positionId),
+          query.status === "CONFIRMED" || query.status === "ORPHANED"
+            ? sql`0 = 1`
+            : query.status === "FAILED"
+              ? or(
+                  eq(executions.status, "REVERTED"),
+                  eq(executions.status, "DROPPED"),
+                )
+              : query.status === "PREPARED"
+                ? and(
+                    eq(executions.status, "PENDING"),
+                    or(
+                      sql`json_extract(${executions.executionJson}, '$.submissionState') IS NULL`,
+                      sql`json_extract(${executions.executionJson}, '$.submissionState') = 'PREPARED'`,
+                    ),
+                  )
+                : query.status === "PENDING"
+                  ? and(
+                      eq(executions.status, "PENDING"),
+                      sql`json_extract(${executions.executionJson}, '$.submissionState') = 'SUBMITTED'`,
+                    )
+                  : or(
+                      eq(executions.status, "PENDING"),
+                      eq(executions.status, "REVERTED"),
+                      eq(executions.status, "DROPPED"),
+                    ),
+          query.from === undefined
+            ? undefined
+            : gte(executions.submittedAt, query.from),
+          query.to === undefined
+            ? undefined
+            : lte(executions.submittedAt, query.to),
+          cursor === undefined
+            ? undefined
+            : or(
+                sql`${executions.submittedAt} < ${cursor.timestamp}`,
+                and(
+                  eq(executions.submittedAt, cursor.timestamp),
+                  sql`(${executions.transactionHash} || ':' || ${executions.proposalHash}) < ${cursor.id}`,
+                ),
+              ),
+        ),
+      )
+      .orderBy(
+        desc(executions.submittedAt),
+        desc(
+          sql`${executions.transactionHash} || ':' || ${executions.proposalHash}`,
+        ),
+      )
+      .limit(sourceLimit)
+      .all();
+
+    const settlementRows = this.db
+      .select()
+      .from(settlementRecords)
+      .where(
+        and(
+          query.chainId === undefined
+            ? undefined
+            : eq(settlementRecords.chainId, query.chainId),
+          query.positionId === undefined || query.positionId === ""
+            ? undefined
+            : eq(settlementRecords.positionId, query.positionId),
+          query.status === "PREPARED" ||
+            query.status === "PENDING" ||
+            query.status === "FAILED"
+            ? sql`0 = 1`
+            : query.status === "ORPHANED"
+              ? eq(settlementRecords.orphaned, true)
+              : query.status === "CONFIRMED"
+                ? eq(settlementRecords.orphaned, false)
+                : undefined,
+          isNotNull(settlementRecords.tradeJson),
+          isNotNull(settlementRecords.feeJson),
+          query.from === undefined
+            ? undefined
+            : gte(settlementRecords.observedAt, query.from),
+          query.to === undefined
+            ? undefined
+            : lte(settlementRecords.observedAt, query.to),
+          cursor === undefined
+            ? undefined
+            : or(
+                sql`${settlementRecords.observedAt} < ${cursor.timestamp}`,
+                and(
+                  eq(settlementRecords.observedAt, cursor.timestamp),
+                  sql`(${settlementRecords.transactionHash} || ':' || ${settlementRecords.proposalHash}) < ${cursor.id}`,
+                ),
+              ),
+        ),
+      )
+      .orderBy(
+        desc(settlementRecords.observedAt),
+        desc(
+          sql`${settlementRecords.transactionHash} || ':' || ${settlementRecords.proposalHash}`,
+        ),
+      )
+      .limit(sourceLimit)
+      .all();
+
+    const settlementItems = settlementRows.flatMap((row) => {
+      const item = this.activityFromSettlement(row);
+      return item ? [item] : [];
+    });
+    const settledKeys = new Set(
+      settlementRows.map((row) => {
+        const trade = row.tradeJson
+          ? parse<Record<string, unknown>>(row.tradeJson)
+          : {};
+        return `${String(trade.intentHash ?? row.intentHash)}:${row.proposalHash}`;
+      }),
+    );
+    const executionItems = executionRows.flatMap((row) => {
+      const execution = executionSchema.parse(parse(row.executionJson));
+      if (settledKeys.has(`${execution.intentHash}:${execution.proposalHash}`))
+        return [];
+      const item = this.activityFromExecution(row.positionId, execution);
+      return item ? [item] : [];
+    });
+
+    const mergedItems = [...settlementItems, ...executionItems].sort(
+      (left, right) => {
+        const leftTime = left.occurredAt ?? left.submittedAt;
+        const rightTime = right.occurredAt ?? right.submittedAt;
+        return (
+          rightTime - leftTime ||
+          `${right.transactionHash}:${right.proposalHash}`.localeCompare(
+            `${left.transactionHash}:${left.proposalHash}`,
+          )
+        );
+      },
+    );
+    const items = mergedItems.slice(0, query.limit);
+    const hasMore =
+      mergedItems.length > query.limit ||
+      settlementRows.length === sourceLimit ||
+      executionRows.length === sourceLimit;
+    return {
+      items,
+      nextCursor:
+        hasMore && items.length > 0
+          ? encodeActivityCursor({
+              timestamp: items.at(-1)!.occurredAt ?? items.at(-1)!.submittedAt,
+              id: `${items.at(-1)!.transactionHash}:${items.at(-1)!.proposalHash}`,
+            })
+          : null,
+    };
+  }
+
+  getFeeSummary(positionId: string, query: FeeSummaryQuery = {}): FeeSummary {
+    const position = this.getPosition(positionId);
+    if (!position) throw new Error("Position was not found");
+    const rows = this.db
+      .select()
+      .from(settlementRecords)
+      .where(
+        and(
+          query.chainId === undefined
+            ? undefined
+            : eq(settlementRecords.chainId, query.chainId),
+          eq(settlementRecords.positionId, positionId),
+          eq(settlementRecords.orphaned, false),
+          isNotNull(settlementRecords.tradeJson),
+          isNotNull(settlementRecords.feeJson),
+          query.from === undefined
+            ? undefined
+            : gte(settlementRecords.observedAt, query.from),
+          query.to === undefined
+            ? undefined
+            : lte(settlementRecords.observedAt, query.to),
+        ),
+      )
+      .orderBy(asc(settlementRecords.observedAt), asc(settlementRecords.id))
+      .limit(100_000)
+      .all();
+    const grouped = new Map<
+      string,
+      {
+        treasury: bigint;
+        total: bigint;
+        solver: bigint;
+        protocol: bigint;
+        count: number;
+        first: number;
+        last: number;
+      }
+    >();
+    for (const row of rows) {
+      const trade = parse<Record<string, string>>(row.tradeJson!);
+      const fee = parse<Record<string, string>>(row.feeJson!);
+      const total =
+        BigInt(fee.solverAmount!) +
+        BigInt(fee.protocolAmount!) +
+        BigInt(fee.treasuryAmount!);
+      if (total !== BigInt(trade.totalFeeAmount!)) continue;
+      const token = fee.feeToken!.toLowerCase();
+      const current = grouped.get(token);
+      if (current) {
+        current.treasury += BigInt(fee.treasuryAmount!);
+        current.total += total;
+        current.solver += BigInt(fee.solverAmount!);
+        current.protocol += BigInt(fee.protocolAmount!);
+        current.count += 1;
+        current.last = Math.max(current.last, row.observedAt);
+      } else {
+        grouped.set(token, {
+          treasury: BigInt(fee.treasuryAmount!),
+          total,
+          solver: BigInt(fee.solverAmount!),
+          protocol: BigInt(fee.protocolAmount!),
+          count: 1,
+          first: row.observedAt,
+          last: row.observedAt,
+        });
+      }
+    }
+    const assets = position.currentPortfolio?.assets ?? [];
+    const items = [...grouped.entries()].map(([feeToken, value]) => ({
+      feeToken,
+      ...(assets.find((asset) => asset.token.toLowerCase() === feeToken)
+        ?.symbol === undefined
+        ? {}
+        : {
+            feeTokenSymbol: assets.find(
+              (asset) => asset.token.toLowerCase() === feeToken,
+            )!.symbol,
+          }),
+      treasuryAmount: value.treasury.toString(),
+      totalFeeAmount: value.total.toString(),
+      solverAmount: value.solver.toString(),
+      protocolAmount: value.protocol.toString(),
+      settlementCount: value.count,
+      unit: "NORMALIZED_SETTLEMENT_VALUE" as const,
+      firstConfirmedAt: value.first,
+      lastConfirmedAt: value.last,
+    }));
+    const coveredFrom = rows.length > 0 ? rows[0]!.observedAt : null;
+    const coveredTo = rows.length > 0 ? rows.at(-1)!.observedAt : null;
+    return feeSummarySchema.parse({
+      positionId,
+      chainId: query.chainId ?? position.chainId,
+      treasury: position.treasury,
+      periodFrom: query.from ?? null,
+      periodTo: query.to ?? null,
+      coveredFrom,
+      coveredTo,
+      coverage:
+        rows.length > 0
+          ? "CONFIRMED_SETTLEMENT_EVENTS"
+          : "NO_CONFIRMED_SETTLEMENTS",
+      items,
+      confirmedSettlementCount: rows.length,
+    });
+  }
+
+  private activityFromExecution(
+    positionId: string,
+    execution: Execution,
+  ): ActivityItem | undefined {
+    const intent = this.getIntent(execution.intentHash);
+    const position = this.getPosition(
+      positionId || execution.initialPortfolio.positionId,
+    );
+    if (!intent || !position) return undefined;
+    const status: ActivityStatus =
+      execution.status === "PENDING"
+        ? execution.submissionState === "SUBMITTED"
+          ? "PENDING"
+          : "PREPARED"
+        : execution.status === "CONFIRMED"
+          ? "CONFIRMED"
+          : "FAILED";
+    const inputAsset = execution.initialPortfolio.assets.find(
+      (asset) =>
+        asset.token.toLowerCase() === execution.traderInputToken.toLowerCase(),
+    );
+    const outputAsset = execution.initialPortfolio.assets.find(
+      (asset) =>
+        asset.token.toLowerCase() === execution.traderOutputToken.toLowerCase(),
+    );
+    return activityItemSchema.parse({
+      id: hashBytes(`activity:execution:${execution.transactionHash}`),
+      positionId: position.id,
+      chainId: execution.chainId,
+      status,
+      source: "SERVICE_PREPARATION",
+      transactionHash: execution.transactionHash,
+      intentHash: execution.intentHash,
+      proposalHash: execution.proposalHash,
+      trader: intent.trader,
+      treasury: position.treasury,
+      traderInputToken: execution.traderInputToken,
+      traderOutputToken: execution.traderOutputToken,
+      ...(inputAsset?.symbol === undefined
+        ? {}
+        : { traderInputSymbol: inputAsset.symbol }),
+      ...(outputAsset?.symbol === undefined
+        ? {}
+        : { traderOutputSymbol: outputAsset.symbol }),
+      requestedTraderInputValue: execution.requestedTraderInputAmount,
+      executedTraderInputValue: execution.executedTraderInputAmount,
+      submittedAt: execution.submittedAt,
+      ...(execution.confirmedAt === undefined
+        ? {}
+        : { confirmedAt: execution.confirmedAt }),
+      ...(execution.blockNumber === undefined
+        ? {}
+        : { blockNumber: execution.blockNumber }),
+      bindingConstraint: execution.bindingConstraint,
+      estimatedFees: execution.fees,
+      feeState: status === "PREPARED" ? "ESTIMATE" : "NONE",
+      initialPortfolio: execution.initialPortfolio,
+      ...(execution.finalPortfolio === undefined
+        ? {}
+        : { finalPortfolio: execution.finalPortfolio }),
+      ...(execution.revertReason === undefined
+        ? {}
+        : { revertReason: execution.revertReason }),
+      evidence: {},
+    });
+  }
+
+  private activityFromSettlement(
+    row: typeof settlementRecords.$inferSelect,
+  ): ActivityItem | undefined {
+    if (!row.tradeJson || !row.feeJson || !row.positionId) return undefined;
+    const trade = parse<Record<string, string>>(row.tradeJson);
+    const fee = parse<Record<string, string>>(row.feeJson);
+    const position = this.getPosition(row.positionId);
+    if (!position) return undefined;
+    const assets = position.currentPortfolio?.assets ?? [];
+    const inputAsset = assets.find(
+      (asset) =>
+        asset.token.toLowerCase() === trade.traderInputToken!.toLowerCase(),
+    );
+    const outputAsset = assets.find(
+      (asset) =>
+        asset.token.toLowerCase() === trade.traderOutputToken!.toLowerCase(),
+    );
+    const status: ActivityStatus = row.orphaned ? "ORPHANED" : "CONFIRMED";
+    const totalFee =
+      BigInt(fee.solverAmount!) +
+      BigInt(fee.protocolAmount!) +
+      BigInt(fee.treasuryAmount!);
+    return activityItemSchema.parse({
+      id: hashBytes(`activity:settlement:${row.id}`),
+      positionId: row.positionId,
+      chainId: row.chainId,
+      status,
+      source: "CHAIN_EVENT",
+      transactionHash: row.transactionHash,
+      intentHash: trade.intentHash,
+      proposalHash: trade.proposalHash,
+      trader: trade.trader,
+      treasury: trade.treasury,
+      traderInputToken: trade.traderInputToken,
+      traderOutputToken: trade.traderOutputToken,
+      ...(inputAsset?.symbol === undefined
+        ? {}
+        : { traderInputSymbol: inputAsset.symbol }),
+      ...(outputAsset?.symbol === undefined
+        ? {}
+        : { traderOutputSymbol: outputAsset.symbol }),
+      requestedTraderInputValue: trade.traderInputValue,
+      executedTraderInputValue: trade.traderInputValue,
+      traderOutputValue: trade.traderOutputValue,
+      submittedAt: row.observedAt,
+      occurredAt: row.observedAt,
+      ...(row.orphaned ? {} : { confirmedAt: row.observedAt }),
+      blockNumber: row.blockNumber,
+      bindingConstraint: "NONE",
+      feeState: row.orphaned ? "NONE" : "EARNED",
+      ...(row.orphaned
+        ? {}
+        : {
+            earnedFee: {
+              feeToken: fee.feeToken,
+              treasuryAmount: fee.treasuryAmount,
+              solverAmount: fee.solverAmount,
+              protocolAmount: fee.protocolAmount,
+              totalAmount: totalFee.toString(),
+              unit: "NORMALIZED_SETTLEMENT_VALUE" as const,
+              eventId: row.feeEventId!,
+            },
+          }),
+      expectedPostStateHash: trade.expectedPostStateHash,
+      evidence: {
+        tradeEventId: row.tradeEventId!,
+        feeEventId: row.feeEventId!,
+        blockHash: row.blockHash,
+      },
+    });
   }
 
   upsertCapacityEpoch(input: {
@@ -1006,6 +1489,7 @@ export class ServiceRepository {
           },
         })
         .run();
+      this.applySettlementEvent(transaction, value, false);
       this.applyProjectedEvent(transaction, value);
     });
   }
@@ -1029,6 +1513,7 @@ export class ServiceRepository {
           ),
         )
         .run();
+      this.applySettlementEvent(transaction, value, true);
       this.rebuildProjectedState(transaction);
     });
   }
@@ -1123,6 +1608,100 @@ export class ServiceRepository {
     }
   }
 
+  private applySettlementEvent(
+    database: ServiceDrizzleDatabase,
+    event: ProtocolEvent,
+    orphaned: boolean,
+  ): void {
+    if (event.name !== "TradeExecuted" && event.name !== "FeesRouted") return;
+    const payload = event.payload;
+    const proposalHash = String(payload.proposalHash);
+    const id = `${event.chainId}:${event.contract.toLowerCase()}:${event.transactionHash}:${proposalHash}`;
+    const isTrade = event.name === "TradeExecuted";
+    const positionId = isTrade
+      ? this.resolvePositionId(database, String(payload.positionIdHash))
+      : undefined;
+    const values = {
+      id,
+      chainId: event.chainId,
+      contract: event.contract.toLowerCase(),
+      transactionHash: event.transactionHash,
+      blockNumber: event.blockNumber,
+      blockHash: event.blockHash,
+      proposalHash,
+      positionIdHash: isTrade ? String(payload.positionIdHash) : null,
+      positionId: positionId ?? null,
+      intentHash: isTrade ? String(payload.intentHash) : null,
+      tradeEventId: isTrade ? event.id : null,
+      feeEventId: isTrade ? null : event.id,
+      tradeJson: isTrade ? json(payload) : null,
+      feeJson: isTrade ? null : json(payload),
+      orphaned:
+        orphaned ||
+        (!orphaned &&
+          this.hasRemovedSettlementLog(database, event, proposalHash)),
+      observedAt: event.observedAt,
+      updatedAt: now(),
+    };
+    database
+      .insert(settlementRecords)
+      .values(values)
+      .onConflictDoUpdate({
+        target: settlementRecords.id,
+        set: isTrade
+          ? {
+              blockNumber: values.blockNumber,
+              blockHash: values.blockHash,
+              positionIdHash: values.positionIdHash,
+              positionId: values.positionId,
+              intentHash: values.intentHash,
+              tradeEventId: values.tradeEventId,
+              tradeJson: values.tradeJson,
+              orphaned: values.orphaned,
+              observedAt: values.observedAt,
+              updatedAt: values.updatedAt,
+            }
+          : {
+              blockNumber: values.blockNumber,
+              blockHash: values.blockHash,
+              feeEventId: values.feeEventId,
+              feeJson: values.feeJson,
+              orphaned: values.orphaned,
+              observedAt: values.observedAt,
+              updatedAt: values.updatedAt,
+            },
+      })
+      .run();
+  }
+
+  private hasRemovedSettlementLog(
+    database: ServiceDrizzleDatabase,
+    event: ProtocolEvent,
+    proposalHash: string,
+  ): boolean {
+    return database
+      .select({
+        removed: chainEvents.removed,
+        payloadJson: chainEvents.payloadJson,
+      })
+      .from(chainEvents)
+      .where(
+        and(
+          eq(chainEvents.chainId, event.chainId),
+          eq(chainEvents.contract, event.contract.toLowerCase()),
+          eq(chainEvents.transactionHash, event.transactionHash),
+        ),
+      )
+      .all()
+      .some(
+        (row) =>
+          row.removed &&
+          String(
+            parse<Record<string, unknown>>(row.payloadJson).proposalHash,
+          ) === proposalHash,
+      );
+  }
+
   private resolvePositionId(
     database: ServiceDrizzleDatabase,
     positionIdHash: string,
@@ -1156,21 +1735,20 @@ export class ServiceRepository {
             : 1;
       });
     for (const row of events) {
-      this.applyProjectedEvent(
-        database,
-        protocolEventSchema.parse({
-          id: row.id,
-          name: row.name,
-          chainId: row.chainId,
-          contract: row.contract,
-          transactionHash: row.transactionHash,
-          blockNumber: row.blockNumber,
-          logIndex: row.logIndex,
-          blockHash: row.blockHash,
-          observedAt: row.observedAt,
-          payload: parse(row.payloadJson),
-        }),
-      );
+      const event = protocolEventSchema.parse({
+        id: row.id,
+        name: row.name,
+        chainId: row.chainId,
+        contract: row.contract,
+        transactionHash: row.transactionHash,
+        blockNumber: row.blockNumber,
+        logIndex: row.logIndex,
+        blockHash: row.blockHash,
+        observedAt: row.observedAt,
+        payload: parse(row.payloadJson),
+      });
+      this.applySettlementEvent(database, event, false);
+      this.applyProjectedEvent(database, event);
     }
   }
 
@@ -1283,6 +1861,27 @@ export class ServiceRepository {
           ? undefined
           : sql`CAST(${chainEvents.blockNumber} AS INTEGER) > ${Number(ancestorBlock)}`,
       );
+      const orphanedRows = tx
+        .select()
+        .from(chainEvents)
+        .where(eventCondition)
+        .all();
+      for (const row of orphanedRows) {
+        if (row.name !== "TradeExecuted" && row.name !== "FeesRouted") continue;
+        const event = protocolEventSchema.parse({
+          id: row.id,
+          name: row.name,
+          chainId: row.chainId,
+          contract: row.contract,
+          transactionHash: row.transactionHash,
+          blockNumber: row.blockNumber,
+          logIndex: row.logIndex,
+          blockHash: row.blockHash,
+          observedAt: row.observedAt,
+          payload: parse(row.payloadJson),
+        });
+        this.applySettlementEvent(tx, event, true);
+      }
       tx.delete(chainEvents).where(eventCondition).run();
       tx.delete(indexingHeaders)
         .where(

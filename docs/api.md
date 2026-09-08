@@ -31,6 +31,13 @@ in this milestone. The execution remains `PENDING` until a separately authorized
 broadcaster reports a real hash. `Idempotency-Key` is supported on all mutating
 routes.
 
+Read-only activity is available at `GET /v1/activity`, with cursor pagination
+and optional position, chain, lifecycle-status, and time filters. Treasury fee
+summaries are available at `GET /v1/positions/{id}/fees`. See
+[`activity-and-fees.md`](./activity-and-fees.md) for the source-of-truth and
+reorg semantics. Prepared quotes and unsigned transaction requests never count
+as earned revenue.
+
 Task 7 adds a separate, deterministic risk surface:
 
 ```text
@@ -66,6 +73,12 @@ snapshot provider. Inputs are `positionId`, `trader`, `traderInputToken`,
 `deadline`. The local fixture implements preparation; other providers must
 implement it or return 503. Preparation does not sign or broadcast.
 
+The guided swap uses `POST /v1/intents/prepare-token`. It accepts the same
+context plus `requestedTraderInputAmount` in the input token’s smallest units.
+The configured provider converts that amount to settlement value using its
+authoritative token metadata and price snapshot before constructing the intent;
+the browser never derives a quote from a rounded display price.
+
 Risk evaluation is a proposal endpoint. It uses the canonical watchtower
 implementation, validates the stored hard policy and server clock, persists
 cooldown state, rejects configuration changes without an operator migration, and
@@ -76,14 +89,20 @@ Risk responses distinguish `proposed`, `certificate`, `certificateState`, and
 `effective`. `SIGNED`/`NOT_SUBMITTED` means storage only. Effective values come
 from `createRegistryRiskReader` at a canonical finalized block, including the
 registry's expiry/revocation fallback. Without that reader, values are null and
-source is `UNAVAILABLE`. Configure the actual **risk registry**, separately from
-the policy registry, before accepting signed certificates.
+source is `UNAVAILABLE`. A `configuration` object is returned when an evaluation
+has been persisted; it is null before the first evaluation, so clients do not
+guess trigger, cooldown, or recovery timings. Configure the actual **risk
+registry**, separately from the policy registry, before accepting signed
+certificates.
 
-`/ready` probes RPC chain identity when configured and reports unknown indexer
-lag as null. Live readiness remains `not_ready` until indexer/risk health wiring
-is implemented and verified. The optional risk reader reports `unverified`;
-unconfigured risk reports `not_configured`. Consumers must inspect `data.status`
-in addition to HTTP success. `/health` remains process liveness.
+`/ready` returns the measured, timestamped readiness checks for the database,
+RPC chain/finalized head, indexer checkpoint/lag, Graph sources, worker, signer,
+and effective registry. Check states are explicit: `configured`, `healthy`,
+`unhealthy`, `unknown`, or `disabled`. Required live checks must be measured
+`healthy`; missing indexer lag remains `null`. Consumers must inspect
+`data.status` and `data.reasons` in addition to HTTP success. `/health` remains
+process liveness and does not imply serving readiness. Fixture mode is limited
+to local database-backed capabilities and is not a production-readiness claim.
 
 The interactive no-RPC CLI uses `LocalDemoProvider` with current-time snapshots
 and a 60-second lifetime. The fixed-clock `FixtureProvider` remains available

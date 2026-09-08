@@ -67,7 +67,7 @@ dataSources:
           handler: handleRiskModeChanged
         - event:
             WatchtowerAuthorizationChanged(indexed bytes32,indexed address,bool)
-          handler: handleTradeExecuted
+          handler: handleWatchtowerAuthorizationChanged
   - kind: ethereum
     name: AurkaPolicyRegistry
     network: localhost
@@ -100,8 +100,7 @@ dataSources:
             address,uint16,uint16,uint256)
           handler: handleAssetBoundsUpdated
         - event:
-            AssetAdded(indexed bytes32,indexed
-            address,uint8,uint16,uint16,uint256)
+            AssetAdded(indexed bytes32,indexed address,uint16,uint16,uint256)
           handler: handleAssetAdded
         - event: MaximumTransactionValueUpdated(indexed bytes32,uint256,uint256)
           handler: handleMaximumTransactionValueUpdated

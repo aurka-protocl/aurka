@@ -1,12 +1,20 @@
 import type { z } from "zod";
 
 import {
+  activityQuerySchema,
+  activityResponseSchema,
+  type ActivityItem,
+  type ActivityStatus,
   prepareIntentRequestSchema,
+  prepareTokenIntentRequestSchema,
+  type PrepareTokenIntentRequest,
   type PrepareIntentRequest,
   apiResponseSchema,
   apiFailureSchema,
   healthResponseSchema,
   readinessResponseSchema,
+  type HealthResponse,
+  type ReadinessResponse,
   type AtomicSettlementIntent,
   atomicSettlementIntentSchema,
   type Position,
@@ -29,6 +37,9 @@ import {
   solveResponseSchema,
   executeRequestSchema,
   executeResponseSchema,
+  feeSummaryQuerySchema,
+  feeSummaryResponseSchema,
+  type FeeSummary,
   riskEvaluateRequestSchema,
   riskEvaluateResponseSchema,
   riskCertificateRequestSchema,
@@ -131,21 +142,23 @@ export class AurkaClient {
     );
   }
 
-  async health(): Promise<{
-    status: string;
-    service: string;
-    version: string;
-  }> {
+  /** Prepare an intent from a human token amount using the service snapshot. */
+  async prepareIntentFromTokenAmount(
+    input: PrepareTokenIntentRequest,
+  ): Promise<AtomicSettlementIntent> {
+    return this.request(
+      "POST",
+      "/v1/intents/prepare-token",
+      prepareTokenIntentRequestSchema.parse(input),
+      atomicSettlementIntentSchema,
+    );
+  }
+
+  async health(): Promise<HealthResponse> {
     return this.request("GET", "/health", undefined, healthResponseSchema);
   }
 
-  async readiness(): Promise<{
-    status: "ready" | "not_ready";
-    database: "ok" | "error";
-    rpc: "fixture-only" | "configured" | "error";
-    indexerLagBlocks: number | null;
-    risk: "not_configured" | "unverified";
-  }> {
+  async readiness(): Promise<ReadinessResponse> {
     return this.request("GET", "/ready", undefined, readinessResponseSchema);
   }
 
@@ -273,6 +286,56 @@ export class AurkaClient {
       `/v1/executions/${encodeURIComponent(hash)}`,
       undefined,
       executionSchema,
+    );
+  }
+
+  async listActivity(
+    input: {
+      positionId?: string;
+      chainId?: number;
+      status?: ActivityStatus;
+      from?: number;
+      to?: number;
+      limit?: number;
+      cursor?: string;
+    } = {},
+  ): Promise<{ items: ActivityItem[]; nextCursor: string | null }> {
+    const queryInput = activityQuerySchema.parse(input);
+    const params = new URLSearchParams({ limit: queryInput.limit.toString() });
+    for (const key of [
+      "positionId",
+      "chainId",
+      "status",
+      "from",
+      "to",
+    ] as const) {
+      const value = queryInput[key];
+      if (value !== undefined) params.set(key, String(value));
+    }
+    if (queryInput.cursor) params.set("cursor", queryInput.cursor);
+    return this.request(
+      "GET",
+      `/v1/activity?${params.toString()}`,
+      undefined,
+      activityResponseSchema,
+    );
+  }
+
+  async getFeeSummary(
+    positionId: string,
+    input: { from?: number; to?: number } = {},
+  ): Promise<FeeSummary> {
+    const queryInput = feeSummaryQuerySchema.parse(input);
+    const params = new URLSearchParams();
+    if (queryInput.from !== undefined)
+      params.set("from", String(queryInput.from));
+    if (queryInput.to !== undefined) params.set("to", String(queryInput.to));
+    const query = params.toString();
+    return this.request(
+      "GET",
+      `/v1/positions/${encodeURIComponent(positionId)}/fees${query ? `?${query}` : ""}`,
+      undefined,
+      feeSummaryResponseSchema,
     );
   }
 

@@ -32,16 +32,17 @@ it("consumes real envelopes, preserves errors and prepares a quote", async () =>
       statusCode: 404,
     });
     const fixture = createCanonicalFixture();
-    const intent = await client.prepareIntent({
+    const intent = await client.prepareIntentFromTokenAmount({
       positionId: position.id,
       trader: fixture.intent.trader,
       traderInputToken: fixture.intent.traderInputToken,
       traderOutputToken: fixture.intent.traderOutputToken,
-      requestedValue: fixture.intent.requestedValue,
+      requestedTraderInputAmount: fixture.intent.requestedValue,
       minimumTraderOutputValue: "0",
       nonce: "123",
       deadline: fixture.intent.deadline,
     });
+    expect(intent.requestedValue).toBe(fixture.intent.requestedValue);
     const quote = await client.quote(intent);
     expect(quote.executableTraderInputAmount).not.toBe("0");
     const solved = await client.solve(intent);

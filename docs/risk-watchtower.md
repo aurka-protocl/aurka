@@ -70,28 +70,82 @@ separate. Configuration changes require an operator migration; never delete
 worker state simply to bypass cooldown. A recorded signed certificate is not
 proof of current onchain effect; use the effective registry read.
 
-To wire a deployment, provide an operator-owned server module via
-`RISK_RUNTIME_MODULE=/absolute/path/runtime.mjs`. It must export
-`async createRiskRuntime(service)` returning
-`{worker, positions, readRisk?, riskRegistry?}`. Construct the worker with the
-service repository/risk service, the configured wallet, request-specific
-`authorize` callback, and trusted `RiskWorkerSources` implementations for
-context, evaluation, receipts, canonical hashes and finality. `readRisk` can be
-created with
-`createRegistryRiskReader({rpc, chainId, registry, policyRegistry, maximumAgeSeconds})`.
-The two registry addresses are distinct configuration.
+## Trusted runtime composition — AURKA-010
 
-The source callbacks must read current chain/policy/watchtower authority and
-assemble evaluations from approved Graph sources and versioned configuration.
-The wallet requires a live `refreshPolicy` callback and `readRiskAuthority`
-callback; neither may accept browser-provided authority. Its RPC adapter uses
-`request(method, params)` while service transports use
-`request({method, params})`; explicitly bridge these signatures. The runtime
-module must arrange its dependencies, including `@aurka/graph` if used; the
-stock Docker image runs the local service and does not package an operator
-runtime or production Graph sources.
+The reusable server composition lives in `packages/services/src/risk-runtime.ts`
+and is exported as `@aurka/services/risk-runtime`. The default CLI still starts
+no signing worker. An operator opts in with
+`RISK_RUNTIME_MODULE=/absolute/path/runtime.mjs`; the module exports
+`async createRiskRuntime(service)` and may delegate to
+`createRiskRuntime(service)` from the built services package. This explicit hook
+is the boundary that prevents an unrelated environment variable from starting a
+signer.
+
+The built-in composition reads these public deployment variables:
+
+```text
+RISK_CHAIN_ID
+RISK_RPC_URL
+RISK_POLICY_REGISTRY
+RISK_RISK_REGISTRY
+RISK_ROUTER
+RISK_WALLET_ID
+RISK_WALLET_POLICY_REFERENCE
+RISK_FINALITY_MAX_AGE_SECONDS
+RISK_POSITIONS_JSON
+RISK_WALLET_POLICY_MODULE          # local operator module reference
+RISK_AUTHORIZATION_MODULE          # local operator module reference
+RISK_CERTIFICATE_LIFETIME_SECONDS  # optional
+RISK_RENEWAL_LEAD_SECONDS          # optional
+```
+
+`RISK_POSITIONS_JSON` is an array of reviewed position records. Each record
+binds `positionId`, `policyId`, `watchtower`, one `deploymentId`, the complete
+versioned `configuration`, `approvedConfigurationHash`,
+`approvedHardBoundsHash`, and one or more unique Graph source records. A source
+specifies `sourceId`, `sourceKind`, endpoint, deployment ID, `schemaVersion`,
+`queryVersion`, freshness/lag budgets, and an explicit bytes32 `poolId` for a
+DEX source. `apiKeyEnv` names an environment variable; the key itself is never
+placed in this JSON, source payload, database, or browser request. Hashes are
+computed with the exported `hashRiskConfiguration` and shared `hashActiveBounds`
+functions. All sources for one position intentionally share the configured
+deployment because the evaluation request has one trusted deployment context.
+
+The optional server-only policy module exports
+`getWalletPolicy(walletId, reference)`. The authorization module exports
+`authorize(request)` and returns `{signatures: string[]}`. With no injected test
+wallet, the composition creates the pinned `@privy-io/node@0.34.0` adapter from
+the standard Privy environment and refreshes policy/authority through the server
+callbacks. It explicitly bridges Privy's positional `request(method, params)` to
+the service transport's object-shaped request.
+
+At composition and evaluation time the runtime checks the RPC chain ID, the risk
+registry's policy-registry pointer, finalized-block age, policy nonce, hard
+bounds, approved hashes, watchtower authorization/epoch, next certificate nonce,
+signer status, source identity and Graph provenance. The worker repeats mutable
+authority checks immediately before signing and submission. A source outage is
+carried as `sourceFailures` into the evaluator and therefore selects the
+configured fail-safe mode; it cannot silently become a `NORMAL` result. The
+runtime returns the worker, configured positions, canonical `readRisk` reader,
+registry address, sources and parsed configuration for diagnostics.
+
+Deterministic local composition and lifecycle coverage is runnable with:
+
+```bash
+pnpm --filter @aurka/services test -- risk-runtime.test.ts
+```
+
+The test uses fake RPC/Graph transports and a local test key only. It covers
+trigger, sign, submit, canonical receipt, effective read, renewal, reorg
+recovery, revoked authorization and Graph outage fail-safe behavior. It is not
+evidence for any live RPC, Graph deployment, Privy policy or production key.
+
+The stock Docker image runs the local service and does not package an operator
+runtime or production Graph sources. Selected live targets, source calibration,
+Privy policy provisioning and protected smoke execution remain deployment work
+for AURKA-012/013/014.
 
 The default CLI starts no signing worker. No selected live deployment, deployed
 subgraph, Privy policy provisioning, production runtime module, or live smoke
 workflow is supplied by this local validation. Live readiness consequently
-remains unverified. These are still required before Task 7 can be complete.
+remains unverified.
