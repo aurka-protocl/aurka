@@ -133,24 +133,37 @@ the browser smoke test. They are not invented presentation examples.
    These are expected values for the proposed trade. The current holdings do not
    mutate in the browser because nothing has settled.
 
-6. **Review and prepare.** Check the plain-language confirmation box and select
-   **Prepare unsigned transaction**. The activity page records a prepared,
-   unsigned item. It says that no wallet was connected, nothing was broadcast,
-   and no funds moved. The treasury activity page has no confirmed fee entry; a
-   prepared quote is not fee revenue.
+6. **Review and prepare.** Review the exact terms and select **Prepare unsigned
+   transaction**. The Activity page records a `SWAP` with status **Prepared**.
+   No wallet transaction was broadcast, no funds moved, and the estimated fee is
+   explicitly not earned revenue.
 
-7. **Test stale and changed state.** Change the input after a quote: the review
+7. **Inspect Space changes.** Connect the owner wallet and open Settings for a
+   created demo Space. Save a draft, activate it, then pause and resume it.
+   Activity shows `RULE_CHANGE` records for creation/activation and
+   `TRADING_STATUS` records for pause/resume. The draft record remains marked as
+   a draft and is never described as a confirmed policy update. Each record
+   includes the Space name, actor, status, and optional receipt evidence.
+
+8. **Use the global feed.** Open `/activity`, select a Space or activity type,
+   status, and date range, then reload the URL. The same records appear in the
+   Space Overview's Recent activity. Use **View full activity** to return to a
+   Space-filtered global feed. Confirmed fees appear only in a confirmed swap's
+   paired settlement detail; prepared, failed, and orphaned trades contribute
+   zero earned revenue.
+
+9. **Test stale and changed state.** Change the input after a quote: the review
    is cleared and a fresh quote is required. Use **Refresh quote**: the review
    is cleared and preparation is disabled until the refreshed quote is accepted.
    Wait for the quote expiry boundary or run the automated scenario: an expired
    quote cannot be prepared, and the user must request a new quote.
 
-8. **Find current activity and status.** Use **Activity** to distinguish no
-   activity, prepared activity, and confirmed activity. In this browser flow
-   only the prepared state is reached. Use **Status** to see service and
-   capability diagnostics. Missing effective risk, history, live identity,
-   wallet connectivity, and live settlement are shown as unavailable rather than
-   filled with inferred values.
+10. **Find current activity and status.** Use **Activity** to distinguish no
+    activity, prepared activity, and confirmed activity. In this browser flow
+    only the prepared state is reached. Use **Status** to see service and
+    capability diagnostics. Missing effective risk, history, live identity,
+    wallet connectivity, and live settlement are shown as unavailable rather
+    than filled with inferred values.
 
 ### Confirmed local-settlement path
 

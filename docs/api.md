@@ -32,11 +32,14 @@ broadcaster reports a real hash. `Idempotency-Key` is supported on all mutating
 routes.
 
 Read-only activity is available at `GET /v1/activity`, with cursor pagination
-and optional position, chain, lifecycle-status, and time filters. Treasury fee
-summaries are available at `GET /v1/positions/{id}/fees`. See
+and optional Space (`spaceId`, with legacy `positionId`), type (`SWAP`,
+`RULE_CHANGE`, or `TRADING_STATUS`), chain, lifecycle-status, and time filters.
+Treasury fee summaries are available at `GET /v1/positions/{id}/fees`. See
 [`activity-and-fees.md`](./activity-and-fees.md) for the source-of-truth and
 reorg semantics. Prepared quotes and unsigned transaction requests never count
-as earned revenue.
+as earned revenue. Space change records include the durable actor, event type,
+resulting state, status, and optional receipt evidence; they do not fabricate
+swap fields.
 
 Space management is exposed through the persistent Space read model:
 

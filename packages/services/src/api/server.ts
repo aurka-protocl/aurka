@@ -10,6 +10,7 @@ import { URL } from "node:url";
 import {
   activityQuerySchema,
   activityResponseSchema,
+  activityTypeSchema,
   prepareIntentRequestSchema,
   prepareTokenIntentRequestSchema,
   apiFailureSchema,
@@ -329,6 +330,7 @@ export function openApi(): Record<string, unknown> {
       );
     if (path === "/v1/activity")
       parameters.push(
+        { name: "spaceId", in: "query", schema: { type: "string" } },
         { name: "positionId", in: "query", schema: { type: "string" } },
         {
           name: "chainId",
@@ -341,6 +343,14 @@ export function openApi(): Record<string, unknown> {
           schema: {
             type: "string",
             enum: ["PREPARED", "PENDING", "CONFIRMED", "FAILED", "ORPHANED"],
+          },
+        },
+        {
+          name: "type",
+          in: "query",
+          schema: {
+            type: "string",
+            enum: activityTypeSchema.options,
           },
         },
         { name: "from", in: "query", schema: { type: "integer", minimum: 0 } },

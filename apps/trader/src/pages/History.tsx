@@ -1,147 +1,224 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { AurkaClient } from "@aurka/sdk";
 import {
-  formatGroupedDecimalUnits,
-  type ActivityItem,
+  activityStatusSchema,
+  activityTypeSchema,
+  type ActivityStatus,
+  type ActivityType,
   type Execution,
+  type SpaceRecord,
 } from "@aurka/shared";
+import {
+  ActivityFeed,
+  type ActivityFeedQuery,
+} from "../components/ActivityFeed";
 import { apiBaseUrl } from "../config";
 
-const STATUS_LABELS: Record<ActivityItem["status"], string> = {
-  PREPARED: "Prepared · unsigned, not submitted",
-  PENDING: "Pending · submitted, awaiting receipt",
-  CONFIRMED: "Confirmed on chain",
-  FAILED: "Failed",
-  ORPHANED: "Orphaned by a chain reorganization",
-};
+const ACTIVITY_TYPES = activityTypeSchema.options;
+const ACTIVITY_STATUSES = activityStatusSchema.options;
 
-function shortHash(value: string): string {
-  return `${value.slice(0, 10)}…${value.slice(-8)}`;
+function validOption<T extends string>(
+  value: string | null,
+  options: readonly T[],
+): T | undefined {
+  return value && options.includes(value as T) ? (value as T) : undefined;
 }
 
-function ActivityCard({ item }: { readonly item: ActivityItem }) {
-  const statusClass =
-    item.status === "CONFIRMED"
-      ? "text-emerald-300"
-      : item.status === "ORPHANED" || item.status === "FAILED"
-        ? "text-amber-300"
-        : "text-cyan-300";
+function dateValue(timestamp: number | undefined): string {
+  if (
+    timestamp === undefined ||
+    !Number.isSafeInteger(timestamp) ||
+    timestamp < 0
+  )
+    return "";
+  const date = new Date(timestamp * 1000);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function dayBoundary(value: string, endOfDay: boolean): number | undefined {
+  if (!value) return undefined;
+  const suffix = endOfDay ? "T23:59:59" : "T00:00:00";
+  const timestamp = Math.floor(new Date(`${value}${suffix}`).getTime() / 1000);
+  return Number.isSafeInteger(timestamp) && timestamp >= 0
+    ? timestamp
+    : undefined;
+}
+
+function FilterSelect({
+  label,
+  value,
+  onChange,
+  children,
+}: {
+  readonly label: string;
+  readonly value: string;
+  readonly onChange: (value: string) => void;
+  readonly children: React.ReactNode;
+}) {
   return (
-    <article className="rounded-2xl border border-slate-700 bg-slate-900 p-5">
+    <label className="block min-w-0">
+      <span className="text-xs font-medium uppercase tracking-wide text-slate-500">
+        {label}
+      </span>
+      <select
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        className="mt-1 block min-h-10 w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-100"
+      >
+        {children}
+      </select>
+    </label>
+  );
+}
+
+function SpaceFilter({
+  value,
+  spaces,
+  onChange,
+}: {
+  readonly value: string;
+  readonly spaces: readonly SpaceRecord[];
+  readonly onChange: (value: string) => void;
+}) {
+  return (
+    <label className="block min-w-0 sm:col-span-2">
+      <span className="text-xs font-medium uppercase tracking-wide text-slate-500">
+        Space
+      </span>
+      <select
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        className="mt-1 block min-h-10 w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-100"
+      >
+        <option value="">All Spaces</option>
+        {spaces.map((space) => (
+          <option key={space.identity.id} value={space.identity.id}>
+            {space.identity.name}
+          </option>
+        ))}
+        {value && !spaces.some((space) => space.identity.id === value) && (
+          <option value={value}>Selected Space</option>
+        )}
+      </select>
+    </label>
+  );
+}
+
+function ActivityFilters({
+  searchParams,
+  spaces,
+  onChange,
+  onReset,
+}: {
+  readonly searchParams: URLSearchParams;
+  readonly spaces: readonly SpaceRecord[];
+  readonly onChange: (name: string, value: string) => void;
+  readonly onReset: () => void;
+}) {
+  const type = validOption(searchParams.get("type"), ACTIVITY_TYPES) ?? "";
+  const status =
+    validOption(searchParams.get("status"), ACTIVITY_STATUSES) ?? "";
+  return (
+    <section className="rounded-2xl border border-slate-700 bg-slate-900 p-4 sm:p-5">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <p className="text-lg font-semibold text-white">
-            {item.traderInputSymbol ?? shortHash(item.traderInputToken)} →{" "}
-            {item.traderOutputSymbol ?? shortHash(item.traderOutputToken)}
-          </p>
+          <h2 className="font-semibold text-white">Filter activity</h2>
           <p className="mt-1 text-sm text-slate-400">
-            {new Date(
-              (item.occurredAt ?? item.submittedAt) * 1000,
-            ).toLocaleString()}
+            Filters stay in this URL, so a Space-specific view can be shared or
+            reloaded.
           </p>
         </div>
-        <span className={`text-sm font-medium ${statusClass}`}>
-          {STATUS_LABELS[item.status]}
-        </span>
+        <button
+          type="button"
+          onClick={onReset}
+          className="rounded-lg border border-slate-700 px-3 py-2 text-sm text-slate-300 hover:border-cyan-500 hover:text-white"
+        >
+          Clear filters
+        </button>
       </div>
-
-      <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-2">
-        <div>
-          <dt className="text-slate-500">Requested value</dt>
-          <dd className="text-slate-200">
-            {formatGroupedDecimalUnits(
-              item.requestedTraderInputValue,
-              item.initialPortfolio?.valueDecimals ?? 0,
-            )}{" "}
-            normalized settlement value
-          </dd>
-        </div>
-        <div>
-          <dt className="text-slate-500">Executed value</dt>
-          <dd className="text-slate-200">
-            {item.executedTraderInputValue === undefined
-              ? "Not available"
-              : `${formatGroupedDecimalUnits(
-                  item.executedTraderInputValue,
-                  item.initialPortfolio?.valueDecimals ?? 0,
-                )} normalized settlement value`}
-          </dd>
-        </div>
-        <div>
-          <dt className="text-slate-500">Fee record</dt>
-          <dd className="text-slate-200">
-            {item.feeState === "EARNED" && item.earnedFee
-              ? `${formatGroupedDecimalUnits(
-                  item.earnedFee.treasuryAmount,
-                  item.initialPortfolio?.valueDecimals ?? 0,
-                )} normalized settlement value retained by treasury`
-              : item.feeState === "ESTIMATE" && item.estimatedFees
-                ? `${formatGroupedDecimalUnits(
-                    item.estimatedFees.treasuryAmount,
-                    item.initialPortfolio?.valueDecimals ?? 0,
-                  )} estimated normalized settlement value · not earned`
-                : item.status === "ORPHANED"
-                  ? "Not counted as earned revenue"
-                  : "No fee evidence recorded"}
-          </dd>
-        </div>
-        <div>
-          <dt className="text-slate-500">Evidence</dt>
-          <dd className="text-slate-200">
-            {item.source === "CHAIN_EVENT"
-              ? `Router events · block ${item.blockNumber ?? "unavailable"}`
-              : "Service preparation record"}
-          </dd>
-        </div>
-      </dl>
-
-      {item.status === "ORPHANED" && (
-        <p className="mt-4 rounded-lg border border-amber-900/70 bg-amber-950/30 p-3 text-sm text-amber-200">
-          This event was removed from the canonical chain. It remains visible
-          for audit context, but contributes zero to earned-fee totals.
-        </p>
-      )}
-
-      <details className="mt-4 rounded-lg border border-slate-700 bg-slate-950/60 p-3">
-        <summary className="cursor-pointer text-sm text-slate-300">
-          Technical evidence
-        </summary>
-        <dl className="mt-3 space-y-2 break-all text-xs text-slate-500">
-          <div>
-            <dt className="inline text-slate-400">Activity ID: </dt>
-            <dd className="inline">{item.id}</dd>
-          </div>
-          <div>
-            <dt className="inline text-slate-400">
-              {item.source === "CHAIN_EVENT"
-                ? "Transaction hash: "
-                : "Preparation ID: "}
-            </dt>
-            <dd className="inline">{item.transactionHash}</dd>
-          </div>
-          <div>
-            <dt className="inline text-slate-400">Intent: </dt>
-            <dd className="inline">{item.intentHash}</dd>
-          </div>
-          <div>
-            <dt className="inline text-slate-400">Proposal: </dt>
-            <dd className="inline">{item.proposalHash}</dd>
-          </div>
-        </dl>
-      </details>
-    </article>
+      <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+        <SpaceFilter
+          value={
+            searchParams.get("spaceId") ?? searchParams.get("positionId") ?? ""
+          }
+          spaces={spaces}
+          onChange={(value) => onChange("spaceId", value)}
+        />
+        <FilterSelect
+          label="Type"
+          value={type}
+          onChange={(value) => onChange("type", value)}
+        >
+          <option value="">All types</option>
+          <option value="SWAP">Swaps</option>
+          <option value="RULE_CHANGE">Rule changes</option>
+          <option value="TRADING_STATUS">Trading status</option>
+        </FilterSelect>
+        <FilterSelect
+          label="Status"
+          value={status}
+          onChange={(value) => onChange("status", value)}
+        >
+          <option value="">All statuses</option>
+          <option value="PREPARED">Prepared</option>
+          <option value="PENDING">Pending</option>
+          <option value="CONFIRMED">Confirmed</option>
+          <option value="FAILED">Failed</option>
+          <option value="ORPHANED">Orphaned</option>
+        </FilterSelect>
+        <label className="block min-w-0">
+          <span className="text-xs font-medium uppercase tracking-wide text-slate-500">
+            From
+          </span>
+          <input
+            type="date"
+            value={dateValue(
+              searchParams.get("from")
+                ? Number(searchParams.get("from"))
+                : undefined,
+            )}
+            onChange={(event) =>
+              onChange(
+                "from",
+                String(dayBoundary(event.target.value, false) ?? ""),
+              )
+            }
+            className="mt-1 block min-h-10 w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-100"
+          />
+        </label>
+        <label className="block min-w-0">
+          <span className="text-xs font-medium uppercase tracking-wide text-slate-500">
+            To
+          </span>
+          <input
+            type="date"
+            value={dateValue(
+              searchParams.get("to")
+                ? Number(searchParams.get("to"))
+                : undefined,
+            )}
+            onChange={(event) =>
+              onChange(
+                "to",
+                String(dayBoundary(event.target.value, true) ?? ""),
+              )
+            }
+            className="mt-1 block min-h-10 w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-100"
+          />
+        </label>
+      </div>
+    </section>
   );
 }
 
 export default function History() {
-  const [searchParams] = useSearchParams();
-  const positionId = searchParams.get("positionId") ?? undefined;
-  const [items, setItems] = useState<ActivityItem[]>([]);
-  const [nextCursor, setNextCursor] = useState<string | null>(null);
-  const [cursor, setCursor] = useState<string | undefined>();
-  const [activityError, setActivityError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [spaces, setSpaces] = useState<SpaceRecord[]>([]);
+  const [spacesError, setSpacesError] = useState<string | null>(null);
   const [hash, setHash] = useState("");
   const [execution, setExecution] = useState<Execution | null>(null);
   const [lookupError, setLookupError] = useState<string | null>(null);
@@ -149,28 +226,57 @@ export default function History() {
 
   useEffect(() => {
     let active = true;
-    setLoading(true);
-    setActivityError(null);
     new AurkaClient({ baseUrl: apiBaseUrl })
-      .listActivity({ limit: 20, cursor, positionId })
+      .listSpaces(100)
       .then((page) => {
-        if (!active) return;
-        setItems(page.items);
-        setNextCursor(page.nextCursor);
+        if (active) setSpaces(page.items);
       })
       .catch((error: unknown) => {
         if (active)
-          setActivityError(
-            error instanceof Error ? error.message : "Activity unavailable",
+          setSpacesError(
+            error instanceof Error ? error.message : "Space list unavailable",
           );
-      })
-      .finally(() => {
-        if (active) setLoading(false);
       });
     return () => {
       active = false;
     };
-  }, [cursor, positionId]);
+  }, []);
+
+  const spaceId =
+    searchParams.get("spaceId") ?? searchParams.get("positionId") ?? undefined;
+  const type = validOption(searchParams.get("type"), ACTIVITY_TYPES) as
+    ActivityType | undefined;
+  const status = validOption(searchParams.get("status"), ACTIVITY_STATUSES) as
+    ActivityStatus | undefined;
+  const fromValue = searchParams.get("from");
+  const toValue = searchParams.get("to");
+  const from = fromValue ? Number(fromValue) : undefined;
+  const to = toValue ? Number(toValue) : undefined;
+  const activityQuery = useMemo<ActivityFeedQuery>(
+    () => ({
+      ...(spaceId ? { spaceId } : {}),
+      ...(type ? { type } : {}),
+      ...(status ? { status } : {}),
+      ...(from !== undefined && Number.isSafeInteger(from) ? { from } : {}),
+      ...(to !== undefined && Number.isSafeInteger(to) ? { to } : {}),
+      limit: 20,
+    }),
+    [from, spaceId, status, to, type],
+  );
+  const filterKey = searchParams.toString();
+
+  function updateFilter(name: string, value: string) {
+    const next = new URLSearchParams(searchParams);
+    next.delete("cursor");
+    next.delete("positionId");
+    if (value) next.set(name, value);
+    else next.delete(name);
+    setSearchParams(next);
+  }
+
+  function resetFilters() {
+    setSearchParams({});
+  }
 
   async function lookup() {
     setLookupLoading(true);
@@ -191,73 +297,33 @@ export default function History() {
     <section className="space-y-6 text-slate-200">
       <div>
         <p className="text-sm font-semibold uppercase tracking-[0.18em] text-cyan-300">
-          Trader records
+          Global records
         </p>
-        <h1 className="mt-2 text-3xl font-semibold text-white">
-          {positionId ? "Space activity" : "Swap activity"}
-        </h1>
+        <h1 className="mt-2 text-3xl font-semibold text-white">Activity</h1>
         <p className="mt-3 max-w-2xl leading-7 text-slate-400">
-          {positionId
-            ? `Canonical and prepared settlement evidence for ${positionId}.`
-            : "Browse local preparation records and canonical settlement evidence."}{" "}
-          Preparing an unsigned transaction is not a completed trade, and a
-          quote fee is not earned revenue.
+          One feed for swaps, earned-fee evidence, rule changes and trading
+          status across your Spaces. Prepared and failed attempts remain visible
+          without being presented as completed trades.
         </p>
       </div>
 
-      {loading ? (
-        <p aria-live="polite" className="text-slate-400">
-          Loading activity…
+      <ActivityFilters
+        searchParams={searchParams}
+        spaces={spaces}
+        onChange={updateFilter}
+        onReset={resetFilters}
+      />
+      {spacesError && (
+        <p className="text-sm text-amber-300">
+          Space names are unavailable: {spacesError}. Activity remains readable,
+          but the filter list could not be loaded.
         </p>
-      ) : activityError ? (
-        <p
-          role="alert"
-          className="rounded-xl border border-red-900/70 bg-red-950/40 p-4 text-red-200"
-        >
-          Activity is unavailable: {activityError}
-        </p>
-      ) : items.length === 0 ? (
-        <section className="rounded-2xl border border-slate-700 bg-slate-900 p-6">
-          <h2 className="text-lg font-semibold text-white">No activity yet</h2>
-          <p className="mt-2 max-w-2xl leading-7 text-slate-400">
-            A quote alone does not create a settlement record or earned fee. Try
-            the local swap flow to create an unsigned preparation, or return
-            after a canonical settlement is indexed.
-          </p>
-          <Link
-            to="/trade"
-            className="mt-5 inline-flex rounded-lg bg-cyan-600 px-4 py-3 font-medium text-white hover:bg-cyan-500"
-          >
-            Try a swap
-          </Link>
-        </section>
-      ) : (
-        <>
-          <div className="space-y-4">
-            {items.map((item) => (
-              <ActivityCard key={item.id} item={item} />
-            ))}
-          </div>
-          <div className="flex flex-wrap gap-3">
-            <button
-              type="button"
-              disabled={!cursor}
-              onClick={() => setCursor(undefined)}
-              className="rounded-lg border border-slate-700 px-3 py-2 text-sm disabled:opacity-40"
-            >
-              First page
-            </button>
-            <button
-              type="button"
-              disabled={!nextCursor}
-              onClick={() => setCursor(nextCursor ?? undefined)}
-              className="rounded-lg border border-slate-700 px-3 py-2 text-sm disabled:opacity-40"
-            >
-              Next page
-            </button>
-          </div>
-        </>
       )}
+      <ActivityFeed
+        key={filterKey}
+        query={activityQuery}
+        emptyMessage="No activity yet. Completed swaps and rule changes will appear here."
+      />
 
       <section className="rounded-2xl border border-slate-800 bg-slate-950/70 p-5">
         <h2 className="font-semibold text-white">Find a preparation by ID</h2>
@@ -283,8 +349,9 @@ export default function History() {
             />
           </label>
           <button
+            type="submit"
             disabled={lookupLoading}
-            className="rounded-lg bg-slate-700 px-4 py-2.5 font-medium text-white"
+            className="rounded-lg bg-slate-700 px-4 py-2.5 font-medium text-white disabled:opacity-50"
           >
             {lookupLoading ? "Loading…" : "Look up"}
           </button>
@@ -302,6 +369,15 @@ export default function History() {
           </p>
         )}
       </section>
+
+      {spaceId && (
+        <Link
+          to="/spaces"
+          className="inline-flex text-sm text-cyan-300 hover:text-cyan-200"
+        >
+          Browse Spaces
+        </Link>
+      )}
     </section>
   );
 }

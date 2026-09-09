@@ -5,6 +5,7 @@ import {
   activityResponseSchema,
   type ActivityItem,
   type ActivityStatus,
+  type ActivityType,
   prepareIntentRequestSchema,
   prepareTokenIntentRequestSchema,
   type PrepareTokenIntentRequest,
@@ -367,8 +368,10 @@ export class AurkaClient {
 
   async listActivity(
     input: {
+      spaceId?: string;
       positionId?: string;
       chainId?: number;
+      type?: ActivityType;
       status?: ActivityStatus;
       from?: number;
       to?: number;
@@ -379,8 +382,10 @@ export class AurkaClient {
     const queryInput = activityQuerySchema.parse(input);
     const params = new URLSearchParams({ limit: queryInput.limit.toString() });
     for (const key of [
+      "spaceId",
       "positionId",
       "chainId",
+      "type",
       "status",
       "from",
       "to",

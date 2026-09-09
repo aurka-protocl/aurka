@@ -60,6 +60,15 @@ export type SpaceMutationOperation = z.infer<
 >;
 export type SpaceIdentity = z.infer<typeof spaceIdentitySchema>;
 
+export const spaceChangeEventTypeSchema = z.enum([
+  "SPACE_CREATED",
+  "SPACE_UPDATED",
+  "SPACE_ACTIVATED",
+  "SPACE_PAUSED",
+  "SPACE_RESUMED",
+  "SPACE_DEPLOYMENT_FAILED",
+]);
+
 /** The editable, supported Space policy draft. Chain-bound addresses are
  * deliberately kept in the draft so the server can validate the complete
  * signed payload before accepting it. */
@@ -80,14 +89,7 @@ export const spaceChangeSchema = z
   .object({
     id: identifierSchema,
     spaceId: identifierSchema,
-    eventType: z.enum([
-      "SPACE_CREATED",
-      "SPACE_UPDATED",
-      "SPACE_ACTIVATED",
-      "SPACE_PAUSED",
-      "SPACE_RESUMED",
-      "SPACE_DEPLOYMENT_FAILED",
-    ]),
+    eventType: spaceChangeEventTypeSchema,
     actor: addressSchema,
     status: z.enum(["PENDING", "CONFIRMED", "FAILED"]),
     receiptHash: bytes32Schema.optional(),

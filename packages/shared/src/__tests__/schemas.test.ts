@@ -3,6 +3,7 @@ import riskVector from "../../test-vectors/risk.json" with { type: "json" };
 
 import {
   addressSchema,
+  activityItemSchema,
   apiResponseSchema,
   atomicSettlementIntentSchema,
   atomicSettlementProposalSchema,
@@ -50,6 +51,48 @@ describe("primitive schemas", () => {
       expect(uint256StringSchema.safeParse(value).success).toBe(false);
     },
   );
+});
+
+describe("activity schema", () => {
+  const commonChange = {
+    id: "activity:change",
+    spaceId: "space:one",
+    chainId: 31337,
+    status: "CONFIRMED",
+    source: "SPACE_CHANGE",
+    actor: ADDRESS_A,
+    submittedAt: 1_700_000_000,
+    occurredAt: 1_700_000_000,
+    evidence: {},
+  } as const;
+
+  it("keeps rule and trading-status event categories consistent", () => {
+    expect(
+      activityItemSchema.safeParse({
+        ...commonChange,
+        type: "RULE_CHANGE",
+        eventType: "SPACE_CREATED",
+      }).success,
+    ).toBe(true);
+    expect(
+      activityItemSchema.safeParse({
+        ...commonChange,
+        type: "RULE_CHANGE",
+        eventType: "SPACE_PAUSED",
+      }).success,
+    ).toBe(false);
+  });
+
+  it("rejects a Space change presented as chain or preparation activity", () => {
+    expect(
+      activityItemSchema.safeParse({
+        ...commonChange,
+        source: "CHAIN_EVENT",
+        type: "TRADING_STATUS",
+        eventType: "SPACE_PAUSED",
+      }).success,
+    ).toBe(false);
+  });
 });
 
 describe("policy schema", () => {

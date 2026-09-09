@@ -268,6 +268,23 @@ describe("MVP-002 Space management", () => {
       expect(restarted.getSpace(secondNamedValue.id).identity.state).toBe(
         "ACTIVE",
       );
+      const restoredRulesFirst = restarted.listActivity({
+        spaceId: value.id,
+        type: "RULE_CHANGE",
+        limit: 1,
+      });
+      expect(restoredRulesFirst.items).toHaveLength(1);
+      expect(restoredRulesFirst.nextCursor).not.toBeNull();
+      const restoredRulesSecond = restarted.listActivity({
+        spaceId: value.id,
+        type: "RULE_CHANGE",
+        limit: 1,
+        cursor: restoredRulesFirst.nextCursor ?? undefined,
+      });
+      expect(restoredRulesSecond.items).toHaveLength(1);
+      expect(restoredRulesSecond.items[0]?.id).not.toBe(
+        restoredRulesFirst.items[0]?.id,
+      );
       const restoredIntent = await restarted.provider.prepareTokenIntent!({
         positionId: secondNamedValue.id,
         trader: OWNER.address,
@@ -409,8 +426,96 @@ describe("MVP-002 Space management", () => {
       expect(
         listedBody.data.items.some((item) => item.identity.id === value.id),
       ).toBe(true);
+
+      const activity = await fetch(
+        `${base}/v1/activity?spaceId=${encodeURIComponent(value.id)}&type=RULE_CHANGE`,
+      );
+      expect(activity.status).toBe(200);
+      const activityBody = (await activity.json()) as {
+        data: {
+          items: Array<{
+            type: string;
+            eventType: string;
+            spaceId: string;
+            traderInputToken?: string;
+          }>;
+        };
+      };
+      expect(activityBody.data.items).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: "RULE_CHANGE",
+            eventType: "SPACE_CREATED",
+            spaceId: value.id,
+          }),
+        ]),
+      );
+      expect(activityBody.data.items[0]).not.toHaveProperty("traderInputToken");
     } finally {
       await closeApiServer(handle);
+    }
+  });
+
+  it("projects durable Space changes into typed global activity", async () => {
+    const service = new AurkaService({ seedFixture: true });
+    const value = draft(OWNER.address, "space:activity");
+    try {
+      await service.confirmSpaceMutation(
+        await signedMutation(service, OWNER, "CREATE", value.id, value),
+      );
+      const created = service.listActivity({
+        spaceId: value.id,
+        type: "RULE_CHANGE",
+        limit: 20,
+      });
+      expect(created.items[0]).toMatchObject({
+        type: "RULE_CHANGE",
+        eventType: "SPACE_CREATED",
+        spaceId: value.id,
+        spaceName: value.name,
+        status: "CONFIRMED",
+        source: "SPACE_CHANGE",
+        state: "DRAFT",
+        actor: OWNER.address,
+      });
+      expect(created.items[0]).not.toHaveProperty("traderInputToken");
+      expect(created.items[0]).not.toHaveProperty("transactionHash");
+
+      await service.confirmSpaceMutation(
+        await signedMutation(service, OWNER, "ACTIVATE", value.id, value),
+      );
+      await service.confirmSpaceMutation(
+        await signedMutation(service, OWNER, "PAUSE", value.id),
+      );
+      const status = service.listActivity({
+        spaceId: value.id,
+        type: "TRADING_STATUS",
+        status: "CONFIRMED",
+        limit: 20,
+      });
+      expect(status.items[0]).toMatchObject({
+        type: "TRADING_STATUS",
+        eventType: "SPACE_PAUSED",
+        state: "PAUSED",
+        spaceName: value.name,
+      });
+      expect(
+        service.listActivity({
+          spaceId: value.id,
+          type: "RULE_CHANGE",
+          from: 0,
+          to: Math.floor(Date.now() / 1000),
+          limit: 20,
+        }).items,
+      ).toHaveLength(2);
+      expect(
+        service.listActivity({
+          spaceId: "space:missing",
+          limit: 20,
+        }).items,
+      ).toHaveLength(0);
+    } finally {
+      service.close();
     }
   });
 });

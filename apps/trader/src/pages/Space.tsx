@@ -9,13 +9,13 @@ import {
   formatPrice,
   formatSnapshotAge,
   snapshotFreshness,
-  type ActivityItem,
   type AssetBound,
   type AssetSnapshot,
   type DirectionalCapacity,
   type PortfolioSnapshot,
   type Position,
 } from "@aurka/shared";
+import { ActivityFeed, ActivityLink } from "../components/ActivityFeed";
 import { apiBaseUrl, appMode } from "../config";
 import {
   spaceAdapter,
@@ -294,36 +294,6 @@ function allocationRows(snapshot: PortfolioSnapshot) {
 }
 
 function RecentActivity({ spaceId }: { readonly spaceId: string }) {
-  const [items, setItems] = useState<ActivityItem[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [retry, setRetry] = useState(0);
-
-  useEffect(() => {
-    let active = true;
-    setLoading(true);
-    setError(null);
-    client
-      .listActivity({ positionId: spaceId, limit: 3 })
-      .then((page) => {
-        if (active) setItems(page.items);
-      })
-      .catch((requestError: unknown) => {
-        if (active)
-          setError(
-            requestError instanceof Error
-              ? requestError.message
-              : "Activity unavailable",
-          );
-      })
-      .finally(() => {
-        if (active) setLoading(false);
-      });
-    return () => {
-      active = false;
-    };
-  }, [retry, spaceId]);
-
   return (
     <section className="rounded-2xl border border-slate-700 bg-slate-900 p-5">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -333,64 +303,16 @@ function RecentActivity({ spaceId }: { readonly spaceId: string }) {
             Shared settlement feed filtered to this Space.
           </p>
         </div>
-        <Link
-          to={`/activity?positionId=${encodeURIComponent(spaceId)}`}
-          className="text-sm text-cyan-300 hover:text-cyan-200"
-        >
-          View Space activity <span aria-hidden="true">→</span>
-        </Link>
+        <ActivityLink spaceId={spaceId} />
       </div>
-      {loading ? (
-        <p aria-live="polite" className="mt-4 text-sm text-slate-400">
-          Loading recent activity…
-        </p>
-      ) : error ? (
-        <div className="mt-4 flex flex-wrap items-center gap-3 rounded-lg border border-red-900/70 bg-red-950/30 p-3 text-sm text-red-200">
-          <span>Recent activity is unavailable: {error}</span>
-          <button
-            type="button"
-            onClick={() => setRetry((value) => value + 1)}
-            className="rounded border border-red-800 px-2 py-1 hover:border-red-500"
-          >
-            Retry
-          </button>
-        </div>
-      ) : items.length === 0 ? (
-        <p className="mt-4 text-sm text-slate-400">
-          No activity has been recorded for this Space yet.
-        </p>
-      ) : (
-        <div className="mt-4 divide-y divide-slate-800">
-          {items.map((item) => (
-            <div
-              key={item.id}
-              className="flex flex-wrap items-center justify-between gap-3 py-3 first:pt-0 last:pb-0"
-            >
-              <div>
-                <p className="font-medium text-slate-200">
-                  {item.traderInputSymbol ?? "Input"} →{" "}
-                  {item.traderOutputSymbol ?? "Output"}
-                </p>
-                <p className="text-xs text-slate-500">
-                  {new Date(
-                    (item.occurredAt ?? item.submittedAt) * 1000,
-                  ).toLocaleString()}
-                </p>
-              </div>
-              <div className="text-right text-sm">
-                <p className="text-slate-200">
-                  {normalizedValue(
-                    item.executedTraderInputValue ??
-                      item.requestedTraderInputValue,
-                    item.initialPortfolio?.valueDecimals ?? 0,
-                  )}
-                </p>
-                <p className="text-xs text-slate-500">{item.status}</p>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
+      <div className="mt-4">
+        <ActivityFeed
+          query={{ spaceId, limit: 3 }}
+          compact
+          showPagination={false}
+          emptyMessage="No activity has been recorded for this Space yet."
+        />
+      </div>
     </section>
   );
 }

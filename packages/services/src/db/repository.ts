@@ -29,6 +29,7 @@ import {
   type AtomicSettlementProposal,
   type ActivityItem,
   type ActivityStatus,
+  type ActivityType,
   type FeeSummary,
   type Execution,
   type Position,
@@ -105,6 +106,10 @@ function decodeActivityCursor(
   }
 }
 
+function activityTimestamp(item: ActivityItem): number {
+  return item.occurredAt ?? item.submittedAt ?? 0;
+}
+
 export interface Page<T> {
   readonly items: readonly T[];
   readonly nextCursor: string | null;
@@ -116,8 +121,10 @@ export interface EventPage {
 }
 
 export interface ActivityQuery {
+  readonly spaceId?: string | undefined;
   readonly chainId?: number | undefined;
   readonly positionId?: string | undefined;
+  readonly type?: ActivityType | undefined;
   readonly status?: ActivityStatus | undefined;
   readonly from?: number | undefined;
   readonly to?: number | undefined;
@@ -1092,120 +1099,194 @@ export class ServiceRepository {
 
   listActivity(query: ActivityQuery): Page<ActivityItem> {
     const cursor = decodeActivityCursor(query.cursor);
+    const requestedSpaceId = query.spaceId ?? query.positionId;
+    const includeSwaps = query.type === undefined || query.type === "SWAP";
+    const includeChanges = query.type === undefined || query.type !== "SWAP";
     const sourceLimit = Math.min(201, query.limit * 2 + 1);
-    const executionRows = this.db
-      .select()
-      .from(executions)
-      .where(
-        and(
-          query.chainId === undefined
-            ? undefined
-            : sql`json_extract(${executions.executionJson}, '$.chainId') = ${query.chainId}`,
-          query.positionId === undefined || query.positionId === ""
-            ? undefined
-            : eq(executions.positionId, query.positionId),
-          query.status === "CONFIRMED" || query.status === "ORPHANED"
-            ? sql`0 = 1`
-            : query.status === "FAILED"
-              ? or(
-                  eq(executions.status, "REVERTED"),
-                  eq(executions.status, "DROPPED"),
-                )
-              : query.status === "PREPARED"
-                ? and(
-                    eq(executions.status, "PENDING"),
-                    or(
-                      sql`json_extract(${executions.executionJson}, '$.submissionState') IS NULL`,
-                      sql`json_extract(${executions.executionJson}, '$.submissionState') = 'PREPARED'`,
-                    ),
-                  )
-                : query.status === "PENDING"
-                  ? and(
-                      eq(executions.status, "PENDING"),
-                      sql`json_extract(${executions.executionJson}, '$.submissionState') = 'SUBMITTED'`,
-                    )
-                  : or(
-                      eq(executions.status, "PENDING"),
+    const executionRows = includeSwaps
+      ? this.db
+          .select()
+          .from(executions)
+          .where(
+            and(
+              query.chainId === undefined
+                ? undefined
+                : sql`json_extract(${executions.executionJson}, '$.chainId') = ${query.chainId}`,
+              requestedSpaceId === undefined || requestedSpaceId === ""
+                ? undefined
+                : eq(executions.positionId, requestedSpaceId),
+              query.status === "CONFIRMED" || query.status === "ORPHANED"
+                ? sql`0 = 1`
+                : query.status === "FAILED"
+                  ? or(
                       eq(executions.status, "REVERTED"),
                       eq(executions.status, "DROPPED"),
+                    )
+                  : query.status === "PREPARED"
+                    ? and(
+                        eq(executions.status, "PENDING"),
+                        or(
+                          sql`json_extract(${executions.executionJson}, '$.submissionState') IS NULL`,
+                          sql`json_extract(${executions.executionJson}, '$.submissionState') = 'PREPARED'`,
+                        ),
+                      )
+                    : query.status === "PENDING"
+                      ? and(
+                          eq(executions.status, "PENDING"),
+                          sql`json_extract(${executions.executionJson}, '$.submissionState') = 'SUBMITTED'`,
+                        )
+                      : or(
+                          eq(executions.status, "PENDING"),
+                          eq(executions.status, "REVERTED"),
+                          eq(executions.status, "DROPPED"),
+                        ),
+              query.from === undefined
+                ? undefined
+                : gte(executions.submittedAt, query.from),
+              query.to === undefined
+                ? undefined
+                : lte(executions.submittedAt, query.to),
+              cursor === undefined
+                ? undefined
+                : or(
+                    sql`${executions.submittedAt} < ${cursor.timestamp}`,
+                    and(
+                      eq(executions.submittedAt, cursor.timestamp),
+                      sql`(${executions.transactionHash} || ':' || ${executions.proposalHash}) < ${cursor.id}`,
                     ),
-          query.from === undefined
-            ? undefined
-            : gte(executions.submittedAt, query.from),
-          query.to === undefined
-            ? undefined
-            : lte(executions.submittedAt, query.to),
-          cursor === undefined
-            ? undefined
-            : or(
-                sql`${executions.submittedAt} < ${cursor.timestamp}`,
-                and(
-                  eq(executions.submittedAt, cursor.timestamp),
-                  sql`(${executions.transactionHash} || ':' || ${executions.proposalHash}) < ${cursor.id}`,
-                ),
-              ),
-        ),
-      )
-      .orderBy(
-        desc(executions.submittedAt),
-        desc(
-          sql`${executions.transactionHash} || ':' || ${executions.proposalHash}`,
-        ),
-      )
-      .limit(sourceLimit)
-      .all();
+                  ),
+            ),
+          )
+          .orderBy(
+            desc(executions.submittedAt),
+            desc(
+              sql`${executions.transactionHash} || ':' || ${executions.proposalHash}`,
+            ),
+          )
+          .limit(sourceLimit)
+          .all()
+      : [];
 
-    const settlementRows = this.db
-      .select()
-      .from(settlementRecords)
-      .where(
-        and(
-          query.chainId === undefined
-            ? undefined
-            : eq(settlementRecords.chainId, query.chainId),
-          query.positionId === undefined || query.positionId === ""
-            ? undefined
-            : eq(settlementRecords.positionId, query.positionId),
-          query.status === "PREPARED" ||
-            query.status === "PENDING" ||
-            query.status === "FAILED"
-            ? sql`0 = 1`
-            : query.status === "ORPHANED"
-              ? eq(settlementRecords.orphaned, true)
-              : query.status === "CONFIRMED"
-                ? eq(settlementRecords.orphaned, false)
-                : undefined,
-          isNotNull(settlementRecords.tradeJson),
-          isNotNull(settlementRecords.feeJson),
-          query.from === undefined
-            ? undefined
-            : gte(settlementRecords.observedAt, query.from),
-          query.to === undefined
-            ? undefined
-            : lte(settlementRecords.observedAt, query.to),
-          cursor === undefined
-            ? undefined
-            : or(
-                sql`${settlementRecords.observedAt} < ${cursor.timestamp}`,
-                and(
-                  eq(settlementRecords.observedAt, cursor.timestamp),
-                  sql`(${settlementRecords.transactionHash} || ':' || ${settlementRecords.proposalHash}) < ${cursor.id}`,
-                ),
-              ),
-        ),
-      )
-      .orderBy(
-        desc(settlementRecords.observedAt),
-        desc(
-          sql`${settlementRecords.transactionHash} || ':' || ${settlementRecords.proposalHash}`,
-        ),
-      )
-      .limit(sourceLimit)
-      .all();
+    const settlementRows = includeSwaps
+      ? this.db
+          .select()
+          .from(settlementRecords)
+          .where(
+            and(
+              query.chainId === undefined
+                ? undefined
+                : eq(settlementRecords.chainId, query.chainId),
+              requestedSpaceId === undefined || requestedSpaceId === ""
+                ? undefined
+                : eq(settlementRecords.positionId, requestedSpaceId),
+              query.status === "PREPARED" ||
+                query.status === "PENDING" ||
+                query.status === "FAILED"
+                ? sql`0 = 1`
+                : query.status === "ORPHANED"
+                  ? eq(settlementRecords.orphaned, true)
+                  : query.status === "CONFIRMED"
+                    ? eq(settlementRecords.orphaned, false)
+                    : undefined,
+              isNotNull(settlementRecords.tradeJson),
+              isNotNull(settlementRecords.feeJson),
+              query.from === undefined
+                ? undefined
+                : gte(settlementRecords.observedAt, query.from),
+              query.to === undefined
+                ? undefined
+                : lte(settlementRecords.observedAt, query.to),
+              cursor === undefined
+                ? undefined
+                : or(
+                    sql`${settlementRecords.observedAt} < ${cursor.timestamp}`,
+                    and(
+                      eq(settlementRecords.observedAt, cursor.timestamp),
+                      sql`(${settlementRecords.transactionHash} || ':' || ${settlementRecords.proposalHash}) < ${cursor.id}`,
+                    ),
+                  ),
+            ),
+          )
+          .orderBy(
+            desc(settlementRecords.observedAt),
+            desc(
+              sql`${settlementRecords.transactionHash} || ':' || ${settlementRecords.proposalHash}`,
+            ),
+          )
+          .limit(sourceLimit)
+          .all()
+      : [];
 
-    const settlementItems = settlementRows.flatMap((row) => {
+    const changeRows = includeChanges
+      ? this.db
+          .select()
+          .from(spaceChanges)
+          .where(
+            and(
+              requestedSpaceId === undefined || requestedSpaceId === ""
+                ? undefined
+                : eq(spaceChanges.spaceId, requestedSpaceId),
+              query.chainId === undefined
+                ? undefined
+                : sql`EXISTS (SELECT 1 FROM spaces WHERE spaces.id = ${spaceChanges.spaceId} AND spaces.chain_id = ${query.chainId})`,
+              query.type === "RULE_CHANGE"
+                ? or(
+                    eq(spaceChanges.eventType, "SPACE_CREATED"),
+                    eq(spaceChanges.eventType, "SPACE_UPDATED"),
+                    eq(spaceChanges.eventType, "SPACE_ACTIVATED"),
+                  )
+                : query.type === "TRADING_STATUS"
+                  ? or(
+                      eq(spaceChanges.eventType, "SPACE_PAUSED"),
+                      eq(spaceChanges.eventType, "SPACE_RESUMED"),
+                      eq(spaceChanges.eventType, "SPACE_DEPLOYMENT_FAILED"),
+                    )
+                  : undefined,
+              query.status === "PREPARED" || query.status === "ORPHANED"
+                ? sql`0 = 1`
+                : query.status === "PENDING" || query.status === "CONFIRMED"
+                  ? eq(spaceChanges.status, query.status)
+                  : query.status === "FAILED"
+                    ? eq(spaceChanges.status, "FAILED")
+                    : undefined,
+              query.from === undefined
+                ? undefined
+                : gte(spaceChanges.createdAt, query.from),
+              query.to === undefined
+                ? undefined
+                : lte(spaceChanges.createdAt, query.to),
+              cursor === undefined
+                ? undefined
+                : or(
+                    sql`${spaceChanges.createdAt} < ${cursor.timestamp}`,
+                    and(
+                      eq(spaceChanges.createdAt, cursor.timestamp),
+                      sql`${spaceChanges.id} < ${cursor.id}`,
+                    ),
+                  ),
+            ),
+          )
+          .orderBy(desc(spaceChanges.createdAt), desc(spaceChanges.id))
+          .limit(sourceLimit)
+          .all()
+      : [];
+
+    type ActivityEntry = {
+      readonly item: ActivityItem;
+      readonly timestamp: number;
+      readonly key: string;
+    };
+    const settlementEntries = settlementRows.flatMap((row): ActivityEntry[] => {
       const item = this.activityFromSettlement(row);
-      return item ? [item] : [];
+      return item
+        ? [
+            {
+              item,
+              timestamp: activityTimestamp(item),
+              key: `${row.transactionHash}:${row.proposalHash}`,
+            },
+          ]
+        : [];
     });
     const settledKeys = new Set(
       settlementRows.map((row) => {
@@ -1215,38 +1296,57 @@ export class ServiceRepository {
         return `${String(trade.intentHash ?? row.intentHash)}:${row.proposalHash}`;
       }),
     );
-    const executionItems = executionRows.flatMap((row) => {
+    const executionEntries = executionRows.flatMap((row): ActivityEntry[] => {
       const execution = executionSchema.parse(parse(row.executionJson));
       if (settledKeys.has(`${execution.intentHash}:${execution.proposalHash}`))
         return [];
       const item = this.activityFromExecution(row.positionId, execution);
-      return item ? [item] : [];
+      return item
+        ? [
+            {
+              item,
+              timestamp: activityTimestamp(item),
+              key: `${execution.transactionHash}:${execution.proposalHash}`,
+            },
+          ]
+        : [];
+    });
+    const changeEntries = changeRows.flatMap((row): ActivityEntry[] => {
+      const item = this.activityFromSpaceChange(row);
+      return item
+        ? [
+            {
+              item,
+              timestamp: activityTimestamp(item),
+              key: row.id,
+            },
+          ]
+        : [];
     });
 
-    const mergedItems = [...settlementItems, ...executionItems].sort(
-      (left, right) => {
-        const leftTime = left.occurredAt ?? left.submittedAt;
-        const rightTime = right.occurredAt ?? right.submittedAt;
-        return (
-          rightTime - leftTime ||
-          `${right.transactionHash}:${right.proposalHash}`.localeCompare(
-            `${left.transactionHash}:${left.proposalHash}`,
-          )
-        );
-      },
+    const mergedEntries = [
+      ...settlementEntries,
+      ...executionEntries,
+      ...changeEntries,
+    ].sort(
+      (left, right) =>
+        right.timestamp - left.timestamp || right.key.localeCompare(left.key),
     );
+    const mergedItems = mergedEntries.map((entry) => entry.item);
     const items = mergedItems.slice(0, query.limit);
     const hasMore =
       mergedItems.length > query.limit ||
       settlementRows.length === sourceLimit ||
-      executionRows.length === sourceLimit;
+      executionRows.length === sourceLimit ||
+      changeRows.length === sourceLimit;
+    const lastEntry = mergedEntries[query.limit - 1];
     return {
       items,
       nextCursor:
-        hasMore && items.length > 0
+        hasMore && lastEntry
           ? encodeActivityCursor({
-              timestamp: items.at(-1)!.occurredAt ?? items.at(-1)!.submittedAt,
-              id: `${items.at(-1)!.transactionHash}:${items.at(-1)!.proposalHash}`,
+              timestamp: lastEntry.timestamp,
+              id: lastEntry.key,
             })
           : null,
     };
@@ -1367,6 +1467,7 @@ export class ServiceRepository {
       positionId || execution.initialPortfolio.positionId,
     );
     if (!intent || !position) return undefined;
+    const space = this.getSpace(position.id);
     const status: ActivityStatus =
       execution.status === "PENDING"
         ? execution.submissionState === "SUBMITTED"
@@ -1385,6 +1486,9 @@ export class ServiceRepository {
     );
     return activityItemSchema.parse({
       id: hashBytes(`activity:execution:${execution.transactionHash}`),
+      type: "SWAP",
+      spaceId: position.id,
+      ...(space ? { spaceName: space.identity.name } : {}),
       positionId: position.id,
       chainId: execution.chainId,
       status,
@@ -1393,6 +1497,7 @@ export class ServiceRepository {
       intentHash: execution.intentHash,
       proposalHash: execution.proposalHash,
       trader: intent.trader,
+      actor: intent.trader,
       treasury: position.treasury,
       traderInputToken: execution.traderInputToken,
       traderOutputToken: execution.traderOutputToken,
@@ -1433,6 +1538,7 @@ export class ServiceRepository {
     const fee = parse<Record<string, string>>(row.feeJson);
     const position = this.getPosition(row.positionId);
     if (!position) return undefined;
+    const space = this.getSpace(position.id);
     const assets = position.currentPortfolio?.assets ?? [];
     const inputAsset = assets.find(
       (asset) =>
@@ -1447,8 +1553,12 @@ export class ServiceRepository {
       BigInt(fee.solverAmount!) +
       BigInt(fee.protocolAmount!) +
       BigInt(fee.treasuryAmount!);
+    const feeMatchesTrade = totalFee === BigInt(trade.totalFeeAmount!);
     return activityItemSchema.parse({
       id: hashBytes(`activity:settlement:${row.id}`),
+      type: "SWAP",
+      spaceId: position.id,
+      ...(space ? { spaceName: space.identity.name } : {}),
       positionId: row.positionId,
       chainId: row.chainId,
       status,
@@ -1457,6 +1567,7 @@ export class ServiceRepository {
       intentHash: trade.intentHash,
       proposalHash: trade.proposalHash,
       trader: trade.trader,
+      actor: trade.trader,
       treasury: trade.treasury,
       traderInputToken: trade.traderInputToken,
       traderOutputToken: trade.traderOutputToken,
@@ -1474,8 +1585,8 @@ export class ServiceRepository {
       ...(row.orphaned ? {} : { confirmedAt: row.observedAt }),
       blockNumber: row.blockNumber,
       bindingConstraint: "NONE",
-      feeState: row.orphaned ? "NONE" : "EARNED",
-      ...(row.orphaned
+      feeState: row.orphaned || !feeMatchesTrade ? "NONE" : "EARNED",
+      ...(row.orphaned || !feeMatchesTrade
         ? {}
         : {
             earnedFee: {
@@ -1494,6 +1605,68 @@ export class ServiceRepository {
         feeEventId: row.feeEventId!,
         blockHash: row.blockHash,
       },
+    });
+  }
+
+  private activityFromSpaceChange(
+    row: typeof spaceChanges.$inferSelect,
+  ): ActivityItem | undefined {
+    const change = spaceChangeSchema.parse({
+      id: row.id,
+      spaceId: row.spaceId,
+      eventType: row.eventType,
+      actor: row.actor,
+      status: row.status,
+      ...(row.receiptHash ? { receiptHash: row.receiptHash } : {}),
+      payload: parse<Record<string, unknown>>(row.payloadJson),
+      createdAt: row.createdAt,
+    });
+    const space = this.getSpace(change.spaceId);
+    if (!space) return undefined;
+    const operation =
+      typeof change.payload.operation === "string" &&
+      ["CREATE", "UPDATE", "ACTIVATE", "PAUSE", "RESUME"].includes(
+        change.payload.operation,
+      )
+        ? (change.payload.operation as
+            "CREATE" | "UPDATE" | "ACTIVATE" | "PAUSE" | "RESUME")
+        : undefined;
+    const state =
+      typeof change.payload.state === "string" &&
+      ["DRAFT", "PENDING", "ACTIVE", "PAUSED", "FAILED"].includes(
+        change.payload.state,
+      )
+        ? (change.payload.state as
+            "DRAFT" | "PENDING" | "ACTIVE" | "PAUSED" | "FAILED")
+        : undefined;
+    const type =
+      change.eventType === "SPACE_PAUSED" ||
+      change.eventType === "SPACE_RESUMED" ||
+      change.eventType === "SPACE_DEPLOYMENT_FAILED"
+        ? "TRADING_STATUS"
+        : "RULE_CHANGE";
+    const position = space.position;
+    const status: ActivityStatus = change.status;
+    return activityItemSchema.parse({
+      id: hashBytes(`activity:space-change:${change.id}`),
+      type,
+      spaceId: change.spaceId,
+      spaceName: space.identity.name,
+      ...(position ? { positionId: position.id } : {}),
+      chainId: space.identity.chainId,
+      status,
+      source: "SPACE_CHANGE",
+      actor: change.actor,
+      submittedAt: change.createdAt,
+      occurredAt: change.createdAt,
+      ...(status === "CONFIRMED" ? { confirmedAt: change.createdAt } : {}),
+      ...(operation ? { operation } : {}),
+      ...(state ? { state } : {}),
+      eventType: change.eventType,
+      ...(change.receiptHash
+        ? { evidence: { receiptHash: change.receiptHash } }
+        : { evidence: {} }),
+      payload: change.payload,
     });
   }
 

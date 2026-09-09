@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import {
+  activityTypeSchema,
   activityItemSchema,
   activityStatusSchema,
   feeSummarySchema,
@@ -275,14 +276,27 @@ export const activityResponseSchema = paginatedSchema(activityItemSchema);
 
 export const activityQuerySchema = paginationSchema
   .extend({
+    spaceId: identifierSchema.optional(),
     positionId: identifierSchema.optional(),
     chainId: z.coerce.number().pipe(chainIdSchema).optional(),
+    type: activityTypeSchema.optional(),
     status: activityStatusSchema.optional(),
     from: z.coerce.number().pipe(unixTimestampSchema).optional(),
     to: z.coerce.number().pipe(unixTimestampSchema).optional(),
   })
   .strict()
   .superRefine((query, context) => {
+    if (
+      query.spaceId !== undefined &&
+      query.positionId !== undefined &&
+      query.spaceId !== query.positionId
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "Activity spaceId and legacy positionId must match",
+        path: ["spaceId"],
+      });
+    }
     if (
       query.from !== undefined &&
       query.to !== undefined &&

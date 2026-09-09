@@ -171,6 +171,14 @@ async function main() {
     const position = positions.items[0];
     check(position?.id, "Built app API returned no Space");
     const spaceId = encodeURIComponent(position.id);
+    const ruleActivity = await apiData(
+      `${appUrl}/api/v1/activity?spaceId=${spaceId}&type=RULE_CHANGE&from=0&to=4102444800`,
+      "Built-app typed activity",
+    );
+    check(
+      Array.isArray(ruleActivity.items) && ruleActivity.nextCursor === null,
+      "Built app typed activity filter returned an invalid page",
+    );
 
     browser = await chromium.launch({ headless: true, args: ["--no-sandbox"] });
     const page = await browser.newPage({
@@ -301,6 +309,36 @@ async function main() {
       .getByRole("heading", { name: "Review what would happen" })
       .waitFor();
     result.checks.push("Space parameter propagated to a successful quote");
+
+    await page.goto(
+      `${appUrl}/activity?spaceId=${spaceId}&type=RULE_CHANGE&status=CONFIRMED`,
+      { waitUntil: "networkidle" },
+    );
+    const activityFilters = page
+      .locator("section")
+      .filter({ hasText: "Filter activity" });
+    check(
+      (await activityFilters.locator("select").nth(1).inputValue()) ===
+        "RULE_CHANGE",
+      "Activity type filter was not restored from the URL",
+    );
+    check(
+      (await activityFilters.locator("select").nth(2).inputValue()) ===
+        "CONFIRMED",
+      "Activity status filter was not restored from the URL",
+    );
+    await page.goto(`${appUrl}/spaces/${spaceId}/overview`, {
+      waitUntil: "networkidle",
+    });
+    await page.getByRole("heading", { name: "Recent activity" }).waitFor();
+    const fullHistory = page.getByRole("link", {
+      name: "View full activity",
+    });
+    await fullHistory.click();
+    await page.waitForURL(`**/activity?spaceId=${spaceId}`);
+    result.checks.push(
+      "typed Activity filters and Space Recent activity share the same feed",
+    );
 
     await page.goto(`${appUrl}/spaces/not-a-real-space`, {
       waitUntil: "networkidle",

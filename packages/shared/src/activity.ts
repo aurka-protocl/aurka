@@ -11,6 +11,7 @@ import {
 } from "./primitives.js";
 import { portfolioSnapshotSchema } from "./portfolio.js";
 import { feeBreakdownSchema } from "./quote.js";
+import { spaceMutationOperationSchema, spaceStateSchema } from "./space.js";
 import { bindingConstraintSchema } from "./trading.js";
 
 /**
@@ -29,6 +30,14 @@ export const activityStatusSchema = z.enum([
 export const activitySourceSchema = z.enum([
   "SERVICE_PREPARATION",
   "CHAIN_EVENT",
+  "SPACE_CHANGE",
+]);
+
+/** User-facing categories supported by the global Activity feed. */
+export const activityTypeSchema = z.enum([
+  "SWAP",
+  "RULE_CHANGE",
+  "TRADING_STATUS",
 ]);
 
 export const activityFeeStateSchema = z.enum(["NONE", "ESTIMATE", "EARNED"]);
@@ -49,18 +58,34 @@ export const activityEvidenceSchema = z
   .object({
     tradeEventId: identifierSchema.optional(),
     feeEventId: identifierSchema.optional(),
+    receiptHash: transactionHashSchema.optional(),
     blockHash: bytes32Schema.optional(),
   })
   .strict();
 
-/** One browsable attempt or canonical settlement. */
-export const activityItemSchema = z
+const activityCommonShape = {
+  id: identifierSchema,
+  spaceId: identifierSchema,
+  spaceName: z.string().trim().min(1).max(100).optional(),
+  positionId: identifierSchema.optional(),
+  chainId: chainIdSchema,
+  status: activityStatusSchema,
+  actor: addressSchema.optional(),
+  transactionHash: transactionHashSchema.optional(),
+  submittedAt: unixTimestampSchema.optional(),
+  occurredAt: unixTimestampSchema.optional(),
+  confirmedAt: unixTimestampSchema.optional(),
+  blockNumber: uint256StringSchema.optional(),
+  evidence: activityEvidenceSchema,
+};
+
+/** A service preparation or canonical, paired router settlement. */
+const activitySwapSchema = z
   .object({
-    id: identifierSchema,
+    ...activityCommonShape,
+    type: z.literal("SWAP"),
     positionId: identifierSchema,
-    chainId: chainIdSchema,
-    status: activityStatusSchema,
-    source: activitySourceSchema,
+    source: z.enum(["SERVICE_PREPARATION", "CHAIN_EVENT"]),
     transactionHash: transactionHashSchema,
     intentHash: bytes32Schema,
     proposalHash: bytes32Schema,
@@ -74,9 +99,6 @@ export const activityItemSchema = z
     executedTraderInputValue: uint256StringSchema.optional(),
     traderOutputValue: uint256StringSchema.optional(),
     submittedAt: unixTimestampSchema,
-    occurredAt: unixTimestampSchema.optional(),
-    confirmedAt: unixTimestampSchema.optional(),
-    blockNumber: uint256StringSchema.optional(),
     bindingConstraint: bindingConstraintSchema.optional(),
     estimatedFees: feeBreakdownSchema.optional(),
     feeState: activityFeeStateSchema,
@@ -85,9 +107,64 @@ export const activityItemSchema = z
     finalPortfolio: portfolioSnapshotSchema.optional(),
     expectedPostStateHash: bytes32Schema.optional(),
     revertReason: z.string().max(500).optional(),
-    evidence: activityEvidenceSchema,
   })
   .strict();
+
+/** A durable owner-authenticated policy/draft mutation. */
+const activityChangeShape = {
+  ...activityCommonShape,
+  source: z.literal("SPACE_CHANGE"),
+  actor: addressSchema,
+  submittedAt: unixTimestampSchema,
+  occurredAt: unixTimestampSchema,
+  operation: spaceMutationOperationSchema.optional(),
+  state: spaceStateSchema.optional(),
+  payload: z.record(z.string(), z.unknown()).optional(),
+};
+
+const activityRuleChangeSchema = z
+  .object({
+    ...activityChangeShape,
+    type: z.literal("RULE_CHANGE"),
+    eventType: z.enum(["SPACE_CREATED", "SPACE_UPDATED", "SPACE_ACTIVATED"]),
+  })
+  .strict();
+
+const activityTradingStatusSchema = z
+  .object({
+    ...activityChangeShape,
+    type: z.literal("TRADING_STATUS"),
+    eventType: z.enum([
+      "SPACE_PAUSED",
+      "SPACE_RESUMED",
+      "SPACE_DEPLOYMENT_FAILED",
+    ]),
+  })
+  .strict();
+
+/** One browsable swap, rule change, or trading-status transition. */
+const activityItemUnionSchema = z.discriminatedUnion("type", [
+  activitySwapSchema,
+  activityRuleChangeSchema,
+  activityTradingStatusSchema,
+]);
+
+/**
+ * Add the new SWAP discriminator when reading pre-MVP-005 swap payloads. The
+ * activity feed is a derived read model, so this keeps old persisted attempts
+ * readable while all newly emitted responses are explicit.
+ */
+export const activityItemSchema = z.preprocess((value) => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const record = value as Record<string, unknown>;
+  if (record.type !== undefined) return value;
+  if (typeof record.positionId !== "string") return value;
+  return {
+    ...record,
+    type: "SWAP",
+    spaceId: record.spaceId ?? record.positionId,
+  };
+}, activityItemUnionSchema);
 
 export const feeSummaryItemSchema = z
   .object({
@@ -127,6 +204,7 @@ export const feeSummarySchema = z
   .strict();
 
 export type ActivityStatus = z.infer<typeof activityStatusSchema>;
+export type ActivityType = z.infer<typeof activityTypeSchema>;
 export type ActivityItem = z.infer<typeof activityItemSchema>;
 export type ActivityFee = z.infer<typeof activityFeeSchema>;
 export type FeeSummaryItem = z.infer<typeof feeSummaryItemSchema>;

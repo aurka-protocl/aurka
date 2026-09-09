@@ -18,6 +18,29 @@ function ActivityRow({ item }: { readonly item: ActivityItem }) {
       : item.status === "ORPHANED" || item.status === "FAILED"
         ? "text-amber-300"
         : "text-cyan-300";
+  if (item.type !== "SWAP")
+    return (
+      <article className="rounded-2xl border border-slate-700 bg-slate-900 p-5">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-semibold text-white">
+              {item.eventType.replace(/_/g, " ")}
+            </h2>
+            <p className="mt-1 text-sm text-slate-400">
+              {item.spaceName ?? "Space"} · {item.actor ?? "Actor unavailable"}
+            </p>
+          </div>
+          <span className={`text-sm font-medium ${statusClass}`}>
+            {item.status}
+          </span>
+        </div>
+        <p className="mt-4 text-sm text-slate-300">
+          {item.state === "DRAFT"
+            ? "Draft saved · not an active policy update"
+            : "Durable Space change record"}
+        </p>
+      </article>
+    );
   return (
     <article className="rounded-2xl border border-slate-700 bg-slate-900 p-5">
       <div className="flex flex-wrap items-start justify-between gap-3">
