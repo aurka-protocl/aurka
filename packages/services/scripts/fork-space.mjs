@@ -56,8 +56,12 @@ import {
   stopProcess,
 } from "./local-settlement-e2e.mjs";
 
+import { ForkSpaceLifecycle } from "./fork-space-lifecycle.mjs";
+
 const ROOT = path.resolve(new URL("../../..", import.meta.url).pathname);
-const DIR = path.join(ROOT, ".fork-space");
+const DIR = process.env.AURKA_FORK_DIR
+  ? path.resolve(process.env.AURKA_FORK_DIR)
+  : path.join(ROOT, ".fork-space");
 const RPC = "http://127.0.0.1:8545";
 const API_PORT = 8797;
 const APP_PORT = 3011;
@@ -446,6 +450,10 @@ async function main() {
     };
     writeFileSync(manifestFile, stringify(manifest));
   }
+  if (!manifest.vaultFactory) {
+    const factory = await deploy(wallet, client, "AurkaSpaceVaultFactory");
+    manifest.vaultFactory = factory.address;
+  }
   manifest.apiUrl = `http://127.0.0.1:${API_PORT}`;
   delete manifest.ownerUrl;
   delete manifest.traderUrl;
@@ -453,6 +461,7 @@ async function main() {
   writeFileSync(manifestFile, stringify(manifest));
   const contracts = Object.fromEntries(
     [
+      ["vaultFactory", "AurkaSpaceVaultFactory"],
       ["policyRegistry", "AurkaPolicyRegistry"],
       ["riskRegistry", "RiskModeRegistry"],
       ["aqua", "MockAqua"],
@@ -464,6 +473,7 @@ async function main() {
     ]),
   );
   contracts.erc20Abi = erc20Abi;
+  contracts.vaultAbi = artifact("AurkaSpaceVault").abi;
   const solver = new FixtureProposalSigner();
   const epochsFile = path.join(DIR, "epochs.json");
   const epochs = existsSync(epochsFile)
@@ -524,10 +534,9 @@ async function main() {
     }
   }
   const providers = new Map(
-    spaceDefinitions.map((space) => [
-      space.positionId,
-      new ForkProvider(space),
-    ]),
+    spaceDefinitions
+      .filter((space) => !space.lifecycle)
+      .map((space) => [space.positionId, new ForkProvider(space)]),
   );
   const provider = {
     getPositionSnapshot: (positionId) => {
@@ -583,13 +592,24 @@ async function main() {
     const definition = spaceDefinitions.find(
       (space) => space.positionId === spaceId,
     );
+    if (definition?.lifecycle)
+      await lifecycle.reconcile(lifecycle.plans[spaceId]);
+    for (const operation of [
+      ...lifecycle.history,
+      ...Object.values(lifecycle.operations),
+    ])
+      if (operation.definition.positionId === spaceId)
+        await lifecycle.reconcile(operation);
     const snapshot = await selected.currentSnapshot();
     const position = positionForSnapshot(
       snapshot,
       manifest.policyRegistry,
       manifest.alice,
     );
-    position.name = definition?.name ?? manifest.name;
+    position.name =
+      service.repository.getSpace(spaceId)?.identity.name ??
+      definition?.name ??
+      manifest.name;
     service.repository.savePosition(position);
     service.repository.saveSpaceIdentity({
       id: position.id,
@@ -618,7 +638,37 @@ async function main() {
     }
     return snapshot;
   }
-  for (const space of spaceDefinitions) await refresh(space.positionId);
+  const lifecycle = new ForkSpaceLifecycle({
+    client,
+    contracts,
+    manifest,
+    service,
+    providers,
+    definitions: spaceDefinitions,
+    makeProvider: (space) => new ForkProvider(space),
+    file: path.join(DIR, "space-setup.json"),
+    epochs,
+    saveEpochs: () => writeFileSync(epochsFile, stringify(epochs)),
+    saveManifest: () => {
+      manifest.spaces = spaceDefinitions;
+      writeFileSync(manifestFile, stringify(manifest));
+    },
+  });
+  for (const plan of Object.values(lifecycle.plans)) {
+    if (plan.complete) {
+      try {
+        await lifecycle.prepare(plan.definition.positionId);
+      } catch (error) {
+        console.error(
+          "Space setup needs recovery:",
+          plan.definition.positionId,
+          error.message,
+        );
+      }
+    }
+  }
+  for (const space of spaceDefinitions)
+    if (providers.has(space.positionId)) await refresh(space.positionId);
   api = createApiServer({ service });
   await listenApiServer(api, 0, "127.0.0.1");
   const apiPort = api.server.address().port;
@@ -627,10 +677,40 @@ async function main() {
     data: encodeFunctionData({ abi: contract.abi, functionName, args }),
     value: "0x0",
   });
+  let lifecycleQueue = Promise.resolve();
   gateway = createServer(async (request, response) => {
     try {
       const url = new URL(request.url, "http://localhost");
-      if (request.method === "GET" && url.pathname === "/fork") {
+      if (
+        request.method === "POST" &&
+        ["/fork/spaces/prepare", "/fork/spaces/confirm"].includes(url.pathname)
+      ) {
+        const chunks = [];
+        let size = 0;
+        for await (const chunk of request) {
+          size += chunk.length;
+          if (size > 16384) throw new Error("Request too large");
+          chunks.push(chunk);
+        }
+        const body = JSON.parse(Buffer.concat(chunks).toString());
+        const work = lifecycleQueue.then(() =>
+          url.pathname.endsWith("/confirm")
+            ? lifecycle.confirm(
+                body.spaceId,
+                body.step,
+                body.hash,
+                body.operation,
+              )
+            : lifecycle.prepare(body.spaceId, body.operation),
+        );
+        lifecycleQueue = work.catch(() => {});
+        const result = await work;
+        response.writeHead(200, {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+        });
+        response.end(stringify(result));
+      } else if (request.method === "GET" && url.pathname === "/fork") {
         const spaceId =
           url.searchParams.get("spaceId") ?? DEFAULT_SPACE.positionId;
         const definition = spaceDefinitions.find(
@@ -655,6 +735,7 @@ async function main() {
         const balances = {};
         for (const [role, account] of [
           ["alice", manifest.alice],
+          ["treasury", snapshot.chainPolicy.treasury],
           ["bob", manifest.bob],
           ["solver", solver.address],
           ["protocol", manifest.protocolRecipient],
@@ -769,7 +850,8 @@ async function main() {
         });
         response.end(stringify(transaction));
       } else {
-        for (const space of spaceDefinitions) await refresh(space.positionId);
+        for (const space of spaceDefinitions)
+          if (providers.has(space.positionId)) await refresh(space.positionId);
         const chunks = [];
         let size = 0;
         for await (const chunk of request) {

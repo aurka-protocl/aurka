@@ -57,7 +57,50 @@ five-minute deadline for `CREATE`, `UPDATE`, `ACTIVATE`, `PAUSE`, or `RESUME`.
 exact draft and current nonce, rejects expiry/replay, persists the state and
 emits a durable Space change record. The no-RPC local demo creates isolated
 logical allocations; a fork keeps policy writes on the selected chain authority
-and does not load a server-held owner key.
+and does not load a server-held owner key. The generic API accepts authenticated
+fork names and drafts; its confirmations are labelled `signed-metadata-only` and
+do not change onchain rules. Generic fork `ACTIVATE`/`PAUSE`/`RESUME` still
+return `FORK_SPACE_CHAIN_OPERATION_UNSUPPORTED`. Its `receiptHash` input remains
+rejected with `UNVERIFIED_SPACE_RECEIPT`.
+
+The local fork gateway supplies the real wallet transaction path:
+
+```text
+POST /fork/spaces/prepare  {spaceId, operation?: "ACTIVATE"|"UPDATE"|"PAUSE"|"RESUME"}
+POST /fork/spaces/confirm  {spaceId, operation?, step, hash}
+```
+
+These fork-only endpoints return a plain JSON setup response: either
+`{complete:false, spaceId, ownerAddress, treasury, step, total, label, transaction}`
+or `{complete:true, space}`. The browser sends the prepared transaction through
+the owner wallet. Confirmation checks the configured chain, canonical successful
+receipt, authorized caller, destination, exact calldata/value, preparation
+block, and receipt reuse. A submitted hash alone cannot activate a Space.
+
+Creation deploys an idempotent, owner-scoped `AurkaSpaceVault` through
+`AurkaSpaceVaultFactory`, creates/configures its policy, transfers **35,000 USDC
+and 5 WETH** from the owner, approves MockAqua from that treasury, registers
+those virtual balances, and authorizes the supported WETH→USDC capacity. The
+supported fork assets are mainnet USDC (6 decimals) and WETH (18 decimals).
+Initial bounds must include that disclosed funding allocation. The vault owner
+may withdraw funds or revoke allowances; it does not give another Space access
+to this inventory. MockAqua and fixed reference prices remain local test
+infrastructure.
+
+The server persists setup steps, verified receipts, and receipt reuse protection
+atomically in `space-setup.json` beside the fork database. The browser persists
+submitted hashes while waiting. Retry/reload resumes verified steps; failed
+wallet transactions do not advance setup. Restart discovers completed Spaces and
+verifies their chain evidence before registering snapshot/quote providers.
+Orphaned receipts downgrade the affected Space and change records; verified
+missing steps can be retried. RPC outages keep receipt history and block
+dependent trading.
+
+Save the signed draft first, then prepare `UPDATE` to apply its reviewed bounds
+and limit. Rule/pause receipts produce durable Space-scoped change records.
+Registry nonce changes invalidate old quote/capacity authorizations; the owner
+must authorize fresh capacity after changing policy. Metadata confirmations are
+shown separately from receipt-backed policy changes.
 
 Task 7 adds a separate, deterministic risk surface:
 

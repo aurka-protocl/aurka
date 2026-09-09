@@ -100,6 +100,7 @@ export interface ServiceOptions {
   readonly routerSimulator?: RouterSimulator;
   readonly rpcTransport?: Eip1193Transport;
   readonly spaceMode?: "demo" | "fork";
+  readonly spaceAssets?: readonly { token: string; decimals: number }[];
 }
 
 export interface ServiceRuntimeDiagnostics {
@@ -184,6 +185,7 @@ export class AurkaService {
   readonly rpcTransport: Eip1193Transport | undefined;
   readonly readiness: ReadinessMonitor;
   readonly spaceMode: "demo" | "fork";
+  private readonly spaceAssets: readonly { token: string; decimals: number }[];
   private readonly localProvider: LocalDemoProvider | undefined;
   private readonly now: () => number;
 
@@ -192,6 +194,24 @@ export class AurkaService {
     this.rpcTransport = options.rpcTransport;
     this.spaceMode =
       options.spaceMode ?? (options.rpcTransport ? "fork" : "demo");
+    this.spaceAssets =
+      options.spaceAssets ??
+      (this.spaceMode === "fork"
+        ? [
+            {
+              token: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+              decimals: 6,
+            },
+            {
+              token: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+              decimals: 18,
+            },
+          ]
+        : [
+            { token: FIXTURE_ADDRESSES.usdc, decimals: 0 },
+            { token: FIXTURE_ADDRESSES.weth, decimals: 0 },
+            { token: FIXTURE_ADDRESSES.link, decimals: 0 },
+          ]);
     this.database = options.database ?? new ServiceDatabase();
     this.repository = new ServiceRepository(this.database.db);
     this.riskService = new RiskService(this.repository, options.riskNow);
@@ -738,6 +758,7 @@ export class AurkaService {
         throw new ServiceError("SPACE_NOT_FOUND", "Space was not found", 404);
       this.assertSpaceOwner(existing, value.ownerAddress);
     }
+    this.assertSpaceMutationSupported(value.operation, existing);
     if (value.draft) this.validateSpaceDraft(value.draft, value.ownerAddress);
     const chainId =
       value.draft?.chainId ??
@@ -814,6 +835,14 @@ export class AurkaService {
         throw new ServiceError("SPACE_NOT_FOUND", "Space was not found", 404);
       this.assertSpaceOwner(existing, value.ownerAddress);
     }
+    this.assertSpaceMutationSupported(value.operation, existing);
+    if (value.receiptHash)
+      throw new ServiceError(
+        "UNVERIFIED_SPACE_RECEIPT",
+        "Client-supplied Space receipt hashes are not accepted until the service can verify the receipt, intended operation, caller, contract, and resulting chain state",
+        501,
+        { operation: value.operation, spaceId: value.spaceId },
+      );
     if (value.draft) this.validateSpaceDraft(value.draft, value.ownerAddress);
     const chainId =
       value.draft?.chainId ??
@@ -911,6 +940,31 @@ export class AurkaService {
     };
   }
 
+  /**
+   * The generic Space API can persist authenticated fork drafts, but it does
+   * not yet prepare or verify the policy/strategy transactions required to
+   * make those drafts active. An owner signature authorizes an intent; it is
+   * never evidence that the corresponding chain operation succeeded.
+   */
+  private assertSpaceMutationSupported(
+    operation: SpaceMutationPrepareRequest["operation"],
+    existing: SpaceRecord | undefined,
+  ): void {
+    if (this.spaceMode !== "fork" || operation === "CREATE") return;
+    if (
+      operation === "UPDATE" &&
+      existing?.identity.state !== "PENDING" &&
+      existing?.identity.state !== "FAILED"
+    )
+      return;
+    throw new ServiceError(
+      "FORK_SPACE_CHAIN_OPERATION_UNSUPPORTED",
+      `Fork Space ${operation.toLowerCase()} requires a receipt-verified owner-wallet chain transaction; this API currently supports authenticated draft persistence only`,
+      501,
+      { operation, spaceId: existing?.identity.id ?? null },
+    );
+  }
+
   private assertSpaceOwner(space: SpaceRecord, ownerAddress: string): void {
     if (
       space.identity.ownerAddress.toLowerCase() !==
@@ -939,10 +993,11 @@ export class AurkaService {
         409,
       );
     const maximum = BigInt(draft.maximumTransactionValue);
-    if (maximum < 1_000n || maximum > 1_000_000_000n)
+    const minimum = this.spaceMode === "fork" ? 1n : 1_000n;
+    if (maximum < minimum || maximum > 1_000_000_000n)
       throw new ServiceError(
         "INVALID_TRANSACTION_LIMIT",
-        "Transaction limit must be between 1000 and 1000000000 value units",
+        `Transaction limit must be between ${minimum} and 1000000000 value units`,
       );
     const tokens = draft.assets.map((asset) => asset.token.toLowerCase());
     if (new Set(tokens).size !== tokens.length)
@@ -963,17 +1018,18 @@ export class AurkaService {
         "INFEASIBLE_BOUNDS",
         "Allocation ranges must permit a complete portfolio",
       );
-    const supportedDecimals = new Map([
-      [FIXTURE_ADDRESSES.usdc.toLowerCase(), 0],
-      [FIXTURE_ADDRESSES.weth.toLowerCase(), 0],
-      [FIXTURE_ADDRESSES.link.toLowerCase(), 0],
-    ]);
+    const supportedDecimals = new Map(
+      this.spaceAssets.map((asset) => [
+        asset.token.toLowerCase(),
+        asset.decimals,
+      ]),
+    );
     for (const asset of draft.assets) {
       const expectedDecimals = supportedDecimals.get(asset.token.toLowerCase());
       if (expectedDecimals === undefined)
         throw new ServiceError(
           "UNSUPPORTED_ASSET",
-          "This environment only supports its configured USDC, WETH, and LINK assets",
+          "This environment only supports its configured assets",
         );
       if (asset.decimals !== expectedDecimals)
         throw new ServiceError(
@@ -981,12 +1037,12 @@ export class AurkaService {
           `${asset.symbol} must use ${expectedDecimals} decimal places in this environment`,
         );
     }
-    if (!tokens.includes(FIXTURE_ADDRESSES.usdc.toLowerCase()))
+    if (!tokens.includes(this.spaceAssets[0]!.token.toLowerCase()))
       throw new ServiceError(
         "UNSUPPORTED_ASSET_SET",
         "A Space must include the configured USDC fee asset",
       );
-    if (!tokens.includes(FIXTURE_ADDRESSES.weth.toLowerCase()))
+    if (!tokens.includes(this.spaceAssets[1]!.token.toLowerCase()))
       throw new ServiceError(
         "UNSUPPORTED_ASSET_SET",
         "A Space must include WETH for the supported local trading pair",
@@ -1065,7 +1121,10 @@ export class AurkaService {
           "Space already exists",
           409,
         );
-      const generated = this.positionForSpaceDraft(draft);
+      const generated =
+        this.spaceMode === "demo"
+          ? this.positionForSpaceDraft(draft)
+          : undefined;
       identity = {
         id: draft.id,
         name: draft.name,
@@ -1073,9 +1132,11 @@ export class AurkaService {
         controllerAddress: draft.ownerAddress,
         treasuryAddress: draft.ownerAddress,
         chainId: draft.chainId,
-        policyId: generated.position.policy.id,
-        strategyId: generated.strategyId,
-        policyRegistryAddress: generated.position.policy.registry,
+        policyId:
+          generated?.position.policy.id ?? hashBytes(`policy:${draft.id}`),
+        strategyId: generated?.strategyId ?? hashBytes(`strategy:${draft.id}`),
+        policyRegistryAddress:
+          generated?.position.policy.registry ?? SPACE_MANAGEMENT_AUTHORITY,
         mode: this.spaceMode,
         state: "DRAFT",
       };
@@ -1084,7 +1145,14 @@ export class AurkaService {
         throw new ServiceError("SPACE_NOT_FOUND", "Space was not found", 404);
       identity = existing.identity;
       draft = input.draft ?? existing.draft;
-      if (input.operation === "UPDATE" || input.operation === "ACTIVATE") {
+      if (this.spaceMode === "fork" && input.operation === "UPDATE") {
+        identity = { ...identity, name: draft!.name };
+        if (existing.position)
+          position = { ...existing.position, name: draft!.name };
+      } else if (
+        input.operation === "UPDATE" ||
+        input.operation === "ACTIVATE"
+      ) {
         if (!draft)
           throw new ServiceError(
             "DRAFT_REQUIRED",
@@ -1178,6 +1246,7 @@ export class AurkaService {
       ...(input.receiptHash ? { receiptHash: input.receiptHash } : {}),
       payload: {
         operation: input.operation,
+        authority: this.spaceMode === "fork" ? "signed-metadata-only" : "demo",
         state: savedIdentity.state,
         ...(draft ? { draft } : {}),
       },

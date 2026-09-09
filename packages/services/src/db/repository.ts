@@ -7,6 +7,7 @@ import {
   gte,
   isNotNull,
   lte,
+  ne,
   or,
   sql,
 } from "drizzle-orm";
@@ -439,6 +440,25 @@ export class ServiceRepository {
       .onConflictDoNothing()
       .run();
     return value;
+  }
+
+  setSpaceReceiptStatus(
+    spaceId: string,
+    hashes: string[],
+    status: "CONFIRMED" | "FAILED",
+  ): void {
+    for (const hash of hashes) {
+      this.db
+        .update(spaceChanges)
+        .set({ status })
+        .where(
+          and(
+            eq(spaceChanges.spaceId, spaceId),
+            eq(spaceChanges.receiptHash, hash),
+          ),
+        )
+        .run();
+    }
   }
 
   listSpaceChanges(spaceId: string, limit = 100): SpaceChange[] {
@@ -1931,6 +1951,18 @@ export class ServiceRepository {
         database,
         String(payload.positionIdHash),
       );
+      // Older projections may have used the hash before the Space draft existed.
+      // Remove that alias before inserting the canonical Space-scoped epoch.
+      database
+        .delete(capacityEpochs)
+        .where(
+          and(
+            eq(capacityEpochs.capacityEpochId, String(payload.capacityEpochId)),
+            eq(capacityEpochs.positionId, String(payload.positionIdHash)),
+            ne(capacityEpochs.positionId, positionId),
+          ),
+        )
+        .run();
       database
         .insert(capacityEpochs)
         .values({
@@ -2110,8 +2142,8 @@ export class ServiceRepository {
     positionIdHash: string,
   ): string {
     const position = database
-      .select({ id: positions.id })
-      .from(positions)
+      .select({ id: spaces.id })
+      .from(spaces)
       .all()
       .find(
         (candidate) =>

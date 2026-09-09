@@ -8,35 +8,54 @@ import {
   type SpaceMutationOperation,
   type SpaceRecord,
 } from "@aurka/shared";
-import { apiBaseUrl, supportedChainId } from "../config";
+import { apiBaseUrl, appMode, supportedChainId } from "../config";
+import { activateForkSpace } from "../domain/space-setup";
 import { spaceUrl } from "../domain/spaces";
 import { useWallet } from "../wallet";
 
 const client = new AurkaClient({ baseUrl: apiBaseUrl });
 const ZERO = "0x0000000000000000000000000000000000000000";
-const supportedAssets: readonly AssetBound[] = [
-  {
-    token: "0x1111111111111111111111111111111111111111",
-    symbol: "USDC",
-    decimals: 0,
-    minimumWeightBps: 5_500,
-    maximumWeightBps: 10_000,
-  },
-  {
-    token: "0x2222222222222222222222222222222222222222",
-    symbol: "WETH",
-    decimals: 0,
-    minimumWeightBps: 0,
-    maximumWeightBps: 3_500,
-  },
-  {
-    token: "0x3333333333333333333333333333333333333333",
-    symbol: "LINK",
-    decimals: 0,
-    minimumWeightBps: 0,
-    maximumWeightBps: 1_500,
-  },
-];
+const supportedAssets: readonly AssetBound[] =
+  appMode === "fork"
+    ? [
+        {
+          token: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+          symbol: "USDC",
+          decimals: 6,
+          minimumWeightBps: 5500,
+          maximumWeightBps: 10000,
+        },
+        {
+          token: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+          symbol: "WETH",
+          decimals: 18,
+          minimumWeightBps: 0,
+          maximumWeightBps: 3500,
+        },
+      ]
+    : [
+        {
+          token: "0x1111111111111111111111111111111111111111",
+          symbol: "USDC",
+          decimals: 0,
+          minimumWeightBps: 5_500,
+          maximumWeightBps: 10_000,
+        },
+        {
+          token: "0x2222222222222222222222222222222222222222",
+          symbol: "WETH",
+          decimals: 0,
+          minimumWeightBps: 0,
+          maximumWeightBps: 3_500,
+        },
+        {
+          token: "0x3333333333333333333333333333333333333333",
+          symbol: "LINK",
+          decimals: 0,
+          minimumWeightBps: 0,
+          maximumWeightBps: 1_500,
+        },
+      ];
 
 type DraftAsset = AssetBound & {
   readonly minimumText: string;
@@ -190,12 +209,17 @@ export default function SpaceForm({
     setError(null);
     setMessage(null);
     try {
-      const result = await sign(existing ? "UPDATE" : "CREATE", draft);
+      const result = await sign(saved ? "UPDATE" : "CREATE", {
+        ...draft,
+        ownerAddress: wallet.address ?? draft.ownerAddress,
+      });
       setSaved(result.space);
       setMessage(
         result.space.identity.state === "DRAFT"
           ? "Draft saved. No deployment or activation has been claimed."
-          : "Space changes confirmed.",
+          : appMode === "fork"
+            ? "Name and draft saved. Apply rules onchain to change trading policy."
+            : "Space changes confirmed.",
       );
       if (!existing)
         navigate(`${spaceUrl(result.space.identity.id, "settings")}`, {
@@ -214,6 +238,35 @@ export default function SpaceForm({
     setMessage(null);
     try {
       let current = saved;
+      if (appMode === "fork") {
+        if (!wallet.address || !wallet.provider)
+          throw new Error("Connect the owner wallet.");
+        if (!current) {
+          const created = await sign("CREATE", {
+            ...draft,
+            ownerAddress: wallet.address,
+          });
+          current = created.space;
+          setSaved(current);
+        }
+        const operation =
+          current.identity.state === "ACTIVE" ||
+          current.identity.state === "PAUSED"
+            ? "UPDATE"
+            : "ACTIVATE";
+        if (operation === "UPDATE") await sign("UPDATE", draft);
+        const space = await activateForkSpace(
+          current.identity.id,
+          wallet.address,
+          wallet.provider,
+          setMessage,
+          operation,
+        );
+        setSaved(space);
+        setMessage("Space activation verified onchain.");
+        navigate(spaceUrl(space.identity.id, "settings"), { replace: true });
+        return;
+      }
       if (!current || current.identity.state === "DRAFT") {
         if (!current) {
           const created = await sign("CREATE", draft);
@@ -429,8 +482,10 @@ export default function SpaceForm({
               }
             />
             <span className="mt-2 block text-xs text-slate-500">
-              This local authority accepts 1000–1000000000 value units. A
-              deployed chain policy remains the final authority.
+              {appMode === "fork"
+                ? "This fork accepts 1–1000000000"
+                : "This local demo accepts 1000–1000000000"}{" "}
+              value units. A deployed chain policy remains the final authority.
             </span>
           </label>
         )}
@@ -463,9 +518,9 @@ export default function SpaceForm({
               </div>
             </dl>
             <p className="text-sm leading-6 text-slate-400">
-              Saving creates a durable draft. Activation or a rule change
-              requires another exact signature; a rejected wallet request leaves
-              the previous state unchanged.
+              {appMode === "fork"
+                ? "Save your draft before activation. Setup creates a dedicated treasury, transfers 35,000 USDC and 5 WETH from your wallet, approves settlement, registers these balances in MockAqua, and authorizes trading. Each step needs a wallet transaction and gas on the local fork. Retry continues verified setup; trading starts only after server verification."
+                : "Saving creates a durable draft. Activation or a rule change requires another exact signature; a rejected wallet request leaves the previous state unchanged."}
             </p>
           </div>
         )}
@@ -513,10 +568,15 @@ export default function SpaceForm({
                 onClick={() => void activate()}
                 className="rounded-lg bg-cyan-700 px-4 py-2.5 text-sm font-medium text-white disabled:opacity-40"
               >
-                {existing?.identity.state === "ACTIVE" ||
-                existing?.identity.state === "PAUSED"
-                  ? "Save changes"
-                  : "Deploy / activate"}
+                {appMode === "fork"
+                  ? saved?.identity.state === "ACTIVE" ||
+                    saved?.identity.state === "PAUSED"
+                    ? "Apply rules onchain"
+                    : "Deploy / continue activation"
+                  : existing?.identity.state === "ACTIVE" ||
+                      existing?.identity.state === "PAUSED"
+                    ? "Save changes"
+                    : "Deploy / activate"}
               </button>
             </>
           )}
@@ -551,6 +611,22 @@ export function SpaceOwnerControls({
         throw new Error(
           "Connect the recorded Space owner wallet before changing policy.",
         );
+      if (appMode === "fork") {
+        const next = await activateForkSpace(
+          space.identity.id,
+          wallet.address,
+          wallet.provider,
+          setMessage,
+          operation,
+        );
+        onChanged?.(next);
+        setMessage(
+          operation === "PAUSE"
+            ? "Trading paused onchain."
+            : "Trading resumed. Authorize fresh capacity before quoting.",
+        );
+        return;
+      }
       const prepared = await client.prepareSpaceMutation({
         operation,
         spaceId: space.identity.id,

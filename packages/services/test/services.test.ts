@@ -991,6 +991,47 @@ describe("AURKA event projection", () => {
     }
   });
 
+  it("resolves pre-activation events to draft IDs and repairs legacy hash aliases on replay", () => {
+    const service = new AurkaService({ seedFixture: false });
+    const seeded = new AurkaService({ seedFixture: true });
+    const identity = seeded.getSpace(FIXTURE_POSITION_ID).identity;
+    seeded.close();
+    const indexer = new ChainEventIndexer(service.repository);
+    const activation = rawRouterEvent(eventLog());
+    try {
+      indexer.ingest([activation]);
+      expect(
+        service.repository.getCapacityEpoch(
+          FIXTURE_POSITION_ID_HASH,
+          FIXTURE_ADDRESSES.weth,
+          FIXTURE_ADDRESSES.usdc,
+        ),
+      ).toBeDefined();
+      service.repository.saveSpaceIdentity({ ...identity, state: "DRAFT" });
+      expect(
+        service.repository.getPosition(FIXTURE_POSITION_ID),
+      ).toBeUndefined();
+      indexer.ingest([activation]);
+      expect(
+        service.repository.getCapacityEpoch(
+          FIXTURE_POSITION_ID_HASH,
+          FIXTURE_ADDRESSES.weth,
+          FIXTURE_ADDRESSES.usdc,
+        ),
+      ).toBeUndefined();
+      expect(
+        service.repository.getCapacityEpoch(
+          FIXTURE_POSITION_ID,
+          FIXTURE_ADDRESSES.weth,
+          FIXTURE_ADDRESSES.usdc,
+        )?.capacityEpochId,
+      ).toBe(eventLog().payload.capacityEpochId);
+      indexer.ingest([activation]);
+    } finally {
+      service.close();
+    }
+  });
+
   it("is idempotent and rebuilds derived capacity after a removed log", () => {
     const database = new ServiceDatabase();
     const repositoryService = new AurkaService({ database, seedFixture: true });

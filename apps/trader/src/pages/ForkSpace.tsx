@@ -6,6 +6,7 @@ import {
   type Position,
   type AtomicSettlementIntent,
 } from "@aurka/shared";
+import { activateForkSpace } from "../domain/space-setup";
 import { apiBaseUrl } from "../config";
 import { useWallet } from "../wallet";
 
@@ -163,6 +164,9 @@ export default function ForkSpace({
       setStatus(wallet.error ?? "Wallet connection failed");
     else setStatus("Connect your wallet from the header when ready");
   }, [wallet.error, wallet.revision, wallet.status]);
+  useEffect(() => {
+    if (state) setLimit(state.position.policy.maximumTransactionValue);
+  }, [state?.position.id, state?.position.policy.maximumTransactionValue]);
   const stale =
     !!quote &&
     (!state ||
@@ -262,11 +266,50 @@ export default function ForkSpace({
     }
   }
   async function ownerAction(action: string) {
-    if (account.toLowerCase() !== state?.alice.toLowerCase())
-      throw new Error(
-        "Connect Alice, the actual treasury and governance account.",
-      );
+    if (account.toLowerCase() !== state?.position.owner.toLowerCase())
+      throw new Error("Connect the recorded Space governance owner.");
     invalidate();
+    if (action === "pause" || action === "resume" || action === "limit") {
+      const provider = await validateWallet(account);
+      if (action === "limit") {
+        const space = await client.getSpace(spaceId!);
+        const draft = {
+          id: space.identity.id,
+          name: space.identity.name,
+          ownerAddress: account,
+          chainId: space.identity.chainId,
+          assets: space.position!.policy.assets,
+          maximumTransactionValue: limit,
+        };
+        const prepared = await client.prepareSpaceMutation({
+          operation: "UPDATE",
+          spaceId: space.identity.id,
+          ownerAddress: account,
+          draft,
+        });
+        const signature = (await provider.request({
+          method: "eth_signTypedData_v4",
+          params: [account, JSON.stringify(prepared.typedData)],
+        })) as string;
+        await client.confirmSpaceMutation({
+          operation: "UPDATE",
+          spaceId: space.identity.id,
+          ownerAddress: account,
+          draft,
+          authorization: { ...prepared.authorization, signature },
+        });
+      }
+      await activateForkSpace(
+        spaceId!,
+        account,
+        provider,
+        setStatus,
+        action === "limit" ? "UPDATE" : action.toUpperCase(),
+      );
+      setStatus(`${action}: confirmed`);
+      await refresh();
+      return;
+    }
     const transaction = await getJson<Transaction>(
       apiPath(
         `/fork/owner?spaceId=${encodeURIComponent(spaceId ?? "")}&action=${action}&value=${encodeURIComponent(limit)}`,
@@ -411,7 +454,7 @@ export default function ForkSpace({
       )}
       <p className="text-sm text-slate-400">
         {owner
-          ? "Owner controls are available only to the configured treasury account."
+          ? "Owner controls are available only to the recorded governance owner."
           : "Connect the counterparty wallet to review and submit this trade."}
       </p>
       <div className="space-y-3 rounded-xl border border-slate-700 p-4">
@@ -445,12 +488,12 @@ export default function ForkSpace({
             </h2>
             <p>
               {formatTokenAmount(
-                state.balances[owner ? "alice" : "bob"].usdc,
+                state.balances[owner ? "treasury" : "bob"].usdc,
                 6,
               )}{" "}
               USDC ·{" "}
               {formatTokenAmount(
-                state.balances[owner ? "alice" : "bob"].weth,
+                state.balances[owner ? "treasury" : "bob"].weth,
                 18,
               )}{" "}
               WETH
@@ -480,12 +523,12 @@ export default function ForkSpace({
                   Capacity:{" "}
                   {state.capacity.authorized
                     ? `${state.capacity.consumed} / ${state.capacity.baseline} consumed`
-                    : "Awaiting Alice’s authorization"}
+                    : "Awaiting owner authorization"}
                 </p>
                 <p className="text-sm">
-                  Governance controls limits and pause. Alice holds this role.
-                  Token allowance can also be revoked. This Space is her
-                  account, not a separate vault.
+                  Governance controls limits and pause. The treasury account
+                  holds this Space’s funds; its owner can also revoke settlement
+                  allowances.
                 </p>
               </div>
             )}
@@ -519,7 +562,8 @@ export default function ForkSpace({
                     className={button}
                     disabled={
                       busy ||
-                      account.toLowerCase() !== state.alice.toLowerCase()
+                      account.toLowerCase() !==
+                        state.position.owner.toLowerCase()
                     }
                     onClick={() => void run(() => ownerAction(action))}
                   >
@@ -539,7 +583,8 @@ export default function ForkSpace({
               <button
                 className={button}
                 disabled={
-                  busy || account.toLowerCase() !== state.alice.toLowerCase()
+                  busy ||
+                  account.toLowerCase() !== state.position.owner.toLowerCase()
                 }
                 onClick={() => void run(() => ownerAction("limit"))}
               >

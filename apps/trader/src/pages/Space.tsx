@@ -1121,20 +1121,19 @@ export function SpaceSettings() {
               Deployment failed: {space.failureReason}
             </p>
           )}
-          {!editing && space.identity.state === "DRAFT" && (
-            <SpaceForm existing={space} embedded />
-          )}
           {!editing &&
-            appMode !== "fork" &&
-            space.identity.state !== "DRAFT" && (
-              <button
-                type="button"
-                onClick={() => setEditing(true)}
-                className="rounded-lg border border-slate-600 px-4 py-2.5 text-sm text-slate-100 hover:border-cyan-500"
-              >
-                Edit Space
-              </button>
+            ["DRAFT", "PENDING", "FAILED"].includes(space.identity.state) && (
+              <SpaceForm existing={space} embedded />
             )}
+          {!editing && ["ACTIVE", "PAUSED"].includes(space.identity.state) && (
+            <button
+              type="button"
+              onClick={() => setEditing(true)}
+              className="rounded-lg border border-slate-600 px-4 py-2.5 text-sm text-slate-100 hover:border-cyan-500"
+            >
+              Edit Space
+            </button>
+          )}
           {editing && <SpaceForm existing={space} embedded />}
           {!editing && appMode === "fork" && space.position ? (
             <ForkSpace owner spaceId={space.identity.id} embedded />

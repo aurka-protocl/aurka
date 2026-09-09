@@ -167,7 +167,7 @@ export default function Spaces() {
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
-          {wallet.address && appMode !== "fork" && (
+          {wallet.address && (
             <Link
               to="/spaces/new"
               className="inline-flex min-h-10 items-center rounded-lg bg-cyan-700 px-3 py-2 text-sm font-medium text-white hover:bg-cyan-600"

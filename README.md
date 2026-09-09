@@ -13,7 +13,8 @@ deterministic price protection. AURKA-005 adds an atomic, local direct
 Aqua-compatible settlement adapter with signed commitments. AURKA-006 adds the
 local deterministic solver/API/persistence/indexer service package. MVP-002 adds
 persistent multiple Spaces, owner-signed lifecycle mutations, isolated local
-demo allocations, and explicit two-Space fork fixtures.
+demo allocations, and wallet-created fork Spaces with separate treasury vaults
+and receipt-verified policy, funding, and capacity setup.
 
 ## Requirements
 
@@ -76,3 +77,27 @@ See [SDK usage](packages/sdk/README.md), [API semantics](docs/api.md), and
 [watchtower runtime requirements](docs/risk-watchtower.md). For the complete
 local product journey, measured demo values, manual acceptance checklist, and
 issue template, see the [product walkthrough](docs/product-walkthrough.md).
+
+## Fork Space creation validation
+
+With an Ethereum archive `MAINNET_RPC_URL` in `.env`, build with
+`pnpm build && forge build`. Start an isolated validation environment without
+resetting the default fork:
+
+```bash
+AURKA_FORK_DIR="$PWD/.fork-space/mvp002-validation" node --env-file=.env packages/services/scripts/fork-space.mjs
+```
+
+In another terminal, run the two-Space browser flow against a fresh validation
+fork (it uses that fork's public test wallets and real local transactions):
+
+```bash
+AURKA_FORK_DIR="$PWD/.fork-space/mvp002-validation" node packages/services/scripts/fork-spaces-e2e.mjs
+```
+
+The flow creates drafts in the UI, activates independent funded treasuries,
+quotes/trades against both, and checks receipt-backed policy changes. Evidence
+is written under the selected fork directory's `evidence/`.
+`AURKA_SPACE_IDS=id1,id2` resumes checks for existing Spaces after a
+service/fork restart. The injected EIP-1193 test wallet does not establish
+compatibility with every browser extension.

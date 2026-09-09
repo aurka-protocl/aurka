@@ -142,7 +142,9 @@ export function ActivityCard({
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <p className="text-lg font-semibold text-white">
-              {CHANGE_LABELS[item.eventType]}
+              {item.payload?.authority === "signed-metadata-only"
+                ? "Name and draft saved"
+                : CHANGE_LABELS[item.eventType]}
             </p>
             <p className="mt-1 text-sm text-slate-400">
               {item.spaceName ?? "Space"} · {activityDate(item)}

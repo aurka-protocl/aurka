@@ -47,6 +47,21 @@ function draft(ownerAddress: string, id = "space:independent"): SpaceDraft {
   };
 }
 
+function forkDraft(owner: string, id: string): SpaceDraft {
+  const value = draft(owner, id);
+  return {
+    ...value,
+    assets: value.assets.map((asset, i) => ({
+      ...asset,
+      token:
+        i === 0
+          ? "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+          : "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+      decimals: i === 0 ? 6 : 18,
+    })),
+  };
+}
+
 async function signedMutation(
   service: AurkaService,
   account: typeof OWNER,
@@ -135,6 +150,207 @@ describe("MVP-002 Space management", () => {
       });
     } finally {
       service.close();
+    }
+  });
+
+  it("never activates a fork Space without verified chain setup", async () => {
+    let chainReads = 0;
+    const service = new AurkaService({
+      spaceMode: "fork",
+      provider: {
+        getPositionSnapshot: async () => {
+          chainReads += 1;
+          throw new Error("RPC offline");
+        },
+        getSnapshot: async () => {
+          chainReads += 1;
+          throw new Error("RPC offline");
+        },
+      },
+      seedFixture: false,
+    });
+    const value = forkDraft(OWNER.address, "space:fork-unverified");
+    try {
+      const created = await service.confirmSpaceMutation(
+        await signedMutation(service, OWNER, "CREATE", value.id, value),
+      );
+      expect(created.space.identity).toMatchObject({
+        mode: "fork",
+        state: "DRAFT",
+      });
+
+      expect(() =>
+        service.prepareSpaceMutation({
+          operation: "ACTIVATE",
+          spaceId: value.id,
+          ownerAddress: OWNER.address,
+          draft: value,
+        }),
+      ).toThrowError(
+        expect.objectContaining({
+          code: "FORK_SPACE_CHAIN_OPERATION_UNSUPPORTED",
+          statusCode: 501,
+        }),
+      );
+
+      await expect(
+        service.confirmSpaceMutation({
+          operation: "ACTIVATE",
+          spaceId: value.id,
+          ownerAddress: OWNER.address,
+          draft: value,
+          receiptHash: `0x${"22".repeat(32)}`,
+          authorization: {
+            operation: "ACTIVATE",
+            spaceId: value.id,
+            ownerAddress: OWNER.address,
+            payloadHash: `0x${"33".repeat(32)}`,
+            nonce: "1",
+            deadline: Math.floor(Date.now() / 1000) + 60,
+            signature: `0x${"44".repeat(65)}`,
+          },
+        }),
+      ).rejects.toMatchObject({
+        code: "FORK_SPACE_CHAIN_OPERATION_UNSUPPORTED",
+        statusCode: 501,
+      });
+
+      expect(service.getSpace(value.id).identity.state).toBe("DRAFT");
+      expect(service.getSpace(value.id).position).toBeUndefined();
+      expect(service.listSpaceChanges(value.id)).toHaveLength(1);
+      expect(service.listSpaceChanges(value.id)[0]).toMatchObject({
+        eventType: "SPACE_CREATED",
+        status: "CONFIRMED",
+      });
+      expect(chainReads).toBe(0);
+    } finally {
+      service.close();
+    }
+  });
+
+  it("keeps receipt-free activation confined to the labelled demo authority", async () => {
+    const service = new AurkaService({
+      spaceMode: "demo",
+      provider: new LocalDemoProvider(),
+      seedFixture: false,
+    });
+    const value = draft(OWNER.address, "space:demo-activation");
+    try {
+      await service.confirmSpaceMutation(
+        await signedMutation(service, OWNER, "CREATE", value.id, value),
+      );
+      const activated = await service.confirmSpaceMutation(
+        await signedMutation(service, OWNER, "ACTIVATE", value.id, value),
+      );
+      expect(activated.space.identity).toMatchObject({
+        mode: "demo",
+        state: "ACTIVE",
+      });
+      expect(activated.change).toMatchObject({
+        eventType: "SPACE_ACTIVATED",
+        status: "CONFIRMED",
+      });
+      expect(activated.change.receiptHash).toBeUndefined();
+
+      const unverified = draft(OWNER.address, "space:demo-fake-receipt");
+      await expect(
+        service.confirmSpaceMutation({
+          ...(await signedMutation(
+            service,
+            OWNER,
+            "CREATE",
+            unverified.id,
+            unverified,
+          )),
+          receiptHash: `0x${"88".repeat(32)}`,
+        }),
+      ).rejects.toMatchObject({
+        code: "UNVERIFIED_SPACE_RECEIPT",
+        statusCode: 501,
+      });
+      expect(() => service.getSpace(unverified.id)).toThrowError(
+        expect.objectContaining({ code: "SPACE_NOT_FOUND" }),
+      );
+    } finally {
+      service.close();
+    }
+  });
+
+  it("rejects unverified fork activation through the HTTP API", async () => {
+    const service = new AurkaService({
+      spaceMode: "fork",
+      provider: {
+        getPositionSnapshot: async () => {
+          throw new Error("RPC offline");
+        },
+        getSnapshot: async () => {
+          throw new Error("RPC offline");
+        },
+      },
+      seedFixture: false,
+    });
+    const value = forkDraft(OWNER.address, "space:fork-api-unverified");
+    await service.confirmSpaceMutation(
+      await signedMutation(service, OWNER, "CREATE", value.id, value),
+    );
+    const handle = createApiServer({ service });
+    await listenApiServer(handle, 0);
+    const address = handle.server.address();
+    if (!address || typeof address === "string") throw new Error("No port");
+    const base = `http://127.0.0.1:${address.port}`;
+    try {
+      const prepare = await fetch(`${base}/v1/spaces/prepare`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          operation: "ACTIVATE",
+          spaceId: value.id,
+          ownerAddress: OWNER.address,
+          draft: value,
+        }),
+      });
+      expect(prepare.status).toBe(501);
+      expect(await prepare.json()).toMatchObject({
+        ok: false,
+        error: { code: "FORK_SPACE_CHAIN_OPERATION_UNSUPPORTED" },
+      });
+
+      const confirm = await fetch(`${base}/v1/spaces/confirm`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          operation: "ACTIVATE",
+          spaceId: value.id,
+          ownerAddress: OWNER.address,
+          draft: value,
+          receiptHash: `0x${"55".repeat(32)}`,
+          authorization: {
+            operation: "ACTIVATE",
+            spaceId: value.id,
+            ownerAddress: OWNER.address,
+            payloadHash: `0x${"66".repeat(32)}`,
+            nonce: "1",
+            deadline: Math.floor(Date.now() / 1000) + 60,
+            signature: `0x${"77".repeat(65)}`,
+          },
+        }),
+      });
+      expect(confirm.status).toBe(501);
+      expect(await confirm.json()).toMatchObject({
+        ok: false,
+        error: { code: "FORK_SPACE_CHAIN_OPERATION_UNSUPPORTED" },
+      });
+
+      const stored = await fetch(
+        `${base}/v1/spaces/${encodeURIComponent(value.id)}`,
+      );
+      expect(stored.status).toBe(200);
+      expect(await stored.json()).toMatchObject({
+        ok: true,
+        data: { identity: { state: "DRAFT" } },
+      });
+    } finally {
+      await closeApiServer(handle);
     }
   });
 
