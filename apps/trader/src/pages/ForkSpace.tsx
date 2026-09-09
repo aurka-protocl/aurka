@@ -269,7 +269,12 @@ export default function ForkSpace({
     if (account.toLowerCase() !== state?.position.owner.toLowerCase())
       throw new Error("Connect the recorded Space governance owner.");
     invalidate();
-    if (action === "pause" || action === "resume" || action === "limit") {
+    if (
+      action === "pause" ||
+      action === "resume" ||
+      action === "reactivate" ||
+      action === "limit"
+    ) {
       const provider = await validateWallet(account);
       if (action === "limit") {
         const space = await client.getSpace(spaceId!);
@@ -541,36 +546,25 @@ export default function ForkSpace({
                   These controls submit real owner transactions to the fork.
                 </p>
               </div>
-              <p>
-                Start: grant USDC allowance, then authorize capacity. Neither
-                step moves a trade by itself.
-              </p>
-              <div className="flex flex-wrap gap-3">
-                {[
-                  ["allowance", "Grant USDC allowance"],
-                  ["authorize", "Authorize trading capacity"],
-                  [
-                    state.position.policy.paused ? "resume" : "pause",
-                    state.position.policy.paused
-                      ? "Resume trading"
-                      : "Pause trading",
-                  ],
-                  ["revoke", "Revoke USDC allowance"],
-                ].map(([action, label]) => (
-                  <button
-                    key={action}
-                    className={button}
-                    disabled={
-                      busy ||
-                      account.toLowerCase() !==
-                        state.position.owner.toLowerCase()
-                    }
-                    onClick={() => void run(() => ownerAction(action))}
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
+              <dl className="grid gap-2 text-sm sm:grid-cols-2">
+                <div>
+                  <dt className="text-slate-400">Trading status</dt>
+                  <dd className="font-medium text-white">
+                    {state.position.policy.paused
+                      ? "Paused"
+                      : state.capacity.authorized
+                        ? "Ready"
+                        : "Reactivate trading"}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-slate-400">Maximum trade value</dt>
+                  <dd className="font-medium text-white">
+                    {state.position.policy.maximumTransactionValue} reference
+                    units
+                  </dd>
+                </div>
+              </dl>
               <label className="block">
                 Maximum transaction value (1–5000 reference units)
                 <input
@@ -588,13 +582,59 @@ export default function ForkSpace({
                 }
                 onClick={() => void run(() => ownerAction("limit"))}
               >
-                Save transaction limit
+                Save changes
               </button>
+              <button
+                className={button}
+                disabled={
+                  busy ||
+                  account.toLowerCase() !== state.position.owner.toLowerCase()
+                }
+                onClick={() =>
+                  void run(() =>
+                    ownerAction(
+                      state.position.policy.paused ? "resume" : "pause",
+                    ),
+                  )
+                }
+              >
+                {state.position.policy.paused
+                  ? "Resume trading"
+                  : "Pause trading"}
+              </button>
+              {!state.position.policy.paused && !state.capacity.authorized && (
+                <button
+                  className={button}
+                  disabled={busy}
+                  onClick={() => void run(() => ownerAction("reactivate"))}
+                >
+                  Reactivate trading
+                </button>
+              )}
               <p className="text-sm">
-                Changing limits or pause invalidates earlier authorization.
-                Re-authorize capacity after reviewing the current holdings.
-                Capacity cannot be silently reset after a fill.
+                Saving rules or resuming may require fresh trading
+                authorization. Low-level token permissions remain isolated to
+                this Space and are available only in Advanced controls.
               </p>
+              <details className="text-sm text-slate-400">
+                <summary>Advanced controls</summary>
+                <div className="mt-3 flex flex-wrap gap-3">
+                  <button
+                    className={button}
+                    disabled={busy}
+                    onClick={() => void run(() => ownerAction("allowance"))}
+                  >
+                    Grant token permission
+                  </button>
+                  <button
+                    className={button}
+                    disabled={busy}
+                    onClick={() => void run(() => ownerAction("revoke"))}
+                  >
+                    Revoke token permission
+                  </button>
+                </div>
+              </details>
             </div>
           ) : (
             <div className="space-y-4 rounded-xl border border-slate-700 p-4">

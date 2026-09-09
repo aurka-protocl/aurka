@@ -4,6 +4,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   ForkSpaceLifecycle,
+  verifySpaceBatchReceipts,
   verifySpaceReceipt,
 } from "../scripts/fork-space-lifecycle.mjs";
 const owner = `0x${"11".repeat(20)}`;
@@ -69,6 +70,114 @@ describe("fork Space receipt authority", () => {
     await expect(
       verifySpaceReceipt(client, 31337, owner, expected, hash),
     ).rejects.toThrow("Receipt not found");
+  });
+});
+
+describe("atomic Space batch receipt authority", () => {
+  const second = { to: owner, data: "0xabcd", value: "0x0" };
+
+  it("accepts one canonical receipt only when its owner calls exactly match the plan", async () => {
+    const client = rpc();
+    client.request = async () => ({
+      type: "CALL",
+      from: owner,
+      to: owner,
+      input: "0xwallet",
+      value: "0x0",
+      calls: [
+        {
+          type: "CALL",
+          from: owner,
+          to: target,
+          input: expected.data,
+          value: "0x0",
+        },
+        {
+          type: "CALL",
+          from: owner,
+          to: owner,
+          input: second.data,
+          value: "0x0",
+        },
+      ],
+    });
+    await expect(
+      verifySpaceBatchReceipts(
+        client,
+        31337,
+        owner,
+        [expected, second],
+        [hash],
+        "0",
+      ),
+    ).resolves.toHaveLength(1);
+  });
+
+  it("rejects altered or additional owner calls inside one atomic receipt", async () => {
+    const client = rpc();
+    client.request = async () => ({
+      type: "CALL",
+      from: owner,
+      to: owner,
+      calls: [
+        {
+          type: "CALL",
+          from: owner,
+          to: target,
+          input: expected.data,
+          value: "0x0",
+        },
+        {
+          type: "CALL",
+          from: owner,
+          to: owner,
+          input: second.data,
+          value: "0x0",
+        },
+        { type: "CALL", from: owner, to: owner, input: "0xdead", value: "0x0" },
+      ],
+    });
+    await expect(
+      verifySpaceBatchReceipts(
+        client,
+        31337,
+        owner,
+        [expected, second],
+        [hash],
+        "0",
+      ),
+    ).rejects.toThrow("exactly the reviewed");
+  });
+
+  it("accepts one direct canonical receipt for each reviewed call", async () => {
+    const nextHash = `0x${"55".repeat(32)}`;
+    const client = rpc();
+    const selected = (requested) => (requested === hash ? expected : second);
+    client.getTransaction = async ({ hash: requested }) => ({
+      from: owner,
+      to: selected(requested).to,
+      input: selected(requested).data,
+      value: 0n,
+      chainId: 31337,
+      blockHash,
+    });
+    client.getTransactionReceipt = async ({ hash: requested }) => ({
+      status: "success",
+      from: owner,
+      to: selected(requested).to,
+      blockHash,
+      blockNumber: 10n,
+    });
+    await expect(
+      verifySpaceBatchReceipts(
+        client,
+        31337,
+        owner,
+        [expected, second],
+        [hash, nextHash],
+        "0",
+      ),
+    ).resolves.toHaveLength(2);
   });
 });
 

@@ -251,6 +251,7 @@ export default function SpaceForm({
         }
         const operation =
           current.identity.state === "ACTIVE" ||
+          current.identity.state === "REACTIVATION_REQUIRED" ||
           current.identity.state === "PAUSED"
             ? "UPDATE"
             : "ACTIVATE";
@@ -570,10 +571,12 @@ export default function SpaceForm({
               >
                 {appMode === "fork"
                   ? saved?.identity.state === "ACTIVE" ||
+                    saved?.identity.state === "REACTIVATION_REQUIRED" ||
                     saved?.identity.state === "PAUSED"
                     ? "Apply rules onchain"
                     : "Deploy / continue activation"
                   : existing?.identity.state === "ACTIVE" ||
+                      existing?.identity.state === "REACTIVATION_REQUIRED" ||
                       existing?.identity.state === "PAUSED"
                     ? "Save changes"
                     : "Deploy / activate"}
@@ -623,7 +626,7 @@ export function SpaceOwnerControls({
         setMessage(
           operation === "PAUSE"
             ? "Trading paused onchain."
-            : "Trading resumed. Authorize fresh capacity before quoting.",
+            : "Trading resumed and required authorization was verified.",
         );
         return;
       }
@@ -680,6 +683,7 @@ export function SpaceOwnerControls({
           !wallet.provider ||
           busy ||
           (space.identity.state !== "ACTIVE" &&
+            space.identity.state !== "REACTIVATION_REQUIRED" &&
             space.identity.state !== "PAUSED")
         }
         onClick={() => void toggle()}

@@ -53,6 +53,8 @@ function currentFreshness(
 
 function stateLabel(space: SpaceRecord): string {
   if (space.identity.state === "ACTIVE") return "Trading active";
+  if (space.identity.state === "REACTIVATION_REQUIRED")
+    return "Reactivate trading";
   if (space.identity.state === "PAUSED") return "Trading paused";
   if (space.identity.state === "FAILED") return "Setup failed";
   if (space.identity.state === "PENDING") return "Setup pending";
@@ -62,7 +64,9 @@ function stateLabel(space: SpaceRecord): string {
 function stateClass(space: SpaceRecord): string {
   return space.identity.state === "ACTIVE"
     ? "border-emerald-800 bg-emerald-950/40 text-emerald-300"
-    : space.identity.state === "PAUSED" || space.identity.state === "FAILED"
+    : space.identity.state === "PAUSED" ||
+        space.identity.state === "REACTIVATION_REQUIRED" ||
+        space.identity.state === "FAILED"
       ? "border-amber-800 bg-amber-950/40 text-amber-300"
       : "border-slate-700 bg-slate-900 text-slate-300";
 }

@@ -498,7 +498,14 @@ async function main() {
       const remembered = epochs[active.capacityEpochId];
       if (
         remembered &&
-        String(remembered.policyNonce) === snapshot.policyNonce
+        String(remembered.policyNonce) === snapshot.policyNonce &&
+        remembered.balanceSnapshot === snapshot.capacityEpoch.balanceSnapshot &&
+        remembered.priceSnapshot === snapshot.capacityEpoch.priceSnapshot &&
+        remembered.portfolioPriceSnapshot ===
+          snapshot.capacityEpoch.portfolioPriceSnapshot &&
+        remembered.riskCertificateHash ===
+          snapshot.capacityEpoch.riskCertificateHash &&
+        remembered.aquaStrategyHash === snapshot.capacityEpoch.aquaStrategyHash
       ) {
         snapshot.capacityEpoch = {
           ...remembered,
@@ -601,6 +608,24 @@ async function main() {
       if (operation.definition.positionId === spaceId)
         await lifecycle.reconcile(operation);
     const snapshot = await selected.currentSnapshot();
+    const activeCapacity = await client.readContract({
+      ...contracts.router,
+      functionName: "capacityState",
+      args: [definition.positionIdHash, WETH, USDC],
+      blockNumber: snapshot.snapshotBlock,
+    });
+    const tradingReady =
+      activeCapacity.capacityEpochId === snapshot.capacityEpochId &&
+      !!epochs[activeCapacity.capacityEpochId] &&
+      [
+        snapshot.priceProtection.traderInputReferencePrice,
+        snapshot.priceProtection.traderOutputReferencePrice,
+      ].every(
+        (price) =>
+          price.observedAt <= snapshot.priceProtection.nowSeconds &&
+          snapshot.priceProtection.nowSeconds - price.observedAt <=
+            snapshot.priceProtection.maximumPriceAgeSeconds,
+      );
     const position = positionForSnapshot(
       snapshot,
       manifest.policyRegistry,
@@ -622,7 +647,11 @@ async function main() {
       strategyId: definition?.strategyHash ?? manifest.strategyHash,
       policyRegistryAddress: position.policy.registry,
       mode: "fork",
-      state: position.policy.paused ? "PAUSED" : "ACTIVE",
+      state: position.policy.paused
+        ? "PAUSED"
+        : tradingReady
+          ? "ACTIVE"
+          : "REACTIVATION_REQUIRED",
     });
     const end = snapshot.snapshotBlock;
     if (end > indexedBlock) {
@@ -695,12 +724,18 @@ async function main() {
         const body = JSON.parse(Buffer.concat(chunks).toString());
         const work = lifecycleQueue.then(() =>
           url.pathname.endsWith("/confirm")
-            ? lifecycle.confirm(
-                body.spaceId,
-                body.step,
-                body.hash,
-                body.operation,
-              )
+            ? body.batch
+              ? lifecycle.confirmBatch(
+                  body.spaceId,
+                  body.hashes,
+                  body.operation,
+                )
+              : lifecycle.confirm(
+                  body.spaceId,
+                  body.step,
+                  body.hash,
+                  body.operation,
+                )
             : lifecycle.prepare(body.spaceId, body.operation),
         );
         lifecycleQueue = work.catch(() => {});
@@ -772,7 +807,16 @@ async function main() {
             consumed: active.consumedValue,
             authorized:
               active.capacityEpochId === snapshot.capacityEpochId &&
-              !!epochs[active.capacityEpochId],
+              !!epochs[active.capacityEpochId] &&
+              [
+                snapshot.priceProtection.traderInputReferencePrice,
+                snapshot.priceProtection.traderOutputReferencePrice,
+              ].every(
+                (price) =>
+                  price.observedAt <= snapshot.priceProtection.nowSeconds &&
+                  snapshot.priceProtection.nowSeconds - price.observedAt <=
+                    snapshot.priceProtection.maximumPriceAgeSeconds,
+              ),
           },
           block: snapshot.snapshotBlock,
           timestamp: snapshot.priceProtection.nowSeconds,

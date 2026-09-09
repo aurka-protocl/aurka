@@ -14,6 +14,7 @@ export const spaceStateSchema = z.enum([
   "DRAFT",
   "PENDING",
   "ACTIVE",
+  "REACTIVATION_REQUIRED",
   "PAUSED",
   "FAILED",
 ]);
@@ -66,6 +67,7 @@ export const spaceChangeEventTypeSchema = z.enum([
   "SPACE_ACTIVATED",
   "SPACE_PAUSED",
   "SPACE_RESUMED",
+  "SPACE_REACTIVATED",
   "SPACE_DEPLOYMENT_FAILED",
 ]);
 

@@ -29,9 +29,11 @@ function SpaceCard({ space }: { readonly space: SpaceRecord }) {
       ? "border-emerald-800 bg-emerald-950/30 text-emerald-300"
       : space.identity.state === "PAUSED"
         ? "border-amber-800 bg-amber-950/30 text-amber-300"
-        : space.identity.state === "FAILED"
-          ? "border-red-800 bg-red-950/30 text-red-300"
-          : "border-slate-700 bg-slate-950 text-slate-300";
+        : space.identity.state === "REACTIVATION_REQUIRED"
+          ? "border-amber-800 bg-amber-950/30 text-amber-300"
+          : space.identity.state === "FAILED"
+            ? "border-red-800 bg-red-950/30 text-red-300"
+            : "border-slate-700 bg-slate-950 text-slate-300";
   return (
     <article className="min-w-0 rounded-2xl border border-slate-700 bg-slate-900 p-5 transition hover:border-cyan-700 sm:p-6">
       <div className="flex items-start justify-between gap-4">
@@ -99,7 +101,9 @@ function SpaceCard({ space }: { readonly space: SpaceRecord }) {
         >
           {space.identity.state === "PENDING"
             ? "Deployment pending"
-            : space.identity.state}
+            : space.identity.state === "REACTIVATION_REQUIRED"
+              ? "Reactivate trading"
+              : space.identity.state}
         </span>
         <Link
           to={spaceUrl(space.identity.id)}
