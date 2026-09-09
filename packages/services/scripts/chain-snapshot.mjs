@@ -5,7 +5,12 @@ import {
   computePortfolioPriceSnapshotHash,
   computeSettlementPriceSnapshotHash,
 } from "@aurka/shared";
-import { hashBytes, hashCanonical, hashAquaBalances } from "../dist/index.js";
+import {
+  ServiceError,
+  hashBytes,
+  hashCanonical,
+  hashAquaBalances,
+} from "../dist/index.js";
 export const CHAIN_ID = 31337;
 export const POSITION_ID = "position:local-settlement-e2e";
 export const POLICY_ID = hashBytes("policy:local-settlement-e2e");
@@ -85,14 +90,14 @@ export class LocalChainSnapshotProvider {
   async getPositionSnapshot(positionId) {
     const snapshot = await this.currentSnapshot();
     if (positionId !== snapshot.positionId)
-      throw new Error("Unknown local position");
+      throw new ServiceError("INVALID_SNAPSHOT", "Unknown local position");
     return snapshot;
   }
 
   async prepareIntent(input) {
     const snapshot = await this.currentSnapshot();
     if (input.positionId !== snapshot.positionId)
-      throw new Error("Unknown local position");
+      throw new ServiceError("INVALID_SNAPSHOT", "Unknown local position");
     const intent = {
       intentId: hashBytes(JSON.stringify(input)),
       policyId: snapshot.policyId,
@@ -119,31 +124,34 @@ export class LocalChainSnapshotProvider {
   async getSnapshot(intent) {
     const snapshot = await this.currentSnapshot();
     if (intent.policyId.toLowerCase() !== snapshot.policyId.toLowerCase())
-      throw new Error("Unknown policy");
+      throw new ServiceError("INVALID_SNAPSHOT", "Unknown policy");
     if (intent.positionIdHash.toLowerCase() !== POSITION_ID_HASH.toLowerCase())
-      throw new Error("Unknown position");
+      throw new ServiceError("INVALID_SNAPSHOT", "Unknown position");
     if (
       intent.aquaStrategyHash.toLowerCase() !==
       snapshot.aquaStrategyHash.toLowerCase()
     )
-      throw new Error("Unauthorized Aqua strategy");
+      throw new ServiceError("INVALID_SNAPSHOT", "Unauthorized Aqua strategy");
     if (
       intent.traderInputToken.toLowerCase() !==
         snapshot.capacityEpoch.traderInputToken.toLowerCase() ||
       intent.traderOutputToken.toLowerCase() !==
         snapshot.capacityEpoch.traderOutputToken.toLowerCase()
     )
-      throw new Error("Unsupported local settlement direction");
+      throw new ServiceError(
+        "INVALID_SNAPSHOT",
+        "Unsupported local settlement direction",
+      );
     if (
       intent.balanceSnapshot.toLowerCase() !==
       snapshot.balancesHash.toLowerCase()
     )
-      throw new Error("Balance snapshot is stale");
+      throw new ServiceError("INVALID_SNAPSHOT", "Balance snapshot is stale");
     if (
       intent.priceSnapshot.toLowerCase() !==
       computeSettlementPriceSnapshotHash(snapshot.priceProtection).toLowerCase()
     )
-      throw new Error("Price snapshot is stale");
+      throw new ServiceError("INVALID_SNAPSHOT", "Price snapshot is stale");
     return snapshot;
   }
 
@@ -350,7 +358,7 @@ export function positionForSnapshot(snapshot, registry, treasury) {
       chainId: snapshot.chainId,
       registry,
       treasury,
-      governance: treasury,
+      governance: snapshot.chainPolicy.governance,
       assets: snapshot.portfolio.assets.map((asset) => ({
         token: asset.token,
         symbol: asset.symbol ?? "ASSET",

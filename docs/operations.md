@@ -1,7 +1,7 @@
 # AURKA Phase 5 operations
 
-Local startup requires no RPC URL, wallet, database credential, or production
-secret:
+Local startup requires Node 23.3.0, but no RPC URL, wallet, database credential,
+or production secret:
 
 ```bash
 docker compose -f docker-compose.services.yml up --build
@@ -49,12 +49,12 @@ healthy registry check and does not by itself make infrastructure unready. A
 fixture service is ready only for its local database-backed capabilities and is
 not a production-readiness claim.
 
-Both Vite applications proxy `/api` to `http://127.0.0.1:8787` and remove the
-prefix. Start them with `pnpm --filter @aurka/treasury-app dev` (3001) and
-`pnpm --filter @aurka/trader-app dev` (3002). Production static hosting needs an
-equivalent reverse proxy; Vite's development proxy is not bundled in its output.
-The optional server-only worker module and its trust requirements are described
-in [risk-watchtower.md](./risk-watchtower.md).
+The canonical Vite application proxies `/api` to `http://127.0.0.1:8787` and
+removes the prefix. Start it with `pnpm --filter @aurka/trader-app dev` (3002).
+Production static hosting needs an equivalent reverse proxy; Vite's development
+proxy is not bundled in its output. The optional server-only worker module and
+its trust requirements are described in
+[risk-watchtower.md](./risk-watchtower.md).
 
 The no-RPC CLI uses current-time local demo snapshots that expire after 60
 seconds; request a fresh quote after expiry or restart. Its cache is bounded at
@@ -78,9 +78,9 @@ preparation, quote/solve/unsigned execution, onchain settlement events,
 replay-safe projections, and rejection cases. The Graph check starts pinned
 local Graph Node/Postgres/IPFS containers and verifies persisted event entities,
 consumer queries, finality/lag handling, pagination, and reorg replacement. The
-browser check starts the service and both Vite applications itself, then covers
-desktop/mobile routes, navigation, a real quote/solve/external-signature flow,
-unavailable effective risk state, visible errors, and overflow/page-error
+browser check starts the service and the canonical Vite application itself, then
+covers desktop/mobile routes, navigation, a real quote/solve/external-signature
+flow, unavailable effective risk state, visible errors, and overflow/page-error
 checks. It uses the public local test key only; it never broadcasts from the
 browser. Each runner owns its processes and temporary database, and the Graph CI
 job additionally removes resources by its unique Compose project label.

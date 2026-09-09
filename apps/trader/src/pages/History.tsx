@@ -6,6 +6,7 @@ import {
   type ActivityItem,
   type Execution,
 } from "@aurka/shared";
+import { apiBaseUrl } from "../config";
 
 const STATUS_LABELS: Record<ActivityItem["status"], string> = {
   PREPARED: "Prepared · unsigned, not submitted",
@@ -138,7 +139,7 @@ export default function History() {
     let active = true;
     setLoading(true);
     setActivityError(null);
-    new AurkaClient({ baseUrl: "/api" })
+    new AurkaClient({ baseUrl: apiBaseUrl })
       .listActivity({ limit: 20, cursor })
       .then((page) => {
         if (!active) return;
@@ -165,7 +166,7 @@ export default function History() {
     setExecution(null);
     try {
       setExecution(
-        await new AurkaClient({ baseUrl: "/api" }).getExecution(hash),
+        await new AurkaClient({ baseUrl: apiBaseUrl }).getExecution(hash),
       );
     } catch (error) {
       setLookupError(error instanceof Error ? error.message : "Lookup failed");
@@ -210,7 +211,7 @@ export default function History() {
             after a canonical settlement is indexed.
           </p>
           <Link
-            to="/swap"
+            to="/trade"
             className="mt-5 inline-flex rounded-lg bg-cyan-600 px-4 py-3 font-medium text-white hover:bg-cyan-500"
           >
             Try a swap

@@ -7,10 +7,10 @@
   "type": "module",
   "packageManager": "pnpm@10.13.1",
   "engines": {
-    "node": ">=22"
+    "node": ">=23.3.0 <24"
   },
   "scripts": {
-    "build": "pnpm -r --if-present build",
+    "build": "pnpm --filter @aurka/trader-app... --filter @aurka/services... --filter @aurka/graph... --filter @aurka/wallet... --filter @aurka/watchtower... build",
     "clean": "pnpm -r --if-present clean",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
@@ -22,7 +22,9 @@
     "typecheck": "pnpm -r --if-present typecheck",
     "fork:start": "pnpm build && forge build && node --env-file=.env packages/services/scripts/fork-space.mjs",
     "fork:reset": "pnpm build && forge build && node --env-file=.env packages/services/scripts/fork-space.mjs --reset",
-    "integration:fork-wallet": "node packages/services/scripts/fork-wallet-e2e.mjs"
+    "integration:fork-wallet": "node packages/services/scripts/fork-wallet-e2e.mjs",
+    "app:dev": "pnpm --filter @aurka/trader-app dev --host 127.0.0.1 --strictPort",
+    "app:preview": "pnpm --filter @aurka/trader-app preview --host 127.0.0.1 --strictPort"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",

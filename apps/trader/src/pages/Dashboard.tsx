@@ -8,7 +8,6 @@ import {
   WalletCards,
 } from "lucide-react";
 import Glossary from "../components/Glossary";
-import { appLinks } from "../config";
 
 export default function Dashboard() {
   return (
@@ -63,8 +62,8 @@ export default function Dashboard() {
           />
         </div>
         <div className="grid gap-4 md:grid-cols-2">
-          <a
-            href={appLinks.treasury}
+          <Link
+            to="/spaces"
             className="group rounded-2xl border border-slate-700 bg-slate-900 p-5 transition hover:-translate-y-0.5 hover:border-cyan-700 hover:bg-slate-800 sm:p-6"
           >
             <div className="flex items-start justify-between gap-4">
@@ -81,9 +80,9 @@ export default function Dashboard() {
               See whose example assets are shown, which holdings are available,
               and the rules that shape a permitted swap.
             </p>
-          </a>
+          </Link>
           <Link
-            to="/swap"
+            to="/trade"
             className="group rounded-2xl border border-cyan-700 bg-cyan-950/50 p-5 transition hover:-translate-y-0.5 hover:border-cyan-400 hover:bg-cyan-950 sm:p-6"
           >
             <div className="flex items-start justify-between gap-4">

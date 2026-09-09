@@ -13,4 +13,5 @@ export * from "./quote.js";
 export * from "./risk.js";
 export * from "./router.js";
 export * from "./settlement.js";
+export * from "./space.js";
 export * from "./trading.js";

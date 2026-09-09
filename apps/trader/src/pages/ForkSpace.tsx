@@ -6,12 +6,9 @@ import {
   type Position,
   type AtomicSettlementIntent,
 } from "@aurka/shared";
+import { apiBaseUrl } from "../config";
+import { useWallet } from "../wallet";
 
-interface Provider {
-  request(input: { method: string; params?: unknown[] }): Promise<unknown>;
-  on?(event: string, listener: () => void): void;
-  removeListener?(event: string, listener: () => void): void;
-}
 interface Transaction {
   to: string;
   data: string;
@@ -35,7 +32,8 @@ interface ForkState {
   balances: Record<string, { usdc: string; weth: string }>;
   capacity: { authorized: boolean; baseline: string; consumed: string };
 }
-const client = new AurkaClient({ baseUrl: "/api" });
+const client = new AurkaClient({ baseUrl: apiBaseUrl });
+const apiPath = (path: string) => `${apiBaseUrl.replace(/\/$/, "")}${path}`;
 const button =
   "rounded-lg bg-cyan-700 px-4 py-3 text-white disabled:opacity-40";
 const inputStyle = "w-full rounded-lg border border-slate-600 bg-slate-900 p-3";
@@ -74,23 +72,23 @@ async function getJson<T>(url: string): Promise<T> {
     );
   return body;
 }
-function walletProvider(): Provider {
-  const provider = (window as unknown as { ethereum?: Provider }).ethereum;
-  if (!provider)
-    throw new Error(
-      "Open this page with an Ethereum browser wallet installed.",
-    );
-  return provider;
-}
 const hex = (value: bigint) => `0x${value.toString(16)}`;
 const addressWord = (address: string) => address.slice(2).padStart(64, "0");
 const amountWord = (amount: bigint) => amount.toString(16).padStart(64, "0");
 const message = (error: unknown) =>
   error instanceof Error ? error.message : "Wallet request failed";
 
-export default function ForkSpace({ owner = false }: { owner?: boolean }) {
+export default function ForkSpace({
+  owner = false,
+  spaceId,
+  embedded = false,
+}: {
+  readonly owner?: boolean;
+  readonly spaceId?: string;
+  readonly embedded?: boolean;
+}) {
+  const wallet = useWallet();
   const [state, setState] = useState<ForkState>();
-  const [account, setAccount] = useState("");
   const [amount, setAmount] = useState("2");
   const [limit, setLimit] = useState("5000");
   const [error, setError] = useState("");
@@ -111,9 +109,11 @@ export default function ForkSpace({ owner = false }: { owner?: boolean }) {
   const [reviewed, setReviewed] = useState(false);
   const [now, setNow] = useState(Math.floor(Date.now() / 1000));
   const generation = useRef(0);
-  const currentAccount = useRef("");
+  const account = wallet.address ?? "";
   async function refresh() {
-    const next = await getJson<ForkState>("/api/fork");
+    const next = await getJson<ForkState>(apiPath("/fork"));
+    if (spaceId && next.position.id !== spaceId)
+      throw new Error("This Space is not available in the current fork.");
     setState(next);
     return next;
   }
@@ -125,10 +125,16 @@ export default function ForkSpace({ owner = false }: { owner?: boolean }) {
   }
   useEffect(() => {
     let active = true;
+    setError("");
     const tick = async () => {
       try {
-        const next = await getJson<ForkState>("/api/fork");
+        const next = await getJson<ForkState>(apiPath("/fork"));
         if (active) {
+          if (spaceId && next.position.id !== spaceId) {
+            setState(undefined);
+            setError("This Space is not available in the current fork.");
+            return;
+          }
           setState(next);
           setNow(Math.floor(Date.now() / 1000));
         }
@@ -141,28 +147,24 @@ export default function ForkSpace({ owner = false }: { owner?: boolean }) {
     };
     void tick();
     const timer = window.setInterval(() => void tick(), 2000);
-    const changed = () => {
-      invalidate();
-      currentAccount.current = "";
-      setAccount("");
-      setStatus(
-        "Account or network changed. Reconnect and request a new quote.",
-      );
-    };
-    const provider = (window as unknown as { ethereum?: Provider }).ethereum;
-    provider?.on?.("accountsChanged", changed);
-    provider?.on?.("chainChanged", changed);
     return () => {
       active = false;
       window.clearInterval(timer);
-      provider?.removeListener?.("accountsChanged", changed);
-      provider?.removeListener?.("chainChanged", changed);
     };
-  }, []);
+  }, [spaceId]);
+  useEffect(() => {
+    invalidate();
+    if (wallet.status === "connected") setStatus("Wallet connected");
+    else if (wallet.status === "wrong-network")
+      setStatus("Switch to AURKA fork in the wallet before continuing.");
+    else if (wallet.status === "error")
+      setStatus(wallet.error ?? "Wallet connection failed");
+    else setStatus("Connect your wallet from the header when ready");
+  }, [wallet.error, wallet.revision, wallet.status]);
   const stale =
     !!quote &&
     (!state ||
-      quote.quote.expiresAt <= now ||
+      quote.quote.expiresAt <= Math.max(now, state.timestamp) ||
       state.position.policy.paused ||
       quote.quote.policyNonce !== state.position.policy.nonce ||
       quote.quote.currentPortfolio.assets.some(
@@ -173,7 +175,8 @@ export default function ForkSpace({ owner = false }: { owner?: boolean }) {
       ));
   async function validateWallet(expected: string) {
     if (!state) throw new Error("Fork state unavailable");
-    const provider = walletProvider();
+    const provider = wallet.provider;
+    if (!provider) throw new Error("Connect an Ethereum wallet first.");
     const chainId = await provider.request({ method: "eth_chainId" });
     const accounts = (await provider.request({
       method: "eth_accounts",
@@ -183,18 +186,6 @@ export default function ForkSpace({ owner = false }: { owner?: boolean }) {
     if (!accounts[0] || accounts[0].toLowerCase() !== expected.toLowerCase())
       throw new Error("Wallet account changed. Reconnect before continuing.");
     return provider;
-  }
-  async function connect() {
-    const provider = walletProvider();
-    const accounts = (await provider.request({
-      method: "eth_requestAccounts",
-    })) as string[];
-    if (!accounts[0]) throw new Error("No wallet account selected");
-    await validateWallet(accounts[0]);
-    invalidate();
-    currentAccount.current = accounts[0];
-    setAccount(accounts[0]);
-    setStatus("Wallet connected");
   }
   async function receipt(transactionHash: string) {
     const started = Date.now();
@@ -233,6 +224,8 @@ export default function ForkSpace({ owner = false }: { owner?: boolean }) {
     label: string,
   ) {
     const provider = await validateWallet(expected);
+    setConfirmed(undefined);
+    setHash("");
     setStatus(`${label}: awaiting wallet approval`);
     const sent = (await provider.request({
       method: "eth_sendTransaction",
@@ -273,7 +266,9 @@ export default function ForkSpace({ owner = false }: { owner?: boolean }) {
       );
     invalidate();
     const transaction = await getJson<Transaction>(
-      `/api/fork/owner?action=${action}&value=${encodeURIComponent(limit)}`,
+      apiPath(
+        `/fork/owner?action=${action}&value=${encodeURIComponent(limit)}`,
+      ),
     );
     await send(transaction, account, action);
   }
@@ -286,12 +281,18 @@ export default function ForkSpace({ owner = false }: { owner?: boolean }) {
     setHash("");
     const latest = await refresh();
     const raw = parseTokenAmount(amount, 18);
-    const value = (raw * 3000n) / 10n ** 18n;
+    const inputAsset = latest.position.currentPortfolio?.assets.find(
+      (asset) => asset.token.toLowerCase() === latest.weth.toLowerCase(),
+    );
+    if (!inputAsset) throw new Error("Fork input price is unavailable");
+    const value =
+      (raw * BigInt(inputAsset.price)) /
+      10n ** BigInt(inputAsset.decimals + inputAsset.priceDecimals);
     if (value === 0n)
       throw new Error(
-        "Enter at least 1 reference unit of WETH (about 0.000334 WETH).",
+        "Enter at least 1 reference unit of WETH at the displayed snapshot price.",
       );
-    const intent = await client.prepareIntent({
+    let intent = await client.prepareIntent({
       positionId: latest.position.id,
       trader: account,
       traderInputToken: latest.weth,
@@ -301,6 +302,19 @@ export default function ForkSpace({ owner = false }: { owner?: boolean }) {
       nonce: Date.now().toString(),
       deadline: latest.timestamp + 300,
     });
+    const preview = await client.solve(intent);
+    // Bind wallet authorization to the reviewed net output, including partial fills.
+    intent = await client.prepareIntent({
+      positionId: latest.position.id,
+      trader: account,
+      traderInputToken: latest.weth,
+      traderOutputToken: latest.usdc,
+      requestedValue: intent.requestedValue,
+      minimumTraderOutputValue: preview.proposal.traderOutputValue,
+      nonce: intent.nonce,
+      deadline: intent.deadline,
+    });
+    await client.submitIntent(intent);
     const quoted = await client.quote(intent);
     const solved = await client.solve(intent);
     if (version !== generation.current)
@@ -388,32 +402,27 @@ export default function ForkSpace({ owner = false }: { owner?: boolean }) {
           prices are mocked.
         </p>
       </div>
-      <h1 className="text-3xl font-semibold text-white">
-        {owner ? "Team inventory" : "Swap WETH for USDC"}
-      </h1>
-      <nav className="flex gap-4">
-        <a className="text-cyan-300 underline" href="http://127.0.0.1:3001/">
-          Alice’s Space
-        </a>
-        <a
-          className="text-cyan-300 underline"
-          href="http://127.0.0.1:3002/swap"
-        >
-          Bob’s swap
-        </a>
-      </nav>
+      {!embedded && (
+        <h1 className="text-3xl font-semibold text-white">
+          {owner ? "Team inventory" : "Swap WETH for USDC"}
+        </h1>
+      )}
+      <p className="text-sm text-slate-400">
+        {owner
+          ? "Owner controls are available only to the configured treasury account."
+          : "Connect the counterparty wallet to review and submit this trade."}
+      </p>
       <div className="space-y-3 rounded-xl border border-slate-700 p-4">
-        <button
-          className={button}
-          disabled={busy || !state}
-          onClick={() => void run(connect)}
-        >
-          Connect wallet
-        </button>
-        <p className="text-sm break-all">{account || "No wallet connected"}</p>
         <p className="text-sm">
-          Wallet network: AURKA fork · RPC http://127.0.0.1:8545 · ETH
+          {account
+            ? `Connected: ${account.slice(0, 6)}…${account.slice(-4)}`
+            : "No wallet connected — use Connect wallet in the header"}
         </p>
+        <details className="text-sm text-slate-400">
+          <summary>Wallet and network details</summary>
+          <p className="mt-2 break-all">{account}</p>
+          <p>Wallet network: AURKA fork · RPC http://127.0.0.1:8545 · ETH</p>
+        </details>
       </div>
       {error && (
         <p
@@ -450,7 +459,10 @@ export default function ForkSpace({ owner = false }: { owner?: boolean }) {
             {owner && (
               <div className="mt-3 space-y-2">
                 <p className="break-all text-sm">
-                  Controlling account (treasury and governance): {state.alice}
+                  Treasury account: {state.position.policy.treasury}
+                </p>
+                <p className="break-all text-sm">
+                  Policy governance: {state.position.policy.governance}
                 </p>
                 <p>
                   Buys WETH with USDC. Maximum WETH allocation:{" "}
@@ -651,7 +663,7 @@ export default function ForkSpace({ owner = false }: { owner?: boolean }) {
               ))}
             </ul>
             <p className="mt-3">
-              The fixed reference price is 3000 USDC units per WETH. This is a
+              The fixed reference price is 3200 USDC units per WETH. This is a
               seeded mechanism demonstration, not a market quote. Amounts are
               rounded to whole reference units before sizing.
             </p>

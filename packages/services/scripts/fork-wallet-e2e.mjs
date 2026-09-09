@@ -40,6 +40,7 @@ const accounts = [0, 1].map((addressIndex) =>
   ),
 );
 const transactions = [];
+const appUrl = manifest.appUrl ?? "http://127.0.0.1:3011/spaces";
 const browser = await chromium.launch({ headless: true });
 async function pageFor(index, width) {
   const context = await browser.newContext({
@@ -51,6 +52,7 @@ async function pageFor(index, width) {
     transport: http(manifest.rpcUrl),
   });
   let rejectNext = false;
+  let walletChain = "0x7a69";
   await context.exposeBinding("walletRequest", async (_, request) => {
     if (request.method === "test_rejectNext") {
       rejectNext = true;
@@ -61,7 +63,11 @@ async function pageFor(index, width) {
       request.method === "eth_requestAccounts"
     )
       return [accounts[index].address];
-    if (request.method === "eth_chainId") return "0x7a69";
+    if (request.method === "test_wrongChain") {
+      walletChain = "0x1";
+      return null;
+    }
+    if (request.method === "eth_chainId") return walletChain;
     if (
       rejectNext &&
       ["eth_sendTransaction", "eth_signTypedData_v4"].includes(request.method)
@@ -119,29 +125,50 @@ async function pageFor(index, width) {
         (listeners[event] ?? []).forEach((listener) => listener()),
     };
   });
-  return context.newPage();
+  const page = await context.newPage();
+  page.on("response", async (response) => {
+    if (response.status() >= 400 && response.url().includes("/api/"))
+      console.log(`API failure: ${await response.text()}`);
+  });
+  return page;
 }
 async function click(page, label, expected) {
   console.log(`Wallet step: ${label}`);
   await page.getByRole("button", { name: label, exact: true }).click();
-  if (expected)
-    await page
-      .getByRole("status")
-      .filter({ hasText: expected })
-      .waitFor({ timeout: 60000 });
+  if (expected) {
+    try {
+      await page
+        .getByRole("status")
+        .filter({ hasText: expected })
+        .waitFor({ timeout: 45000 });
+    } catch (error) {
+      await page.screenshot({
+        path: path.join(output, "failure.png"),
+        fullPage: true,
+      });
+      throw new Error(`${label}: ${await page.locator("body").innerText()}`, {
+        cause: error,
+      });
+    }
+  }
 }
 async function state() {
-  return (await globalThis.fetch("http://127.0.0.1:8787/fork")).json();
+  return (await globalThis.fetch("http://127.0.0.1:8797/fork")).json();
 }
 try {
   const alice = await pageFor(0, 1280);
   const bob = await pageFor(1, 390);
-  await alice.goto("http://127.0.0.1:3001/");
-  await bob.goto("http://127.0.0.1:3002/swap");
+  const initial = await state();
+  const spaceId = encodeURIComponent(initial.position.id);
+  await alice.goto(
+    `${appUrl.replace(/\/spaces\/?$/, "")}/spaces/${spaceId}/settings`,
+  );
+  await bob.goto(`${appUrl.replace(/\/spaces\/?$/, "")}/trade/${spaceId}`);
   await click(alice, "Connect wallet", "Wallet connected");
   await click(bob, "Connect wallet", "Wallet connected");
   await click(alice, "Grant USDC allowance", "allowance: confirmed");
-  await click(alice, "Authorize trading capacity", "authorize: confirmed");
+  if (!(await state()).capacity.authorized)
+    await click(alice, "Authorize trading capacity", "authorize: confirmed");
   const before = await state();
   await click(bob, "Get quote", "Quote ready");
   await bob.getByText("Partial fill:", { exact: false }).waitFor();
@@ -192,34 +219,90 @@ try {
     ),
   );
   await click(alice, "Connect wallet", "Wallet connected");
-  await click(alice, "Pause trading", "pause: confirmed");
   await click(bob, "Connect wallet", "Wallet connected");
+  await alice.getByRole("textbox").fill("1000");
+  await click(alice, "Save transaction limit", "limit: confirmed");
+  await click(alice, "Authorize trading capacity", "authorize: confirmed");
+  async function prepareFresh() {
+    await click(bob, "Get quote", "Quote ready");
+    await bob.getByRole("checkbox").check();
+    const response = bob.waitForResponse(
+      (response) =>
+        response.url().endsWith("/v1/execute") && response.status() === 202,
+    );
+    await click(bob, "Approve and sign", "Prepared");
+    return (await (await response).json()).data.transactionRequest;
+  }
+  async function assertRevert(transaction, label) {
+    let rejected = false;
+    try {
+      await publicClient.call({
+        account: manifest.bob,
+        to: transaction.to,
+        data: transaction.data,
+        value: BigInt(transaction.value ?? 0),
+      });
+    } catch {
+      rejected = true;
+    }
+    assert(rejected, `${label} must fail at the contract boundary`);
+  }
+  const readyBeforePause = await prepareFresh();
+  await alice.getByRole("textbox").fill("500");
+  await click(alice, "Save transaction limit", "limit: confirmed");
+  await assertRevert(
+    readyBeforePause,
+    "previously signed fill above the lowered policy cap",
+  );
+  await click(alice, "Pause trading", "pause: confirmed");
+  await assertRevert(readyBeforePause, "fresh signed trade while paused");
+  await bob
+    .getByText("Quote expired or chain state changed. Get a new quote.")
+    .waitFor();
   await click(bob, "Get quote", "Failed or rejected");
   await bob.getByRole("alert").waitFor();
-  await bob.evaluate(() => window.ethereum.emit("chainChanged"));
+  await click(alice, "Resume trading", "resume: confirmed");
+  await click(alice, "Authorize trading capacity", "authorize: confirmed");
+  const readyBeforeExpiry = await prepareFresh();
+  await assertRevert(
+    {
+      ...readyBeforeExpiry,
+      data:
+        readyBeforeExpiry.data.slice(0, -2) +
+        (readyBeforeExpiry.data.endsWith("00") ? "01" : "00"),
+    },
+    "modified signed calldata",
+  );
+  await publicClient.request({ method: "evm_increaseTime", params: [400] });
+  await publicClient.request({ method: "evm_mine", params: [] });
+  await assertRevert(readyBeforeExpiry, "expired unused signed trade");
+  await bob
+    .getByText("Quote expired or chain state changed. Get a new quote.")
+    .waitFor();
+  assert.deepEqual(
+    (await state()).balances,
+    after.balances,
+    "Rejected calls changed token balances",
+  );
+  await bob.evaluate(() => window.ethereum.emit("accountsChanged"));
+  await bob
+    .getByRole("status")
+    .filter({ hasText: "Account or network changed" })
+    .waitFor();
+  await bob.evaluate(async () => {
+    await window.ethereum.request({ method: "test_wrongChain" });
+    window.ethereum.emit("chainChanged");
+  });
   await bob
     .getByRole("status")
     .filter({ hasText: "network changed" })
     .waitFor();
-  const trade = transactions
-    .filter(
-      (item) =>
-        item.to.toLowerCase() === manifest.router.toLowerCase() &&
-        item.role === "bob",
-    )
-    .at(-1);
-  const transaction = await publicClient.getTransaction({ hash: trade.hash });
-  let rejected = false;
-  try {
-    await publicClient.call({
-      account: manifest.bob,
-      to: transaction.to,
-      data: transaction.input,
-    });
-  } catch {
-    rejected = true;
-  }
-  assert(rejected, "Contract must reject replay/paused bypass");
+  await click(bob, "Connect wallet", "Failed or rejected");
+  await bob
+    .getByRole("alert")
+    .filter({ hasText: "Select AURKA fork network" })
+    .waitFor();
+  await click(alice, "Pause trading", "pause: confirmed");
   writeFileSync(
     path.join(output, "wallet-journey.json"),
     JSON.stringify(
@@ -240,8 +323,12 @@ try {
           "WETH reconciliation",
           "reload",
           "pause",
-          "network change invalidation",
-          "contract replay/paused rejection",
+          "account/network change invalidation and wrong-chain rejection",
+          "lowered hard cap rejects previously signed fill",
+          "unused signed paused trade rejected",
+          "unused signed expired trade rejected",
+          "modified signed calldata rejected",
+          "policy limit update and reauthorization",
           "390px overflow",
         ],
       },

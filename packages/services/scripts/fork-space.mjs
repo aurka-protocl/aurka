@@ -10,6 +10,7 @@ import {
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
 import path from "node:path";
+import net from "node:net";
 import {
   createPublicClient,
   createWalletClient,
@@ -21,6 +22,7 @@ import {
 import { mnemonicToAccount } from "viem/accounts";
 import {
   AurkaService,
+  ServiceError,
   ServiceDatabase,
   FixtureProposalSigner,
   JsonRpcHttpTransport,
@@ -55,6 +57,8 @@ import {
 const ROOT = path.resolve(new URL("../../..", import.meta.url).pathname);
 const DIR = path.join(ROOT, ".fork-space");
 const RPC = "http://127.0.0.1:8545";
+const API_PORT = 8797;
+const APP_PORT = 3011;
 const FORK_BLOCK = 22400000;
 const USDC = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
 const WETH = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
@@ -99,9 +103,32 @@ async function stop() {
   gateway?.close();
   api?.server.close();
   database?.close();
-  for (const child of children.reverse()) { if (child.spawnfile === "pnpm" && child.pid) { try { process.kill(-child.pid, "SIGTERM"); } catch { /* already stopped */ } } await stopProcess(child); }
+  for (const child of children.reverse()) {
+    if (child.spawnfile === "pnpm" && child.pid) {
+      try {
+        process.kill(-child.pid, "SIGTERM");
+      } catch {
+        /* already stopped */
+      }
+    }
+    await stopProcess(child);
+  }
 }
 async function main() {
+  for (const port of [8545, API_PORT, APP_PORT]) {
+    const probe = net.createServer();
+    await new Promise((resolve, reject) => {
+      probe.once("error", () =>
+        reject(
+          new Error(
+            `Fork port ${port} is occupied. Stop its owner or use a separate environment; existing services were not changed.`,
+          ),
+        ),
+      );
+      probe.listen(port, "127.0.0.1", resolve);
+    });
+    await new Promise((resolve) => probe.close(resolve));
+  }
   mkdirSync(DIR, { recursive: true, mode: 0o700 });
   const upstream = process.env.MAINNET_RPC_URL;
   if (!upstream)
@@ -128,7 +155,10 @@ async function main() {
   } catch (error) {
     if (error.message.startsWith("RPC port")) throw error;
   }
-  if (process.argv.includes("--reset")) { rmSync(DIR, { recursive: true, force: true }); mkdirSync(DIR, { recursive: true, mode: 0o700 }); }
+  if (process.argv.includes("--reset")) {
+    rmSync(DIR, { recursive: true, force: true });
+    mkdirSync(DIR, { recursive: true, mode: 0o700 });
+  }
   const stateFile = path.join(DIR, "anvil.json");
   const anvil = spawn(
     "anvil",
@@ -177,7 +207,13 @@ async function main() {
       "Anvil fork startup failed. Check archive RPC availability and local port 8545.",
     );
   const currentTime = Math.floor(Date.now() / 1000);
-  if (Number((await client.getBlock()).timestamp) < currentTime) { await client.request({ method: "evm_setNextBlockTimestamp", params: [currentTime] }); await client.request({ method: "evm_mine", params: [] }); }
+  if (Number((await client.getBlock()).timestamp) < currentTime) {
+    await client.request({
+      method: "evm_setNextBlockTimestamp",
+      params: [currentTime],
+    });
+    await client.request({ method: "evm_mine", params: [] });
+  }
   let manifest;
   const manifestFile = path.join(DIR, "manifest.json");
   if (existsSync(manifestFile)) {
@@ -250,7 +286,7 @@ async function main() {
     const block = await client.getBlock();
     for (const [token, price, byte] of [
       [USDC, 1n, "11"],
-      [WETH, 3000n, "22"],
+      [WETH, 3200n, "22"],
     ])
       await write(wallet, client, oracle, "setPrice", [
         token,
@@ -344,7 +380,7 @@ async function main() {
       deploymentBlock: Number((await client.getBlock()).number),
       mocks: [
         "MockAqua: unrestricted test virtual balances; not production Aqua",
-        "MockPriceOracle: fixed USDC=1 and WETH=3000 reference units; valid 24 hours",
+        "MockPriceOracle: fixed USDC=1 and WETH=3200 reference units; valid 24 hours",
         "FixtureProposalSigner: public test solver",
       ],
       funding:
@@ -352,6 +388,11 @@ async function main() {
     };
     writeFileSync(manifestFile, stringify(manifest));
   }
+  manifest.apiUrl = `http://127.0.0.1:${API_PORT}`;
+  delete manifest.ownerUrl;
+  delete manifest.traderUrl;
+  manifest.appUrl = `http://127.0.0.1:${APP_PORT}/spaces`;
+  writeFileSync(manifestFile, stringify(manifest));
   const contracts = Object.fromEntries(
     [
       ["policyRegistry", "AurkaPolicyRegistry"],
@@ -384,7 +425,10 @@ async function main() {
         remembered &&
         String(remembered.policyNonce) === snapshot.policyNonce
       ) {
-        snapshot.capacityEpoch = { ...remembered, consumedBefore: active.consumedValue };
+        snapshot.capacityEpoch = {
+          ...remembered,
+          consumedBefore: active.consumedValue,
+        };
         snapshot.capacityEpochId = active.capacityEpochId;
       }
       return snapshot;
@@ -392,15 +436,24 @@ async function main() {
     async getSnapshot(intent) {
       const snapshot = await super.getSnapshot(intent);
       if (snapshot.chainPolicy.paused)
-        throw new Error("Alice has paused trading.");
+        throw new ServiceError(
+          "POLICY_PAUSED",
+          "Alice has paused trading.",
+          409,
+        );
       const active = await read(client, contracts.router, "capacityState", [
         POSITION_ID_HASH,
         WETH,
         USDC,
       ]);
-      if (active.capacityEpochId !== snapshot.capacityEpochId || !epochs[active.capacityEpochId])
-        throw new Error(
+      if (
+        active.capacityEpochId !== snapshot.capacityEpochId ||
+        !epochs[active.capacityEpochId]
+      )
+        throw new ServiceError(
+          "AUTHORIZATION_REQUIRED",
           "Alice must authorize the current trading capacity from her wallet.",
+          409,
         );
       return snapshot;
     }
@@ -456,7 +509,14 @@ async function main() {
       const url = new URL(request.url, "http://localhost");
       if (request.method === "GET" && url.pathname === "/fork") {
         const snapshot = await refresh();
-        const active = await read(client, contracts.router, "capacityState", [
+        const atBlock = {
+          readContract: (request) =>
+            client.readContract({
+              ...request,
+              blockNumber: snapshot.snapshotBlock,
+            }),
+        };
+        const active = await read(atBlock, contracts.router, "capacityState", [
           POSITION_ID_HASH,
           WETH,
           USDC,
@@ -470,39 +530,46 @@ async function main() {
         ])
           balances[role] = {
             usdc: await read(
-              client,
+              atBlock,
               { address: USDC, abi: erc20Abi },
               "balanceOf",
               [account],
             ),
             weth: await read(
-              client,
+              atBlock,
               { address: WETH, abi: erc20Abi },
               "balanceOf",
               [account],
             ),
           };
+        const payload = stringify({
+          ...manifest,
+          solver: solver.address,
+          position: {
+            ...positionForSnapshot(
+              snapshot,
+              manifest.policyRegistry,
+              manifest.alice,
+            ),
+            name: manifest.name,
+          },
+          balances,
+          capacity: {
+            id: active.capacityEpochId,
+            baseline: active.capacityBaselineValue,
+            consumed: active.consumedValue,
+            authorized:
+              active.capacityEpochId === snapshot.capacityEpochId &&
+              !!epochs[active.capacityEpochId],
+          },
+          block: snapshot.snapshotBlock,
+          timestamp: snapshot.priceProtection.nowSeconds,
+        });
         response.writeHead(200, {
           "content-type": "application/json",
           "cache-control": "no-store",
         });
-        response.end(
-          stringify({
-            ...manifest,
-            solver: solver.address,
-            position: service.getPosition(snapshot.positionId),
-            balances,
-            capacity: {
-              id: active.capacityEpochId,
-              baseline: active.capacityBaselineValue,
-              consumed: active.consumedValue,
-              authorized:
-                active.capacityEpochId === snapshot.capacityEpochId && !!epochs[active.capacityEpochId],
-            },
-            block: snapshot.snapshotBlock,
-            timestamp: snapshot.priceProtection.nowSeconds,
-          }),
-        );
+        response.end(payload);
       } else if (request.method === "GET" && url.pathname === "/fork/owner") {
         const action = url.searchParams.get("action");
         let transaction;
@@ -590,18 +657,23 @@ async function main() {
         response.end(await result.text());
       }
     } catch (error) {
+      console.error(
+        "Fork request failed:",
+        error.shortMessage ?? error.message,
+      );
+      if (response.headersSent) {
+        response.destroy();
+        return;
+      }
       response.writeHead(409, { "content-type": "application/json" });
       response.end(stringify({ error: error.shortMessage ?? error.message }));
     }
   });
   await new Promise((resolve, reject) => {
     gateway.once("error", reject);
-    gateway.listen(8787, "127.0.0.1", resolve);
+    gateway.listen(API_PORT, "127.0.0.1", resolve);
   });
-  for (const [app, port] of [
-    ["treasury", 3001],
-    ["trader", 3002],
-  ]) {
+  for (const [app, port] of [["trader", APP_PORT]]) {
     const child = spawn(
       "pnpm",
       [
@@ -621,7 +693,7 @@ async function main() {
         env: {
           ...process.env,
           VITE_AURKA_MODE: "fork",
-          AURKA_SERVICE_URL: "http://127.0.0.1:8787",
+          AURKA_SERVICE_URL: `http://127.0.0.1:${API_PORT}`,
         },
       },
     );
@@ -632,7 +704,7 @@ async function main() {
     });
   }
   console.log(
-    "Fork ready: Alice http://127.0.0.1:3001 · Bob http://127.0.0.1:3002/swap · manifest .fork-space/manifest.json. Test funds; mocked Aqua and prices.",
+    "Fork ready: AURKA app http://127.0.0.1:3011/spaces · API http://127.0.0.1:8797 · manifest .fork-space/manifest.json. Test funds; mocked Aqua and prices.",
   );
 }
 process.once("SIGINT", () => void stop());

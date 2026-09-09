@@ -73,7 +73,7 @@ are intentionally absent until selected and approved.
 
 | Item                  | Current local value                                                                                                                                              |
 | --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Node / pnpm           | Fresh host checks used Node `23.3.0`; the pinned `.node-version` and Docker container use Node `22.14.0`; pnpm `10.13.1`                                         |
+| Node / pnpm           | Fresh host checks, CI, `.node-version`, and the Docker container use Node `23.3.0`; pnpm `10.13.1`                                                               |
 | Solidity / router ABI | Solidity `0.8.28`; router ABI version `AURKA-005`; `execute` selector `0xd93c3663`                                                                               |
 | Direct program        | `AURKA_DIRECT_PAIR_V1`; one deterministic direct pair only                                                                                                       |
 | Risk certificates     | `RiskCertificate` EIP-712 signature version `2`; domain name `AURKA RiskModeRegistry`; certificate type includes policy nonce and watchtower authorization epoch |

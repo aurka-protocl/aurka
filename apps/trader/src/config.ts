@@ -1,6 +1,7 @@
 type ClientEnvironment = {
-  readonly VITE_AURKA_TREASURY_URL?: string;
-  readonly VITE_AURKA_TRADER_URL?: string;
+  readonly VITE_AURKA_MODE?: string;
+  readonly VITE_AURKA_CHAIN_ID?: string;
+  readonly VITE_AURKA_API_URL?: string;
 };
 
 const environment = import.meta.env as ClientEnvironment;
@@ -10,27 +11,18 @@ function configuredUrl(value: string | undefined): string | undefined {
   return trimmed ? trimmed : undefined;
 }
 
-function localSiblingUrl(port: string): string {
-  if (typeof window === "undefined") return "/";
-  const url = new URL(window.location.href);
-  url.port = port;
-  url.pathname = "/";
-  url.search = "";
-  url.hash = "";
-  return url.toString();
-}
+export const appMode: "demo" | "fork" =
+  environment.VITE_AURKA_MODE === "fork" ? "fork" : "demo";
 
-/**
- * Cross-app links are environment-configurable. During Vite development they
- * follow the current host and the two documented local app ports. A hosted
- * deployment should provide the VITE_* URLs, or serve the apps below the
- * conventional /treasury and /trader paths.
- */
-export const appLinks = {
-  treasury:
-    configuredUrl(environment.VITE_AURKA_TREASURY_URL) ??
-    (import.meta.env.DEV ? localSiblingUrl("3001") : "/treasury/"),
-  trader:
-    configuredUrl(environment.VITE_AURKA_TRADER_URL) ??
-    (import.meta.env.DEV ? localSiblingUrl("3002") : "/trader/"),
-} as const;
+const configuredChainId = Number(environment.VITE_AURKA_CHAIN_ID ?? "31337");
+
+/** The browser app has one deployment; the API may still run as a separate process. */
+export const apiBaseUrl =
+  configuredUrl(environment.VITE_AURKA_API_URL) ?? "/api";
+
+export const supportedChainId =
+  Number.isSafeInteger(configuredChainId) && configuredChainId > 0
+    ? configuredChainId
+    : 31337;
+
+export const environmentLabel = appMode === "fork" ? "Fork demo" : "Local demo";

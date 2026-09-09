@@ -17,7 +17,7 @@ phases.
 
 ## Requirements
 
-- Node.js 22 or newer
+- Node.js 23.3.0 (see `.node-version`)
 - pnpm 10.13.1
 
 ## Development
@@ -62,10 +62,12 @@ used with production funds.
 ## SDK and local applications
 
 Run `pnpm install --frozen-lockfile` and `pnpm build` at the repository root.
-Start the API with `pnpm --filter @aurka/services start` (port 8787), then
-`pnpm --filter @aurka/treasury-app dev` (3001) or
-`pnpm --filter @aurka/trader-app dev` (3002). The development proxies forward
-`/api` to the API with that prefix removed.
+Start the API with `pnpm --filter @aurka/services start` (port 8787), then the
+canonical app with `pnpm --filter @aurka/trader-app dev` (port 3002). The app's
+development proxy forwards `/api` to the API with that prefix removed. It
+exposes Spaces, Trade, and Activity from one frontend origin; the former
+treasury package is retained as historical source while its product surfaces are
+served by the canonical app.
 
 The trader can prepare an intent, quote, solve, and request unsigned execution
 calldata after supplying an external trader signature. It does not broadcast.

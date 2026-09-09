@@ -1,4 +1,4 @@
-FROM node:22.14.0-bookworm-slim
+FROM node:23.3.0-bookworm-slim
 
 WORKDIR /app
 RUN corepack enable && corepack prepare pnpm@10.13.1 --activate

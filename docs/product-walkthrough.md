@@ -1,8 +1,8 @@
 # AURKA product walkthrough and manual test guide
 
-This guide is for the local AURKA demo. It explains the complete trader and
-treasury journey in plain language, gives a short hackathon script, and records
-the boundary between a quote/preparation and an actual settlement.
+This guide is for the local AURKA demo. It explains the complete Space and trade
+journey in plain language, gives a short hackathon script, and records the
+boundary between a quote/preparation and an actual settlement.
 
 ## What the demo means
 
@@ -25,7 +25,7 @@ illustration and must not be presented as an active risk-registry update.
 
 ## Start, refresh, and reset
 
-Prerequisites: Node.js 22 or newer and pnpm 10.13.1.
+Prerequisites: Node.js 23.3.0 (the version in `.node-version`) and pnpm 10.13.1.
 
 Install and build once from the repository root:
 
@@ -34,18 +34,16 @@ pnpm install --frozen-lockfile
 pnpm build
 ```
 
-Start the API and both apps in separate terminals:
+Start the API and canonical app in separate terminals:
 
 ```bash
 pnpm --filter @aurka/services start
-pnpm --filter @aurka/treasury-app dev
 pnpm --filter @aurka/trader-app dev
 ```
 
 Open:
 
-- Treasury: <http://127.0.0.1:3001/>
-- Trader: <http://127.0.0.1:3002/>
+- Canonical AURKA app: <http://127.0.0.1:3002/spaces>
 - API health: <http://127.0.0.1:8787/health>
 
 The default service uses its configured local database. For an isolated manual
@@ -56,29 +54,32 @@ MANUAL_DB_DIR="$(mktemp -d)"
 DATABASE_URL="$MANUAL_DB_DIR/service.sqlite" pnpm --filter @aurka/services start
 ```
 
-The Vite apps proxy `/api` to port 8787. If the API uses another port, export
-`AURKA_SERVICE_URL` before starting each app. Cross-app links can be set with
-`VITE_AURKA_TREASURY_URL` and `VITE_AURKA_TRADER_URL`.
+The canonical Vite app proxies `/api` to port 8787. If the API uses another
+port, export `AURKA_SERVICE_URL` before starting the app. There is no second
+frontend origin or role switch.
 
 Stop the three processes with `Ctrl-C`. To reset a manual run, stop the API and
 start it with a new explicitly named temporary database directory. Remove only
 that temporary directory after confirming its path; never remove a repository or
 broad system directory. Ordinary browser refreshes and direct links such as
-`/holdings`, `/protections`, `/swap`, and `/activity` are supported.
+`/spaces`, `/spaces/:spaceId`, `/spaces/:spaceId/holdings`,
+`/spaces/:spaceId/settings`, `/trade/:spaceId`, and `/activity` are the
+canonical routes. Older `/holdings`, `/protections`, and `/swap` links remain
+redirecting aliases.
 
 ## Measured end-to-end walkthrough
 
 The following values are from the local fixture and are the values asserted by
 the browser smoke test. They are not invented presentation examples.
 
-1. **Open the demo.** Start at the treasury or trader home page. The page says
-   what AURKA does, identifies this as a local demo, and offers the next action
-   without requiring a wallet, account, protocol knowledge, or an API call.
+1. **Open the demo.** Start at `/spaces`. The page says what AURKA does,
+   identifies this as a local demo, and offers the next action without requiring
+   a wallet, account, protocol knowledge, or an API call.
 
-2. **Understand who supplies liquidity.** In Treasury, open **Holdings &
-   rules**. The selected source is **Canonical local treasury**, described as an
-   organization-owned local example. The current portfolio is `1,000,000` value
-   units with scale `0`:
+2. **Understand who supplies liquidity.** Open the configured Space and choose
+   **Holdings & rules**. The selected source is **Canonical local treasury**,
+   described as an organization-owned local example. The current portfolio is
+   `1,000,000` value units with scale `0`:
 
    | Asset | Balance/value shown by the fixture | Allocation |
    | ----- | ---------------------------------: | ---------: |
@@ -92,17 +93,14 @@ the browser smoke test. They are not invented presentation examples.
    the current safe maximum is also `50,000`; capacity is directional, not the
    treasury's total liquidity.
 
-3. **Explain protections.** Open **Protections**. Describe the hard policy as a
-   portfolio boundary: the solver cannot propose a trade whose expected result
+3. **Explain the boundary.** Open **Settings** for the Space. The hard policy is
+   a portfolio boundary: the solver cannot propose a trade whose expected result
    violates the configured ranges or cap. It is not a guarantee against market
-   losses. Explain that effective risk authority is unavailable in this fixture.
-   If demonstrating the simulated liquidity-drop control, show its before/after
-   illustration, point out the explicit simulated label, then reset the
-   illustration. Do not call it a live registry change.
+   losses. Settings and environment details are read-only in the demo.
 
-4. **Request a swap.** Follow **Preview a trade** or open Trader → **Swap**. The
-   guided form starts with WETH → USDC and requested amount `200,000`. Select
-   the named treasury if needed, then choose **Get quote**. The review says:
+4. **Request a trade.** Follow **Trade this Space** or open `/trade/:spaceId`.
+   The guided form starts with WETH → USDC and requested amount `200,000`.
+   Choose **Get quote**. The review says:
 
    - requested: `200,000 WETH`;
    - executable: `50,000 WETH`;
@@ -192,11 +190,11 @@ browser viewports. Record any failure using the issue template below.
 
 | Scenario         | Action                                                 | Expected result                                                                                                   |
 | ---------------- | ------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------- |
-| Entry            | Open Treasury and Trader home pages                    | Purpose, demo status, and next actions are understandable without an account.                                     |
-| Holdings         | Open `/holdings` and select the named source           | Source identity, balances, allocations, rules, cap, and directional capacity are visible and labeled.             |
-| Rules            | Open `/protections`                                    | Hard rules are explained; effective risk is explicitly unavailable; simulation is visibly separate.               |
+| Entry            | Open `/spaces`                                         | Purpose, demo status, and next actions are understandable without an account.                                     |
+| Holdings         | Open `/spaces/:spaceId/holdings`                       | Source identity, balances, allocations, rules, cap, and directional capacity are visible and labeled.             |
+| Rules            | Open `/spaces/:spaceId/settings`                       | Space identity and authority are visible; demo settings are accurately read-only.                                 |
 | Quote            | Request the default WETH → USDC swap                   | Requested, executable, receive, fee, binding rule, partial remainder, and expected portfolio values are readable. |
-| Source           | Change the treasury configuration                      | The selected source name and source-backed values update; no unexplained source is implied.                       |
+| Space            | Select a different Space                               | The selected Space name and source-backed values update; no unexplained source is implied.                        |
 | Changed input    | Edit the amount after a quote                          | The old review is removed and a new quote is required.                                                            |
 | Refresh          | Click Refresh quote                                    | The old confirmation is cleared and preparation stays disabled until re-accepted.                                 |
 | Duplicate click  | Prepare the same accepted quote twice                  | The request is idempotent and activity does not duplicate the preparation.                                        |
@@ -204,7 +202,7 @@ browser viewports. Record any failure using the issue template below.
 | Expiry           | Wait for or simulate quote expiry, then try to prepare | Preparation is rejected/disabled and the user is directed to request a fresh quote.                               |
 | Activity         | Open activity before and after preparation             | Empty activity has a useful next step; prepared activity is not called confirmed; no fee revenue is claimed.      |
 | Status/error     | Stop the API, then open holdings, swap, and status     | The explanation and recovery action remain visible; errors are announced; unavailable data is not fabricated.     |
-| Navigation       | Refresh and open deep links directly                   | `/holdings`, `/protections`, `/swap`, and `/activity` load without relying on prior navigation.                   |
+| Navigation       | Refresh and open deep links directly                   | Canonical Space, Trade, and Activity routes load without relying on prior navigation.                             |
 | Layout           | Resize to all three widths                             | No page-level horizontal overflow; amounts and table/card content remain readable.                                |
 | Touch            | Inspect primary controls at 390px and 320px            | Interactive targets are at least 36px in both dimensions and have visible labels.                                 |
 | Keyboard         | Tab through navigation, forms, checkbox, and buttons   | Order is logical, controls are reachable, headings are semantic, and focused controls have a visible outline.     |
@@ -233,13 +231,14 @@ From the repository root, run:
 pnpm integration:browser-smoke
 ```
 
-This command builds the workspace, starts the actual local service and both Vite
-apps, uses a disposable database, drives the browser at 1280/390/320px, checks
-API-backed values and state transitions, and cleans up its owned processes and
-database. It covers the flow above plus quote/solve, external signature,
-unsigned execution preparation, API failure, service reset, and browser
-page-error detection. For retained diagnostics, set `AURKA_ARTIFACT_DIR` to an
-explicitly created directory before running the runner.
+This command builds the workspace, starts the actual local service and the
+canonical Vite app, uses a disposable database, drives the browser at
+1280/390/320px, checks API-backed values and state transitions, and cleans up
+its owned processes and database. It covers canonical deep links, Back/Forward,
+Space-scoped quote/solve, mobile menu behavior, unknown-Space handling, API
+proxy JSON, and browser page-error detection. For retained diagnostics, set
+`AURKA_ARTIFACT_DIR` to an explicitly created directory before running the
+runner.
 
 Automation demonstrates reproducibility and data boundaries. It is not human
 comprehension evidence.

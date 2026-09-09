@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Activity, CheckCircle2, CircleHelp, XCircle } from "lucide-react";
 import { AurkaClient } from "@aurka/sdk";
+import { apiBaseUrl } from "../config";
 
 export default function Status() {
   const [health, setHealth] = useState<Awaited<
@@ -13,7 +14,7 @@ export default function Status() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const client = new AurkaClient({ baseUrl: "/api" });
+    const client = new AurkaClient({ baseUrl: apiBaseUrl });
     Promise.all([client.health(), client.readiness()])
       .then(([healthData, readinessData]) => {
         setHealth(healthData);

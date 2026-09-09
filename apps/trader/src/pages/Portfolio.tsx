@@ -8,6 +8,7 @@ import {
   snapshotFreshness,
   type Position,
 } from "@aurka/shared";
+import { apiBaseUrl } from "../config";
 
 export default function Portfolio() {
   const [positions, setPositions] = useState<Position[]>([]);
@@ -21,7 +22,7 @@ export default function Portfolio() {
     let active = true;
     setLoading(true);
     setError(null);
-    const client = new AurkaClient({ baseUrl: "/api" });
+    const client = new AurkaClient({ baseUrl: apiBaseUrl });
     client
       .listPositions(20, cursor)
       .then((response) => {

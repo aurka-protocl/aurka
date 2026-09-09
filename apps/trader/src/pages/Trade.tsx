@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useParams } from "react-router-dom";
 import { AurkaClient } from "@aurka/sdk";
 import {
   bindingConstraintLabel,
@@ -19,9 +19,12 @@ import {
   type Quote,
 } from "@aurka/shared";
 import { CircleHelp, ShieldCheck } from "lucide-react";
-import { appLinks } from "../config";
+import { apiBaseUrl, appMode } from "../config";
+import { useWallet } from "../wallet";
+import ForkSpace from "./ForkSpace";
+import { SpaceTradeRedirect } from "./Space";
 
-const client = new AurkaClient({ baseUrl: "/api" });
+const client = new AurkaClient({ baseUrl: apiBaseUrl });
 const DEMO_TRADER = "0x4444444444444444444444444444444444444444";
 const emptyForm = {
   positionId: "",
@@ -35,6 +38,14 @@ const emptyForm = {
 
 interface TradeProps {
   readonly advanced?: boolean;
+}
+
+function decodeRouteId(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
 }
 
 interface SwapPair {
@@ -83,10 +94,18 @@ function constraintExplanation(constraint: string): string {
 }
 
 export default function Trade({ advanced = false }: TradeProps) {
-  return advanced ? <AdvancedTrade /> : <GuidedSwap />;
+  const { spaceId } = useParams<{ spaceId: string }>();
+  if (appMode === "fork")
+    return spaceId ? (
+      <ForkSpace spaceId={decodeRouteId(spaceId)} />
+    ) : (
+      <SpaceTradeRedirect />
+    );
+  return advanced ? <AdvancedTrade /> : <GuidedSwap spaceId={spaceId} />;
 }
 
-function GuidedSwap() {
+function GuidedSwap({ spaceId }: { readonly spaceId?: string }) {
+  const wallet = useWallet();
   const [positions, setPositions] = useState<Position[]>([]);
   const [selectedPositionId, setSelectedPositionId] = useState("");
   const [sourceLoading, setSourceLoading] = useState(true);
@@ -117,9 +136,13 @@ function GuidedSwap() {
         if (!active) return;
         setPositions(response.items);
         setSelectedPositionId((current) =>
-          response.items.some((position) => position.id === current)
-            ? current
-            : (response.items[0]?.id ?? ""),
+          spaceId
+            ? response.items.some((position) => position.id === spaceId)
+              ? spaceId
+              : ""
+            : response.items.some((position) => position.id === current)
+              ? current
+              : (response.items[0]?.id ?? ""),
         );
       })
       .catch((requestError: unknown) => {
@@ -136,7 +159,17 @@ function GuidedSwap() {
     return () => {
       active = false;
     };
-  }, []);
+  }, [spaceId]);
+
+  useEffect(() => {
+    requestVersion.current += 1;
+    setResult(null);
+    setPrepared(null);
+    setReviewed(false);
+    setLoading(false);
+    setPreparing(false);
+    setError(null);
+  }, [wallet.revision]);
 
   const position = positions.find(
     (candidate) => candidate.id === selectedPositionId,
@@ -184,6 +217,8 @@ function GuidedSwap() {
     setResult(null);
     setPrepared(null);
     setReviewed(false);
+    setLoading(false);
+    setPreparing(false);
   }
 
   function updateForm(key: keyof GuidedForm, value: string) {
@@ -223,7 +258,7 @@ function GuidedSwap() {
         throw new Error("Enter an amount greater than zero");
       const intent = await client.prepareIntentFromTokenAmount({
         positionId: position.id,
-        trader: DEMO_TRADER,
+        trader: wallet.address ?? DEMO_TRADER,
         traderInputToken: pair.input.token,
         traderOutputToken: pair.output.token,
         requestedTraderInputAmount: requestedInputAmount.toString(),
@@ -320,16 +355,22 @@ function GuidedSwap() {
         <p className="text-sm font-semibold uppercase tracking-[0.18em] text-cyan-300">
           Local demo swap
         </p>
-        <h1 className="text-3xl font-semibold text-white">Try a swap</h1>
+        <h1 className="text-3xl font-semibold text-white">
+          {spaceId ? "Space not found" : "Try a swap"}
+        </h1>
         <p className="rounded-xl border border-amber-800/70 bg-amber-950/30 p-4 text-amber-200">
           No supported demo pair with current token metadata is available. Open
           the{" "}
-          <a
-            href={`${appLinks.treasury.replace(/\/+$/, "")}/holdings`}
+          <Link
+            to={
+              selectedPositionId
+                ? `/spaces/${encodeURIComponent(selectedPositionId)}/holdings`
+                : "/spaces"
+            }
             className="underline underline-offset-4"
           >
-            treasury holdings page
-          </a>{" "}
+            Space holdings page
+          </Link>{" "}
           to inspect another configured source.
         </p>
       </section>
