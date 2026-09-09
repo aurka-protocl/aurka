@@ -11,9 +11,9 @@ core, and the Foundry policy/risk contract suite. Phase 3.5 resolves capacity,
 bounded fees, complete fee accounting, direct pairwise settlement previews, and
 deterministic price protection. AURKA-005 adds an atomic, local direct
 Aqua-compatible settlement adapter with signed commitments. AURKA-006 adds the
-local deterministic solver/API/persistence/indexer service package; multi-route
-optimization, live integrations, agents, and the application remain later
-phases.
+local deterministic solver/API/persistence/indexer service package. MVP-002 adds
+persistent multiple Spaces, owner-signed lifecycle mutations, isolated local
+demo allocations, and explicit two-Space fork fixtures.
 
 ## Requirements
 
@@ -42,8 +42,8 @@ which avoids precision loss and forces callers to make token decimals explicit.
   intents, solver proposals, quotes, positions, executions, events, and API
   response schemas.
 - `@aurka/services`: direct solver, closed optimized-solver boundary, `/v1` API,
-  Drizzle/SQLite repository, deterministic event indexer, local fixture, Docker
-  Compose, and simulation CI.
+  Drizzle/SQLite repository, persistent Space management, deterministic event
+  indexer, local fixture, Docker Compose, and simulation CI.
 - `contracts`: governance-owned hard policies, signed tightening-only risk
   certificates, maximum-safe-fill verification, bounded OptionSpace fees, and
   the atomic direct settlement router.

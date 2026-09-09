@@ -172,19 +172,22 @@ try {
   const before = await state();
   await click(bob, "Get quote", "Quote ready");
   await bob.getByText("Partial fill:", { exact: false }).waitFor();
-  await bob.getByRole("checkbox").check();
   await bob.evaluate(() =>
     window.ethereum.request({ method: "test_rejectNext" }),
   );
-  await click(bob, "Approve and sign", "Failed or rejected");
+  await click(
+    bob,
+    "Review and sign exact trade",
+    "Signing or preparation failed",
+  );
   await bob.getByRole("alert").filter({ hasText: "User rejected" }).waitFor();
-  await click(bob, "Approve and sign", "Prepared");
+  await click(bob, "Review and sign exact trade", "Prepared");
   await bob.screenshot({
     path: path.join(output, "bob-review-390.png"),
     fullPage: true,
   });
   const review = await bob.locator("section").innerText();
-  await click(bob, "Submit trade", "Trade: confirmed");
+  await click(bob, "Submit exact trade", "Saved transaction confirmed");
   const after = await state();
   assert(BigInt(after.balances.bob.weth) < BigInt(before.balances.bob.weth));
   assert(BigInt(after.balances.bob.usdc) > BigInt(before.balances.bob.usdc));
@@ -225,12 +228,11 @@ try {
   await click(alice, "Authorize trading capacity", "authorize: confirmed");
   async function prepareFresh() {
     await click(bob, "Get quote", "Quote ready");
-    await bob.getByRole("checkbox").check();
     const response = bob.waitForResponse(
       (response) =>
         response.url().endsWith("/v1/execute") && response.status() === 202,
     );
-    await click(bob, "Approve and sign", "Prepared");
+    await click(bob, "Review and sign exact trade", "Prepared");
     return (await (await response).json()).data.transactionRequest;
   }
   async function assertRevert(transaction, label) {
@@ -257,9 +259,9 @@ try {
   await click(alice, "Pause trading", "pause: confirmed");
   await assertRevert(readyBeforePause, "fresh signed trade while paused");
   await bob
-    .getByText("Quote expired or chain state changed. Get a new quote.")
+    .getByText("The Space snapshot or policy changed. Request a fresh quote.")
     .waitFor();
-  await click(bob, "Get quote", "Failed or rejected");
+  await click(bob, "Get quote", "Quote failed");
   await bob.getByRole("alert").waitFor();
   await click(alice, "Resume trading", "resume: confirmed");
   await click(alice, "Authorize trading capacity", "authorize: confirmed");
@@ -277,7 +279,9 @@ try {
   await publicClient.request({ method: "evm_mine", params: [] });
   await assertRevert(readyBeforeExpiry, "expired unused signed trade");
   await bob
-    .getByText("Quote expired or chain state changed. Get a new quote.")
+    .getByText(
+      "The quote expired or source state changed. Request a fresh quote.",
+    )
     .waitFor();
   assert.deepEqual(
     (await state()).balances,
@@ -297,11 +301,7 @@ try {
     .getByRole("status")
     .filter({ hasText: "network changed" })
     .waitFor();
-  await click(bob, "Connect wallet", "Failed or rejected");
-  await bob
-    .getByRole("alert")
-    .filter({ hasText: "Select AURKA fork network" })
-    .waitFor();
+  await bob.getByText("Your wallet is on chain 1", { exact: false }).waitFor();
   await click(alice, "Pause trading", "pause: confirmed");
   writeFileSync(
     path.join(output, "wallet-journey.json"),

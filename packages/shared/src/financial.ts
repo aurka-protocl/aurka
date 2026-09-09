@@ -369,6 +369,39 @@ export function calculateAssetValueDown(
   return numerator / denominator;
 }
 
+/**
+ * Convert a user-entered raw token amount to settlement value only when the
+ * conversion is exact. User input must not be silently shortened by flooring
+ * it before the signed intent is built.
+ */
+export function calculateAssetValueExact(
+  asset: Pick<
+    FinancialAssetInput,
+    "balance" | "decimals" | "price" | "priceDecimals"
+  >,
+  valueDecimals = 6,
+): bigint {
+  const balance = toUint256(asset.balance, "balance");
+  const price = toUint256(asset.price, "price");
+  if (price === 0n) throw new RangeError("Price must be positive");
+  const numerator = checkedMul(
+    checkedMul(balance, price, "balance × price"),
+    scale10(valueDecimals),
+    "value scaling",
+  );
+  const denominator = checkedMul(
+    scale10(asset.decimals),
+    scale10(asset.priceDecimals),
+    "decimal scaling",
+  );
+  if (numerator % denominator !== 0n) {
+    throw new RangeError(
+      "Token amount is not exactly representable in settlement value units",
+    );
+  }
+  return numerator / denominator;
+}
+
 /** Calculate NAV and conservative (ceiling) exposure weights. */
 export function calculatePortfolioValuation(
   assets: readonly FinancialAssetInput[],

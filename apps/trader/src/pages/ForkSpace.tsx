@@ -111,7 +111,8 @@ export default function ForkSpace({
   const generation = useRef(0);
   const account = wallet.address ?? "";
   async function refresh() {
-    const next = await getJson<ForkState>(apiPath("/fork"));
+    const query = spaceId ? `?spaceId=${encodeURIComponent(spaceId)}` : "";
+    const next = await getJson<ForkState>(apiPath(`/fork${query}`));
     if (spaceId && next.position.id !== spaceId)
       throw new Error("This Space is not available in the current fork.");
     setState(next);
@@ -128,7 +129,8 @@ export default function ForkSpace({
     setError("");
     const tick = async () => {
       try {
-        const next = await getJson<ForkState>(apiPath("/fork"));
+        const query = spaceId ? `?spaceId=${encodeURIComponent(spaceId)}` : "";
+        const next = await getJson<ForkState>(apiPath(`/fork${query}`));
         if (active) {
           if (spaceId && next.position.id !== spaceId) {
             setState(undefined);
@@ -267,7 +269,7 @@ export default function ForkSpace({
     invalidate();
     const transaction = await getJson<Transaction>(
       apiPath(
-        `/fork/owner?action=${action}&value=${encodeURIComponent(limit)}`,
+        `/fork/owner?spaceId=${encodeURIComponent(spaceId ?? "")}&action=${action}&value=${encodeURIComponent(limit)}`,
       ),
     );
     await send(transaction, account, action);
@@ -490,6 +492,12 @@ export default function ForkSpace({
           </div>
           {owner ? (
             <div className="space-y-4 rounded-xl border border-slate-700 p-4">
+              <div>
+                <h2 className="text-xl font-semibold text-white">Edit Space</h2>
+                <p className="mt-1 text-sm text-slate-400">
+                  These controls submit real owner transactions to the fork.
+                </p>
+              </div>
               <p>
                 Start: grant USDC allowance, then authorize capacity. Neither
                 step moves a trade by itself.

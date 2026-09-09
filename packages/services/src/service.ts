@@ -16,6 +16,20 @@ import {
   type Position,
   type ProtocolEvent,
   type Quote,
+  spaceMutationAuthorizationSchema,
+  spaceMutationConfirmRequestSchema,
+  spaceMutationPrepareRequestSchema,
+  spaceMutationTypedDataSchema,
+  SPACE_MANAGEMENT_AUTHORITY,
+  SPACE_MUTATION_TYPES,
+  type SpaceChange,
+  type SpaceDraft,
+  type SpaceMutationAuthorization,
+  type SpaceMutationConfirmRequest,
+  type SpaceMutationPrepareRequest,
+  type SpaceRecord,
+  type SpaceMutationTypedData,
+  snapshotFreshness,
 } from "@aurka/shared";
 
 import { ServiceDatabase } from "./db/database.js";
@@ -28,10 +42,17 @@ import {
 import {
   FIXTURE_ADDRESSES,
   FIXTURE_POLICY_ID,
+  FIXTURE_AQUA_STRATEGY_HASH,
   FixtureProvider,
+  LocalDemoProvider,
   createCanonicalFixture,
 } from "./fixture.js";
-import { hashBytes, hashIntent, hashProposal } from "./solver/hash.js";
+import {
+  hashBytes,
+  hashCanonical,
+  hashIntent,
+  hashProposal,
+} from "./solver/hash.js";
 import { DirectSolver } from "./solver/direct.js";
 import { OptimizedSolver } from "./solver/optimized.js";
 import {
@@ -51,6 +72,7 @@ import type {
   SolverSnapshotProvider,
 } from "./solver/types.js";
 import { Eip1193RouterSimulator, type Eip1193Transport } from "./solver/rpc.js";
+import { hashTypedData } from "viem";
 import { RiskService } from "./risk-service.js";
 import {
   ReadinessMonitor,
@@ -77,6 +99,7 @@ export interface ServiceOptions {
   readonly readiness?: ReadinessConfiguration;
   readonly routerSimulator?: RouterSimulator;
   readonly rpcTransport?: Eip1193Transport;
+  readonly spaceMode?: "demo" | "fork";
 }
 
 export interface ServiceRuntimeDiagnostics {
@@ -100,8 +123,8 @@ export class ServiceError extends Error {
   }
 }
 
-function positionForFixture(): Position {
-  const fixture = createCanonicalFixture();
+function positionForFixture(nowSeconds = 200): Position {
+  const fixture = createCanonicalFixture({ nowSeconds });
   const snapshot = fixture.snapshot;
   return positionSchema.parse({
     id: snapshot.positionId,
@@ -160,11 +183,15 @@ export class AurkaService {
   readonly runtime: ServiceRuntimeDiagnostics;
   readonly rpcTransport: Eip1193Transport | undefined;
   readonly readiness: ReadinessMonitor;
+  readonly spaceMode: "demo" | "fork";
+  private readonly localProvider: LocalDemoProvider | undefined;
   private readonly now: () => number;
 
   constructor(options: ServiceOptions = {}) {
     this.now = options.riskNow ?? serviceNow;
     this.rpcTransport = options.rpcTransport;
+    this.spaceMode =
+      options.spaceMode ?? (options.rpcTransport ? "fork" : "demo");
     this.database = options.database ?? new ServiceDatabase();
     this.repository = new ServiceRepository(this.database.db);
     this.riskService = new RiskService(this.repository, options.riskNow);
@@ -194,7 +221,19 @@ export class AurkaService {
       this.now,
     );
     const sourceProvider: SolverSnapshotProvider =
-      options.provider ?? new FixtureProvider();
+      options.provider ??
+      (options.spaceMode === "demo"
+        ? new LocalDemoProvider(this.now)
+        : new FixtureProvider());
+    if (options.spaceMode === "fork" && !sourceProvider.getPositionSnapshot) {
+      throw new ServiceError(
+        "SNAPSHOT_PROVIDER_REQUIRED",
+        "Fork/RPC mode requires a usable real snapshot provider; FixtureProvider is not valid for configured RPC data",
+        503,
+      );
+    }
+    this.localProvider =
+      sourceProvider instanceof LocalDemoProvider ? sourceProvider : undefined;
     const validateSnapshot = (snapshot: SolverSnapshot): SolverSnapshot => {
       if (snapshot.chainId !== this.runtime.chainId) {
         throw new ServiceError(
@@ -245,7 +284,17 @@ export class AurkaService {
         : {}),
       getSnapshot: async (intent) => {
         const snapshot = await sourceProvider.getSnapshot(intent);
-        return validateSnapshot(snapshot);
+        const space = this.repository.getSpace(snapshot.positionId);
+        if (space?.identity.state === "PAUSED")
+          throw new ServiceError(
+            "SPACE_PAUSED",
+            "Trading is paused for this Space",
+            409,
+          );
+        const validated = validateSnapshot(snapshot);
+        if (sourceProvider.getPositionSnapshot)
+          this.assertTradingSnapshotFresh(validated);
+        return validated;
       },
     };
     this.routerSimulator =
@@ -259,12 +308,58 @@ export class AurkaService {
       options.signer ?? new FixtureProposalSigner(),
     );
     this.optimizedSolver = new OptimizedSolver(this.directSolver);
-    if (options.seedFixture !== false)
-      this.repository.savePosition(positionForFixture());
+    if (options.seedFixture !== false) {
+      const seeded = positionForFixture(
+        this.localProvider ? this.now() : undefined,
+      );
+      this.repository.savePosition(seeded);
+      this.repository.saveSpaceIdentity({
+        id: seeded.id,
+        name: seeded.name,
+        ownerAddress: seeded.owner,
+        controllerAddress: seeded.policy.governance,
+        treasuryAddress: seeded.treasury,
+        chainId: seeded.chainId,
+        policyId: seeded.policy.id,
+        strategyId: FIXTURE_AQUA_STRATEGY_HASH,
+        policyRegistryAddress: seeded.policy.registry,
+        mode: this.spaceMode,
+        state: seeded.policy.paused ? "PAUSED" : "ACTIVE",
+      });
+    }
+    this.hydrateLocalSpaces();
   }
 
   close(): void {
     this.database.close();
+  }
+
+  /** Rebuild demo provider bundles from durable Space records after a restart. */
+  private hydrateLocalSpaces(): void {
+    if (!this.localProvider) return;
+    for (const record of this.repository.listSpaces(1_000).items) {
+      const position = record.position;
+      if (!position) continue;
+      this.localProvider.registerSpace(
+        createCanonicalFixture({
+          nowSeconds: this.now(),
+          positionId: position.id,
+          policyId: position.policy.id,
+          strategyHash: record.identity.strategyId,
+          treasuryAddress: position.treasury,
+          assetTokens: position.policy.assets.map((asset) => asset.token),
+          assetBounds: position.policy.assets.map((asset) => ({
+            token: asset.token,
+            minimumWeightBps: asset.minimumWeightBps,
+            maximumWeightBps: asset.maximumWeightBps,
+          })),
+          maximumTransactionValue: BigInt(
+            position.policy.maximumTransactionValue,
+          ),
+          policyNonce: BigInt(position.policy.nonce),
+        }),
+      );
+    }
   }
 
   configureReadiness(configuration: ReadinessConfiguration): void {
@@ -476,6 +571,622 @@ export class AurkaService {
     return this.repository.listPositions(limit, cursor);
   }
 
+  private async readAuthoritativePositionSnapshot(
+    positionId: string,
+  ): Promise<SolverSnapshot | undefined> {
+    if (!this.provider.getPositionSnapshot) return undefined;
+    try {
+      const snapshot = await this.provider.getPositionSnapshot(positionId);
+      if (snapshot.positionId !== positionId)
+        throw new ServiceError(
+          "INVALID_SNAPSHOT",
+          "The snapshot provider returned data for a different Space",
+          503,
+        );
+      return snapshot;
+    } catch (error) {
+      if (error instanceof ServiceError) throw error;
+      throw new ServiceError(
+        "SNAPSHOT_UNAVAILABLE",
+        "The authoritative Space snapshot is unavailable; dependent trading is blocked",
+        503,
+        { positionId },
+      );
+    }
+  }
+
+  private assertTradingSnapshotFresh(snapshot: SolverSnapshot): void {
+    const freshness = snapshotFreshness(
+      snapshot.portfolioSnapshot.observedAt,
+      snapshot.priceProtection.nowSeconds,
+      snapshot.priceProtection.maximumPriceAgeSeconds,
+    );
+    if (freshness !== "fresh")
+      throw new ServiceError(
+        "SNAPSHOT_STALE",
+        "Trading is unavailable because the authoritative Space snapshot is stale",
+        409,
+        { positionId: snapshot.positionId },
+      );
+  }
+
+  private persistAuthoritativeSnapshot(
+    position: Position,
+    snapshot: SolverSnapshot,
+  ): Position {
+    const sourceAssets = new Map(
+      snapshot.portfolioSnapshot.assets.map((asset) => [
+        asset.token.toLowerCase(),
+        asset,
+      ]),
+    );
+    const existingAssets = new Map(
+      position.policy.assets.map((asset) => [asset.token.toLowerCase(), asset]),
+    );
+    const next = positionSchema.parse({
+      ...position,
+      chainId: snapshot.chainId,
+      policy: {
+        ...position.policy,
+        id: snapshot.policyId,
+        chainId: snapshot.chainId,
+        maximumTransactionValue:
+          snapshot.policy.maximumTransactionValue.toString(),
+        priceMaxAgeSeconds: snapshot.priceProtection.maximumPriceAgeSeconds,
+        maximumPriceDeviationBps: Number(
+          snapshot.priceProtection.maximumPriceDeviationBps,
+        ),
+        nonce: snapshot.policyNonce,
+        paused: snapshot.paused ?? position.policy.paused,
+        fee: {
+          ...position.policy.fee,
+          baseFeeBps: Number(snapshot.fee.baseFeeBps),
+          slopeBps: Number(snapshot.fee.slopeBps),
+          maximumFeeBps: Number(snapshot.fee.maximumFeeBps),
+          treasuryBaseFeeBps: Number(snapshot.fee.treasuryBaseFeeBps),
+          solverFeeBps: Number(snapshot.fee.solverFeeBps),
+          protocolFeeBps: Number(snapshot.fee.protocolFeeBps),
+          treasuryFeeRecipient: snapshot.feeAccounting.treasuryRecipient,
+          protocolFeeRecipient: snapshot.feeAccounting.protocolRecipient,
+        },
+        assets: snapshot.policy.assets.map((asset) => {
+          const sourceAsset = sourceAssets.get(asset.token.toLowerCase());
+          const existingAsset = existingAssets.get(asset.token.toLowerCase());
+          return {
+            token: asset.token,
+            symbol: sourceAsset?.symbol ?? existingAsset?.symbol ?? "ASSET",
+            decimals: sourceAsset?.decimals ?? existingAsset?.decimals ?? 0,
+            minimumWeightBps: Number(asset.minimumWeightBps),
+            maximumWeightBps: Number(asset.maximumWeightBps),
+          };
+        }),
+      },
+      riskMode: snapshot.riskMode,
+      currentPortfolio: snapshot.portfolioSnapshot,
+      updatedAt: Math.max(
+        position.updatedAt,
+        this.now(),
+        snapshot.portfolioSnapshot.observedAt,
+      ),
+    });
+    this.repository.savePosition(next);
+    return this.getPosition(position.id);
+  }
+
+  /** Read source evidence and publish the matching durable snapshot. */
+  async refreshPosition(positionId: string): Promise<Position> {
+    const position = this.getPosition(positionId);
+    const snapshot = await this.readAuthoritativePositionSnapshot(positionId);
+    return snapshot
+      ? this.persistAuthoritativeSnapshot(position, snapshot)
+      : position;
+  }
+
+  async refreshSpace(spaceId: string): Promise<SpaceRecord> {
+    const space = this.getSpace(spaceId);
+    if (space.position) await this.refreshPosition(space.position.id);
+    return this.getSpace(spaceId);
+  }
+
+  async refreshSpaces(ownerAddress?: string): Promise<void> {
+    const spaces = this.repository.listSpaces(1_000, undefined, ownerAddress);
+    for (const space of spaces.items)
+      if (space.position) await this.refreshPosition(space.position.id);
+  }
+
+  async refreshPositions(): Promise<void> {
+    const positions = this.repository.listPositions(1_000, undefined);
+    for (const position of positions.items)
+      await this.refreshPosition(position.id);
+  }
+
+  listSpaces(
+    limit: number,
+    cursor?: string,
+    ownerAddress?: string,
+  ): Page<SpaceRecord> {
+    return this.repository.listSpaces(limit, cursor, ownerAddress);
+  }
+
+  getSpace(spaceId: string): SpaceRecord {
+    const value = this.repository.getSpace(spaceId);
+    if (!value)
+      throw new ServiceError("SPACE_NOT_FOUND", "Space was not found", 404);
+    return value;
+  }
+
+  listSpaceChanges(spaceId: string): SpaceChange[] {
+    this.getSpace(spaceId);
+    return this.repository.listSpaceChanges(spaceId);
+  }
+
+  prepareSpaceMutation(input: SpaceMutationPrepareRequest): {
+    readonly authorization: Omit<SpaceMutationAuthorization, "signature">;
+    readonly typedData: SpaceMutationTypedData;
+  } {
+    const value = spaceMutationPrepareRequestSchema.parse(input);
+    const existing = this.repository.getSpace(value.spaceId);
+    if (value.operation === "CREATE") {
+      if (existing)
+        throw new ServiceError(
+          "SPACE_ALREADY_EXISTS",
+          "A Space with this identity already exists",
+          409,
+        );
+    } else {
+      if (!existing)
+        throw new ServiceError("SPACE_NOT_FOUND", "Space was not found", 404);
+      this.assertSpaceOwner(existing, value.ownerAddress);
+    }
+    if (value.draft) this.validateSpaceDraft(value.draft, value.ownerAddress);
+    const chainId =
+      value.draft?.chainId ??
+      existing?.identity.chainId ??
+      this.runtime.chainId;
+    if (chainId !== this.runtime.chainId)
+      throw new ServiceError(
+        "CHAIN_MISMATCH",
+        "Space chain does not match the configured settlement chain",
+        409,
+      );
+    const nonce = existing
+      ? this.repository.getSpaceAuthNonce(value.spaceId)
+      : "0";
+    const payloadHash = hashCanonical(this.spaceMutationPayload(value));
+    const deadline = this.now() + 300;
+    const authorization = {
+      operation: value.operation,
+      spaceId: value.spaceId,
+      ownerAddress: value.ownerAddress,
+      payloadHash,
+      nonce,
+      deadline,
+    } satisfies Omit<SpaceMutationAuthorization, "signature">;
+    const typedData = spaceMutationTypedDataSchema.parse({
+      domain: {
+        name: "AURKA Space Management",
+        version: "1",
+        chainId,
+        verifyingContract: SPACE_MANAGEMENT_AUTHORITY,
+      },
+      primaryType: "SpaceMutation",
+      types: {
+        EIP712Domain: [
+          { name: "name", type: "string" },
+          { name: "version", type: "string" },
+          { name: "chainId", type: "uint256" },
+          { name: "verifyingContract", type: "address" },
+        ],
+        SpaceMutation: SPACE_MUTATION_TYPES.map(({ name, type }) => ({
+          name,
+          type,
+        })),
+      },
+      message: {
+        operation: value.operation,
+        spaceId: value.spaceId,
+        owner: value.ownerAddress,
+        payloadHash,
+        nonce,
+        deadline,
+      },
+    });
+    return { authorization, typedData };
+  }
+
+  async confirmSpaceMutation(
+    input: SpaceMutationConfirmRequest,
+  ): Promise<{ readonly space: SpaceRecord; readonly change: SpaceChange }> {
+    const value = spaceMutationConfirmRequestSchema.parse(input);
+    const authorization = spaceMutationAuthorizationSchema.parse(
+      value.authorization,
+    );
+    const existing = this.repository.getSpace(value.spaceId);
+    if (value.operation === "CREATE") {
+      if (existing)
+        throw new ServiceError(
+          "SPACE_ALREADY_EXISTS",
+          "A Space with this identity already exists",
+          409,
+        );
+    } else {
+      if (!existing)
+        throw new ServiceError("SPACE_NOT_FOUND", "Space was not found", 404);
+      this.assertSpaceOwner(existing, value.ownerAddress);
+    }
+    if (value.draft) this.validateSpaceDraft(value.draft, value.ownerAddress);
+    const chainId =
+      value.draft?.chainId ??
+      existing?.identity.chainId ??
+      this.runtime.chainId;
+    if (chainId !== this.runtime.chainId)
+      throw new ServiceError(
+        "CHAIN_MISMATCH",
+        "Space chain does not match the configured settlement chain",
+        409,
+      );
+    const nonce = existing
+      ? this.repository.getSpaceAuthNonce(value.spaceId)
+      : "0";
+    const payloadHash = hashCanonical(this.spaceMutationPayload(value));
+    if (
+      authorization.operation !== value.operation ||
+      authorization.spaceId !== value.spaceId ||
+      authorization.ownerAddress.toLowerCase() !==
+        value.ownerAddress.toLowerCase() ||
+      authorization.payloadHash.toLowerCase() !== payloadHash.toLowerCase() ||
+      authorization.nonce !== nonce
+    )
+      throw new ServiceError(
+        "AUTHORIZATION_MISMATCH",
+        "Authorization is stale or does not match the reviewed Space change",
+        409,
+      );
+    if (authorization.deadline <= this.now())
+      throw new ServiceError(
+        "AUTHORIZATION_EXPIRED",
+        "Space authorization has expired",
+        409,
+      );
+    const digest = hashTypedData({
+      domain: {
+        name: "AURKA Space Management",
+        version: "1",
+        chainId,
+        verifyingContract: SPACE_MANAGEMENT_AUTHORITY,
+      },
+      types: {
+        SpaceMutation: SPACE_MUTATION_TYPES.map(({ name, type }) => ({
+          name,
+          type,
+        })),
+      },
+      primaryType: "SpaceMutation",
+      message: {
+        operation: value.operation,
+        spaceId: value.spaceId,
+        owner: value.ownerAddress,
+        payloadHash,
+        nonce: BigInt(nonce),
+        deadline: BigInt(authorization.deadline),
+      },
+    } as never);
+    if (!verifySignature(value.ownerAddress, digest, authorization.signature))
+      throw new ServiceError(
+        "INVALID_AUTHORIZATION",
+        "Space change signature is not from the connected owner",
+        403,
+      );
+
+    if (
+      existing &&
+      !this.repository.consumeSpaceAuthNonce(value.spaceId, authorization.nonce)
+    )
+      throw new ServiceError(
+        "AUTHORIZATION_REPLAYED",
+        "Space authorization has already been used",
+        409,
+      );
+    const result = this.applySpaceMutation(value, existing);
+    if (
+      !existing &&
+      !this.repository.consumeSpaceAuthNonce(value.spaceId, authorization.nonce)
+    )
+      throw new ServiceError(
+        "AUTHORIZATION_REPLAYED",
+        "Space authorization has already been used",
+        409,
+      );
+    return result;
+  }
+
+  private spaceMutationPayload(
+    input:
+      | Pick<SpaceMutationConfirmRequest, "operation" | "draft">
+      | Pick<SpaceMutationPrepareRequest, "operation" | "draft">,
+  ): Record<string, unknown> {
+    return {
+      operation: input.operation,
+      ...(input.draft ? { draft: input.draft } : {}),
+    };
+  }
+
+  private assertSpaceOwner(space: SpaceRecord, ownerAddress: string): void {
+    if (
+      space.identity.ownerAddress.toLowerCase() !==
+        ownerAddress.toLowerCase() ||
+      space.identity.controllerAddress.toLowerCase() !==
+        ownerAddress.toLowerCase()
+    )
+      throw new ServiceError(
+        "SPACE_OWNER_REQUIRED",
+        "Only the recorded Space owner can authorize this change",
+        403,
+      );
+  }
+
+  private validateSpaceDraft(draft: SpaceDraft, ownerAddress: string): void {
+    if (draft.ownerAddress.toLowerCase() !== ownerAddress.toLowerCase())
+      throw new ServiceError(
+        "SPACE_OWNER_MISMATCH",
+        "Draft owner does not match the signing wallet",
+        403,
+      );
+    if (draft.chainId !== this.runtime.chainId)
+      throw new ServiceError(
+        "CHAIN_MISMATCH",
+        "This Space must use the configured settlement chain",
+        409,
+      );
+    const maximum = BigInt(draft.maximumTransactionValue);
+    if (maximum < 1_000n || maximum > 1_000_000_000n)
+      throw new ServiceError(
+        "INVALID_TRANSACTION_LIMIT",
+        "Transaction limit must be between 1000 and 1000000000 value units",
+      );
+    const tokens = draft.assets.map((asset) => asset.token.toLowerCase());
+    if (new Set(tokens).size !== tokens.length)
+      throw new ServiceError(
+        "DUPLICATE_ASSET",
+        "A Space cannot manage the same asset twice",
+      );
+    const minimumTotal = draft.assets.reduce(
+      (total, asset) => total + asset.minimumWeightBps,
+      0,
+    );
+    const maximumTotal = draft.assets.reduce(
+      (total, asset) => total + asset.maximumWeightBps,
+      0,
+    );
+    if (minimumTotal > 10_000 || maximumTotal < 10_000)
+      throw new ServiceError(
+        "INFEASIBLE_BOUNDS",
+        "Allocation ranges must permit a complete portfolio",
+      );
+    const supportedDecimals = new Map([
+      [FIXTURE_ADDRESSES.usdc.toLowerCase(), 0],
+      [FIXTURE_ADDRESSES.weth.toLowerCase(), 0],
+      [FIXTURE_ADDRESSES.link.toLowerCase(), 0],
+    ]);
+    for (const asset of draft.assets) {
+      const expectedDecimals = supportedDecimals.get(asset.token.toLowerCase());
+      if (expectedDecimals === undefined)
+        throw new ServiceError(
+          "UNSUPPORTED_ASSET",
+          "This environment only supports its configured USDC, WETH, and LINK assets",
+        );
+      if (asset.decimals !== expectedDecimals)
+        throw new ServiceError(
+          "ASSET_DECIMALS_MISMATCH",
+          `${asset.symbol} must use ${expectedDecimals} decimal places in this environment`,
+        );
+    }
+    if (!tokens.includes(FIXTURE_ADDRESSES.usdc.toLowerCase()))
+      throw new ServiceError(
+        "UNSUPPORTED_ASSET_SET",
+        "A Space must include the configured USDC fee asset",
+      );
+    if (!tokens.includes(FIXTURE_ADDRESSES.weth.toLowerCase()))
+      throw new ServiceError(
+        "UNSUPPORTED_ASSET_SET",
+        "A Space must include WETH for the supported local trading pair",
+      );
+  }
+
+  private positionForSpaceDraft(
+    draft: SpaceDraft,
+    policyNonce = "1",
+  ): {
+    readonly position: Position;
+    readonly strategyId: string;
+    readonly bundle: ReturnType<typeof createCanonicalFixture>;
+  } {
+    const policyId = hashBytes(`policy:${draft.id}`);
+    const strategyId = hashBytes(`strategy:${draft.id}`);
+    const bundle = createCanonicalFixture({
+      nowSeconds: this.now(),
+      positionId: draft.id,
+      policyId,
+      strategyHash: strategyId,
+      treasuryAddress: draft.ownerAddress,
+      assetTokens: draft.assets.map((asset) => asset.token),
+      assetBounds: draft.assets.map((asset) => ({
+        token: asset.token,
+        minimumWeightBps: asset.minimumWeightBps,
+        maximumWeightBps: asset.maximumWeightBps,
+      })),
+      maximumTransactionValue: BigInt(draft.maximumTransactionValue),
+      policyNonce: BigInt(policyNonce),
+      protocolAddress: FIXTURE_ADDRESSES.protocol,
+    });
+    const base = positionForFixture(this.now());
+    const position = positionSchema.parse({
+      ...base,
+      id: draft.id,
+      name: draft.name,
+      owner: draft.ownerAddress,
+      treasury: draft.ownerAddress,
+      chainId: draft.chainId,
+      policy: {
+        ...base.policy,
+        id: policyId,
+        chainId: draft.chainId,
+        treasury: draft.ownerAddress,
+        governance: draft.ownerAddress,
+        assets: draft.assets,
+        maximumTransactionValue: draft.maximumTransactionValue,
+        nonce: policyNonce,
+        paused: false,
+        fee: {
+          ...base.policy.fee,
+          treasuryFeeRecipient: draft.ownerAddress,
+        },
+      },
+      riskMode: "NORMAL",
+      currentPortfolio: bundle.snapshot.portfolioSnapshot,
+      createdAt: this.now(),
+      updatedAt: this.now(),
+    });
+    return { position, strategyId, bundle };
+  }
+
+  private applySpaceMutation(
+    input: SpaceMutationConfirmRequest,
+    existing: SpaceRecord | undefined,
+  ): { readonly space: SpaceRecord; readonly change: SpaceChange } {
+    const timestamp = this.now();
+    let identity: SpaceRecord["identity"];
+    let draft = input.draft;
+    let position: Position | undefined;
+    if (input.operation === "CREATE") {
+      if (existing || !draft)
+        throw new ServiceError(
+          "SPACE_ALREADY_EXISTS",
+          "Space already exists",
+          409,
+        );
+      const generated = this.positionForSpaceDraft(draft);
+      identity = {
+        id: draft.id,
+        name: draft.name,
+        ownerAddress: draft.ownerAddress,
+        controllerAddress: draft.ownerAddress,
+        treasuryAddress: draft.ownerAddress,
+        chainId: draft.chainId,
+        policyId: generated.position.policy.id,
+        strategyId: generated.strategyId,
+        policyRegistryAddress: generated.position.policy.registry,
+        mode: this.spaceMode,
+        state: "DRAFT",
+      };
+    } else {
+      if (!existing)
+        throw new ServiceError("SPACE_NOT_FOUND", "Space was not found", 404);
+      identity = existing.identity;
+      draft = input.draft ?? existing.draft;
+      if (input.operation === "UPDATE" || input.operation === "ACTIVATE") {
+        if (!draft)
+          throw new ServiceError(
+            "DRAFT_REQUIRED",
+            "A policy draft is required",
+          );
+        const nextPolicyNonce =
+          existing.identity.state === "DRAFT" || !existing.position
+            ? "1"
+            : (BigInt(existing.position.policy.nonce) + 1n).toString();
+        const generated = this.positionForSpaceDraft(draft, nextPolicyNonce);
+        position =
+          existing.identity.state === "PAUSED"
+            ? positionSchema.parse({
+                ...generated.position,
+                policy: {
+                  ...generated.position.policy,
+                  paused: true,
+                  nonce: (
+                    BigInt(existing.position?.policy.nonce ?? "1") + 1n
+                  ).toString(),
+                },
+              })
+            : generated.position;
+        identity = {
+          ...identity,
+          name: draft.name,
+          chainId: draft.chainId,
+          policyId: generated.position.policy.id,
+          strategyId: generated.strategyId,
+          treasuryAddress: generated.position.treasury,
+          state: input.operation === "ACTIVATE" ? "ACTIVE" : identity.state,
+        };
+        if (input.operation === "UPDATE" && identity.state === "DRAFT")
+          position = undefined;
+      } else {
+        if (!existing.position)
+          throw new ServiceError(
+            "SPACE_NOT_ACTIVE",
+            "Only an active Space can change pause state",
+            409,
+          );
+        const paused = input.operation === "PAUSE";
+        position = positionSchema.parse({
+          ...existing.position,
+          policy: {
+            ...existing.position.policy,
+            paused,
+            nonce: (BigInt(existing.position.policy.nonce) + 1n).toString(),
+          },
+          updatedAt: timestamp,
+        });
+        identity = { ...identity, state: paused ? "PAUSED" : "ACTIVE" };
+      }
+    }
+    if (position) {
+      this.repository.savePosition(position);
+      if (this.localProvider) {
+        const generated = this.positionForSpaceDraft(
+          draft ?? {
+            id: position.id,
+            name: position.name,
+            ownerAddress: position.owner,
+            chainId: position.chainId,
+            assets: position.policy.assets,
+            maximumTransactionValue: position.policy.maximumTransactionValue,
+          },
+          position.policy.nonce,
+        );
+        this.localProvider.registerSpace(generated.bundle);
+      }
+    }
+    const savedIdentity = this.repository.saveSpaceIdentity(identity, draft);
+    const eventType =
+      input.operation === "CREATE"
+        ? "SPACE_CREATED"
+        : input.operation === "ACTIVATE"
+          ? "SPACE_ACTIVATED"
+          : input.operation === "PAUSE"
+            ? "SPACE_PAUSED"
+            : input.operation === "RESUME"
+              ? "SPACE_RESUMED"
+              : "SPACE_UPDATED";
+    const change = this.repository.saveSpaceChange({
+      id: hashBytes(
+        `space-change:${input.spaceId}:${input.operation}:${input.authorization.nonce}`,
+      ).slice(0, 128),
+      spaceId: input.spaceId,
+      eventType,
+      actor: input.ownerAddress,
+      status: "CONFIRMED",
+      ...(input.receiptHash ? { receiptHash: input.receiptHash } : {}),
+      payload: {
+        operation: input.operation,
+        state: savedIdentity.state,
+        ...(draft ? { draft } : {}),
+      },
+      createdAt: timestamp,
+    });
+    const space = this.getSpace(input.spaceId);
+    return { space, change };
+  }
+
   getPosition(id: string): Position {
     const value = this.repository.getPosition(id);
     if (!value)
@@ -493,10 +1204,13 @@ export class AurkaService {
     traderOutputToken: string,
   ): Promise<DirectionalCapacity> {
     this.getPosition(positionId);
+    await this.refreshPosition(positionId);
     const fixture = createCanonicalFixture({ positionId });
     const snapshot = this.provider.getPositionSnapshot
-      ? await this.provider.getPositionSnapshot(positionId)
+      ? (await this.readAuthoritativePositionSnapshot(positionId))!
       : await this.provider.getSnapshot(fixture.intent);
+    if (this.provider.getPositionSnapshot)
+      this.assertTradingSnapshotFresh(snapshot);
     const state = this.repository.getCapacityEpoch(
       positionId,
       traderInputToken.toLowerCase(),

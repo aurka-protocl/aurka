@@ -52,6 +52,19 @@ export function formatDecimalUnits(
     .replace(/0+$/, "")}`;
 }
 
+/** Format an integer in declared units with grouping, without using Number. */
+export function formatGroupedDecimalUnits(
+  value: SignedIntegerLike,
+  decimals = 0,
+): string {
+  const formatted = formatDecimalUnits(value, decimals);
+  const sign = formatted.startsWith("-") ? "-" : "";
+  const unsigned = sign ? formatted.slice(1) : formatted;
+  const [whole, fraction] = unsigned.split(".");
+  const groupedWhole = whole!.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  return `${sign}${groupedWhole}${fraction ? `.${fraction}` : ""}`;
+}
+
 /**
  * Parse a human decimal into smallest units exactly. Values with more
  * fractional digits than the declared scale are rejected instead of rounded.

@@ -57,6 +57,13 @@
       "when": 1788825600003,
       "tag": "0007_activity",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1788902400000,
+      "tag": "0008_spaces",
+      "breakpoints": true
     }
   ]
 }

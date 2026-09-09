@@ -1,6 +1,7 @@
 import type { RegistryRiskReader } from "./risk-service.js";
 import { pathToFileURL } from "node:url";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
+import { mkdirSync } from "node:fs";
 import { startRiskWorker, type RiskCertificateWorker } from "./risk-worker.js";
 import { LocalDemoProvider } from "./fixture.js";
 import { loadConfig } from "./config.js";
@@ -13,7 +14,13 @@ import type { ReadinessProbeSet } from "./readiness.js";
 const config = loadConfig();
 const command = process.argv[2] ?? "serve";
 
+function ensureDatabaseDirectory(filename: string): void {
+  if (filename === ":memory:") return;
+  mkdirSync(dirname(resolve(filename)), { recursive: true });
+}
+
 if (command === "migrate" || command === "check") {
+  ensureDatabaseDirectory(config.DATABASE_URL);
   const database = new ServiceDatabase({ filename: config.DATABASE_URL });
   const result = database.sqlite
     .prepare(
@@ -29,6 +36,7 @@ if (command === "migrate" || command === "check") {
       : "AURKA database is ready",
   );
 } else if (command === "serve") {
+  ensureDatabaseDirectory(config.DATABASE_URL);
   const database = new ServiceDatabase({ filename: config.DATABASE_URL });
   if (config.RPC_URL && !config.SETTLEMENT_CONTRACT) {
     throw new Error(
@@ -47,6 +55,7 @@ if (command === "migrate" || command === "check") {
         cacheTtlSeconds: config.READINESS_CACHE_TTL_SECONDS,
       },
       ...(!config.RPC_URL ? { provider: new LocalDemoProvider() } : {}),
+      spaceMode: config.RPC_URL ? "fork" : "demo",
       ...(config.SETTLEMENT_CONTRACT
         ? { settlementContract: config.SETTLEMENT_CONTRACT }
         : {}),

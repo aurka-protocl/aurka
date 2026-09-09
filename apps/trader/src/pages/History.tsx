@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { AurkaClient } from "@aurka/sdk";
 import {
-  formatValueAmount,
+  formatGroupedDecimalUnits,
   type ActivityItem,
   type Execution,
 } from "@aurka/shared";
@@ -50,7 +50,11 @@ function ActivityCard({ item }: { readonly item: ActivityItem }) {
         <div>
           <dt className="text-slate-500">Requested value</dt>
           <dd className="text-slate-200">
-            {item.requestedTraderInputValue} settlement value units
+            {formatGroupedDecimalUnits(
+              item.requestedTraderInputValue,
+              item.initialPortfolio?.valueDecimals ?? 0,
+            )}{" "}
+            normalized settlement value
           </dd>
         </div>
         <div>
@@ -58,19 +62,25 @@ function ActivityCard({ item }: { readonly item: ActivityItem }) {
           <dd className="text-slate-200">
             {item.executedTraderInputValue === undefined
               ? "Not available"
-              : `${item.executedTraderInputValue} settlement value units`}
+              : `${formatGroupedDecimalUnits(
+                  item.executedTraderInputValue,
+                  item.initialPortfolio?.valueDecimals ?? 0,
+                )} normalized settlement value`}
           </dd>
         </div>
         <div>
           <dt className="text-slate-500">Fee record</dt>
           <dd className="text-slate-200">
             {item.feeState === "EARNED" && item.earnedFee
-              ? `${item.earnedFee.treasuryAmount} settlement value units retained by treasury`
+              ? `${formatGroupedDecimalUnits(
+                  item.earnedFee.treasuryAmount,
+                  item.initialPortfolio?.valueDecimals ?? 0,
+                )} normalized settlement value retained by treasury`
               : item.feeState === "ESTIMATE" && item.estimatedFees
-                ? `${formatValueAmount(
+                ? `${formatGroupedDecimalUnits(
                     item.estimatedFees.treasuryAmount,
                     item.initialPortfolio?.valueDecimals ?? 0,
-                  )} estimated value units · not earned`
+                  )} estimated normalized settlement value · not earned`
                 : item.status === "ORPHANED"
                   ? "Not counted as earned revenue"
                   : "No fee evidence recorded"}
@@ -125,6 +135,8 @@ function ActivityCard({ item }: { readonly item: ActivityItem }) {
 }
 
 export default function History() {
+  const [searchParams] = useSearchParams();
+  const positionId = searchParams.get("positionId") ?? undefined;
   const [items, setItems] = useState<ActivityItem[]>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [cursor, setCursor] = useState<string | undefined>();
@@ -140,7 +152,7 @@ export default function History() {
     setLoading(true);
     setActivityError(null);
     new AurkaClient({ baseUrl: apiBaseUrl })
-      .listActivity({ limit: 20, cursor })
+      .listActivity({ limit: 20, cursor, positionId })
       .then((page) => {
         if (!active) return;
         setItems(page.items);
@@ -158,7 +170,7 @@ export default function History() {
     return () => {
       active = false;
     };
-  }, [cursor]);
+  }, [cursor, positionId]);
 
   async function lookup() {
     setLookupLoading(true);
@@ -182,10 +194,12 @@ export default function History() {
           Trader records
         </p>
         <h1 className="mt-2 text-3xl font-semibold text-white">
-          Swap activity
+          {positionId ? "Space activity" : "Swap activity"}
         </h1>
         <p className="mt-3 max-w-2xl leading-7 text-slate-400">
-          Browse local preparation records and canonical settlement evidence.
+          {positionId
+            ? `Canonical and prepared settlement evidence for ${positionId}.`
+            : "Browse local preparation records and canonical settlement evidence."}{" "}
           Preparing an unsigned transaction is not a completed trade, and a
           quote fee is not earned revenue.
         </p>

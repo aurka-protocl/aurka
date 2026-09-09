@@ -1,6 +1,6 @@
 import type { PrepareIntentRequest } from "@aurka/shared";
 import {
-  calculateAssetValueDown,
+  calculateAssetValueExact,
   calculatePortfolioValuation,
   computeCapacityEpochId,
   computePortfolioPriceSnapshotHash,
@@ -61,6 +61,17 @@ export interface FixtureOptions {
   readonly blockNumber?: bigint;
   readonly positionId?: string;
   readonly policyId?: string;
+  readonly assetTokens?: readonly string[];
+  readonly assetBounds?: readonly {
+    readonly token: string;
+    readonly minimumWeightBps: number;
+    readonly maximumWeightBps: number;
+  }[];
+  readonly maximumTransactionValue?: bigint;
+  readonly policyNonce?: bigint;
+  readonly strategyHash?: string;
+  readonly treasuryAddress?: string;
+  readonly protocolAddress?: string;
 }
 
 export interface FixtureBundle {
@@ -109,7 +120,11 @@ export function createCanonicalFixture(
   const blockNumber = options.blockNumber ?? 100n;
   const positionId = options.positionId ?? FIXTURE_POSITION_ID;
   const policyId = options.policyId ?? FIXTURE_POLICY_ID;
-  const assets = [
+  const strategyHash = options.strategyHash ?? FIXTURE_AQUA_STRATEGY_HASH;
+  const policyNonce = options.policyNonce ?? 1n;
+  const treasuryAddress = options.treasuryAddress ?? FIXTURE_ADDRESSES.treasury;
+  const protocolAddress = options.protocolAddress ?? FIXTURE_ADDRESSES.protocol;
+  const allAssets = [
     {
       token: FIXTURE_ADDRESSES.usdc,
       symbol: "USDC",
@@ -141,14 +156,38 @@ export function createCanonicalFixture(
       maximumWeightBps: 1_500,
     },
   ] as const;
-  const portfolio = calculatePortfolioValuation(assets, 0);
+  const selectedTokens = options.assetTokens
+    ? new Set(options.assetTokens.map((token) => token.toLowerCase()))
+    : undefined;
+  const assets = allAssets.filter(
+    (asset) =>
+      selectedTokens === undefined ||
+      selectedTokens.has(asset.token.toLowerCase()),
+  );
+  if (assets.length < 2)
+    throw new Error("A fixture portfolio requires at least two assets");
+  const boundOverrides = new Map(
+    (options.assetBounds ?? []).map((asset) => [
+      asset.token.toLowerCase(),
+      asset,
+    ]),
+  );
+  const configuredAssets = assets.map((asset) => ({
+    ...asset,
+    ...(boundOverrides.has(asset.token.toLowerCase())
+      ? boundOverrides.get(asset.token.toLowerCase())
+      : {}),
+  }));
+  const portfolio = calculatePortfolioValuation(configuredAssets, 0);
   const policy: FinancialPolicy = {
-    maximumTransactionValue: 50_000n,
-    assets: assets.map(({ token, minimumWeightBps, maximumWeightBps }) => ({
-      token,
-      minimumWeightBps,
-      maximumWeightBps,
-    })),
+    maximumTransactionValue: options.maximumTransactionValue ?? 50_000n,
+    assets: configuredAssets.map(
+      ({ token, minimumWeightBps, maximumWeightBps }) => ({
+        token,
+        minimumWeightBps,
+        maximumWeightBps,
+      }),
+    ),
   };
   const fee: FinancialFeeConfig = {
     baseFeeBps: 20,
@@ -161,9 +200,9 @@ export function createCanonicalFixture(
   const feeAccounting: FeeAccounting = {
     feeToken: FIXTURE_ADDRESSES.usdc,
     feePaymentMode: "OUTPUT_TOKEN",
-    treasuryRecipient: FIXTURE_ADDRESSES.treasury,
+    treasuryRecipient: treasuryAddress,
     solverRecipient: FIXTURE_ADDRESSES.solver,
-    protocolRecipient: FIXTURE_ADDRESSES.protocol,
+    protocolRecipient: protocolAddress,
   };
   const capacityEpochDraft: CapacityEpoch = {
     positionId,
@@ -172,10 +211,10 @@ export function createCanonicalFixture(
     balanceSnapshot: FIXTURE_BALANCE_SNAPSHOT,
     priceSnapshot: FIXTURE_PRICE_SNAPSHOT,
     portfolioPriceSnapshot: `0x${"00".repeat(32)}`,
-    policyNonce: 1n,
+    policyNonce,
     riskCertificateHash: FIXTURE_RISK_CERTIFICATE_HASH,
-    aquaStrategyHash: FIXTURE_AQUA_STRATEGY_HASH,
-    capacityBaselineValue: 50_000n,
+    aquaStrategyHash: strategyHash,
+    capacityBaselineValue: options.maximumTransactionValue ?? 50_000n,
     consumedBefore: 0n,
     chainId: 31337n,
     verifyingContract: FIXTURE_ADDRESSES.router,
@@ -197,8 +236,8 @@ export function createCanonicalFixture(
     traderOutputExecutionPrice: outputReference,
     approvedTraderInputSnapshotId: inputReference.snapshotId,
     approvedTraderOutputSnapshotId: outputReference.snapshotId,
-    traderInputAmount: 50_000n,
-    traderOutputAmount: 49_816n,
+    traderInputAmount: options.maximumTransactionValue ?? 50_000n,
+    traderOutputAmount: (options.maximumTransactionValue ?? 50_000n) - 184n,
     traderInputDecimals: 0,
     traderOutputDecimals: 0,
     valueDecimals: 0,
@@ -206,17 +245,25 @@ export function createCanonicalFixture(
     maximumPriceAgeSeconds: 120,
     maximumPriceDeviationBps: 100,
   };
-  const balancesHash = FIXTURE_BALANCE_SNAPSHOT;
   const priceSnapshot = computeSettlementPriceSnapshotHash(priceProtection);
-  const portfolioPriceSnapshot = computePortfolioPriceSnapshotHash([
-    outputReference,
-    inputReference,
-    price(FIXTURE_ADDRESSES.link, `0x${"33".repeat(32)}`, nowSeconds),
-  ]);
+  const portfolioPrices = configuredAssets.map((asset) =>
+    asset.token.toLowerCase() === FIXTURE_ADDRESSES.usdc.toLowerCase()
+      ? outputReference
+      : asset.token.toLowerCase() === FIXTURE_ADDRESSES.weth.toLowerCase()
+        ? inputReference
+        : price(asset.token, `0x${"33".repeat(32)}`, nowSeconds),
+  );
+  const portfolioPriceSnapshot =
+    computePortfolioPriceSnapshotHash(portfolioPrices);
+  const balancesHash = hashAquaBalances(
+    configuredAssets.map((asset) => asset.token),
+    configuredAssets.map((asset) => asset.balance),
+  );
   const capacityEpoch: CapacityEpoch = {
     ...capacityEpochDraft,
     priceSnapshot,
     portfolioPriceSnapshot,
+    balanceSnapshot: balancesHash,
   };
   const capacityEpochId = computeCapacityEpochId(capacityEpoch);
   const snapshot: SolverSnapshot = {
@@ -229,7 +276,7 @@ export function createCanonicalFixture(
     feeAccounting,
     riskMode: "NORMAL" satisfies RiskMode,
     riskCertificateHash: FIXTURE_RISK_CERTIFICATE_HASH,
-    policyNonce: "1",
+    policyNonce: policyNonce.toString(),
     portfolio,
     portfolioSnapshot: snapshotFromPortfolio(
       positionId,
@@ -241,7 +288,7 @@ export function createCanonicalFixture(
     capacityEpochId,
     priceProtection,
     snapshotBlock: blockNumber,
-    aquaStrategyHash: FIXTURE_AQUA_STRATEGY_HASH,
+    aquaStrategyHash: strategyHash,
     balancesHash,
     rawAmountsForValue: (traderInputValue, treasuryOutputValue) => ({
       traderInputAmount: traderInputValue,
@@ -262,9 +309,9 @@ export function createCanonicalFixture(
     allowPartialFill: true,
     deadline: nowSeconds + 60,
     nonce: "1",
-    balanceSnapshot: FIXTURE_BALANCE_SNAPSHOT,
+    balanceSnapshot: balancesHash,
     priceSnapshot,
-    aquaStrategyHash: FIXTURE_AQUA_STRATEGY_HASH,
+    aquaStrategyHash: strategyHash,
   };
   return { snapshot, intent };
 }
@@ -306,7 +353,7 @@ export class FixtureProvider implements SolverSnapshotProvider {
         candidate.token.toLowerCase() === input.traderInputToken.toLowerCase(),
     );
     if (!asset) throw new Error("Unsupported input token");
-    const requestedValue = calculateAssetValueDown(
+    const requestedValue = calculateAssetValueExact(
       {
         balance: input.requestedTraderInputAmount,
         decimals: asset.decimals,
@@ -460,18 +507,46 @@ export class DeterministicRouterSimulator implements RouterSimulator {
 
 /** Interactive local demo clock; deterministic tests use FixtureProvider directly. */
 export class LocalDemoProvider implements SolverSnapshotProvider {
+  private readonly bundles = new Map<string, FixtureBundle>();
   async getPositionSnapshot(positionId: string): Promise<SolverSnapshot> {
-    if (positionId !== FIXTURE_POSITION_ID)
-      throw new Error("Unknown demo position");
-    return createCanonicalFixture({ nowSeconds: this.now() }).snapshot;
+    const bundle = this.bundles.get(positionId);
+    if (!bundle) throw new Error("Unknown demo position");
+    return {
+      ...bundle.snapshot,
+      portfolioSnapshot: {
+        ...bundle.snapshot.portfolioSnapshot,
+        observedAt: this.now(),
+      },
+      priceProtection: {
+        ...bundle.snapshot.priceProtection,
+        nowSeconds: this.now(),
+      },
+    };
   }
   private readonly prepared = new Map<
     string,
-    { provider: FixtureProvider; expiresAt: number }
+    { provider: FixtureProvider; expiresAt: number; positionId: string }
   >();
   constructor(
     private readonly now: () => number = () => Math.floor(Date.now() / 1000),
-  ) {}
+  ) {
+    const canonical = createCanonicalFixture({ nowSeconds: this.now() });
+    this.bundles.set(canonical.snapshot.positionId, canonical);
+  }
+
+  registerSpace(bundle: FixtureBundle): void {
+    this.bundles.set(bundle.snapshot.positionId, bundle);
+    for (const [intentId, prepared] of this.prepared)
+      if (prepared.positionId === bundle.snapshot.positionId)
+        this.prepared.delete(intentId);
+  }
+
+  private bundleFor(positionId: string): FixtureBundle {
+    const bundle = this.bundles.get(positionId);
+    if (!bundle) throw new Error("Unknown demo position");
+    return bundle;
+  }
+
   async prepareIntent(
     input: PrepareIntentRequest,
   ): Promise<AtomicSettlementIntent> {
@@ -480,9 +555,7 @@ export class LocalDemoProvider implements SolverSnapshotProvider {
       if (item.expiresAt <= now) this.prepared.delete(id);
     if (this.prepared.size >= 1000)
       throw new Error("Local demo preparation capacity reached");
-    const provider = new FixtureProvider(
-      createCanonicalFixture({ nowSeconds: now }),
-    );
+    const provider = new FixtureProvider(this.bundleFor(input.positionId));
     const intent = await provider.prepareIntent({
       ...input,
       deadline: Math.min(input.deadline, now + 60),
@@ -490,6 +563,7 @@ export class LocalDemoProvider implements SolverSnapshotProvider {
     this.prepared.set(intent.intentId, {
       provider,
       expiresAt: Math.min(input.deadline, now + 60),
+      positionId: input.positionId,
     });
     return intent;
   }
@@ -501,9 +575,7 @@ export class LocalDemoProvider implements SolverSnapshotProvider {
       if (item.expiresAt <= now) this.prepared.delete(id);
     if (this.prepared.size >= 1000)
       throw new Error("Local demo preparation capacity reached");
-    const provider = new FixtureProvider(
-      createCanonicalFixture({ nowSeconds: now }),
-    );
+    const provider = new FixtureProvider(this.bundleFor(input.positionId));
     const intent = await provider.prepareTokenIntent({
       ...input,
       deadline: Math.min(input.deadline, now + 60),
@@ -511,6 +583,7 @@ export class LocalDemoProvider implements SolverSnapshotProvider {
     this.prepared.set(intent.intentId, {
       provider,
       expiresAt: Math.min(input.deadline, now + 60),
+      positionId: input.positionId,
     });
     return intent;
   }

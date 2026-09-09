@@ -12,6 +12,13 @@ by the local API. The fixture is useful for explaining the product, but it is
 not a wallet, live market data, a production treasury, or a claim about a real
 portfolio.
 
+The local demo also supports owner-managed Spaces. Each created Space gets its
+own persisted identity, policy hash, strategy hash, and isolated demo
+allocation. These allocations are logical local test balances, not custody or
+funds shared with the canonical fixture. A browser wallet signs every create,
+edit, activate, pause, and resume request with EIP-712 typed data; entering an
+owner address alone is never authorization.
+
 The amounts below are in **normalized settlement value units**. The fixture's
 value scale is `0`; no USD or other currency denomination is established. A
 quote, solve result, signature, or unsigned transaction preparation is a preview
@@ -46,8 +53,9 @@ Open:
 - Canonical AURKA app: <http://127.0.0.1:3002/spaces>
 - API health: <http://127.0.0.1:8787/health>
 
-The default service uses its configured local database. For an isolated manual
-run, point `DATABASE_URL` at a new temporary file when starting the API:
+The default service persists to `.aurka/service.sqlite` and applies migrations
+on startup. For an isolated manual run, point `DATABASE_URL` at a new temporary
+file when starting the API:
 
 ```bash
 MANUAL_DB_DIR="$(mktemp -d)"
@@ -96,7 +104,9 @@ the browser smoke test. They are not invented presentation examples.
 3. **Explain the boundary.** Open **Settings** for the Space. The hard policy is
    a portfolio boundary: the solver cannot propose a trade whose expected result
    violates the configured ranges or cap. It is not a guarantee against market
-   losses. Settings and environment details are read-only in the demo.
+   losses. The owner can edit supported rules or pause/resume trading after a
+   fresh wallet signature; each confirmed change is persisted in that Space's
+   change history.
 
 4. **Request a trade.** Follow **Trade this Space** or open `/trade/:spaceId`.
    The guided form starts with WETH → USDC and requested amount `200,000`.
@@ -158,6 +168,31 @@ and database resources when finished. The browser walkthrough must continue to
 describe its own prepared record as **Prepared — unsigned, not submitted** and
 must not import the confirmed result into the no-RPC demo.
 
+## Create and manage a Space
+
+Use the local demo service for this flow. Connect the owner wallet, open
+`/spaces`, and choose **Create Space**. The guided form collects, in order:
+
+1. name and stable Space ID;
+2. supported assets (the demo currently supports USDC, WETH, and LINK);
+3. minimum/maximum allocation ranges in basis points;
+4. maximum transaction value; and
+5. an exact review before signing.
+
+**Save draft** persists a `DRAFT` Space without inventing holdings or claiming
+deployment. **Deploy / activate** requires a second owner signature and then
+creates that Space's isolated local allocation. Settings can later update the
+name/rules or pause and resume trading. Wrong-owner signatures, altered drafts,
+expired authorizations, replayed nonces, duplicate assets, unsupported assets,
+and infeasible ranges are rejected by the service.
+
+Create two different IDs, activate both, refresh the browser, and restart the
+API. Their policy/strategy identities and holdings remain separate. The fork
+runner similarly seeds **Team inventory** and **Research inventory** as two
+explicit policy/strategy allocations; use `pnpm fork:reset` before testing that
+fresh two-Space state. Fork pause/resume and transaction-limit writes are direct
+wallet transactions against the selected policy registry.
+
 ## Two-minute hackathon script
 
 “AURKA lets an organization publish the portfolio boundary it is willing to
@@ -192,7 +227,7 @@ browser viewports. Record any failure using the issue template below.
 | ---------------- | ------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------- |
 | Entry            | Open `/spaces`                                         | Purpose, demo status, and next actions are understandable without an account.                                     |
 | Holdings         | Open `/spaces/:spaceId/holdings`                       | Source identity, balances, allocations, rules, cap, and directional capacity are visible and labeled.             |
-| Rules            | Open `/spaces/:spaceId/settings`                       | Space identity and authority are visible; demo settings are accurately read-only.                                 |
+| Rules            | Open `/spaces/:spaceId/settings`                       | Space identity and authority are visible; the owner can edit rules or pause/resume with a wallet signature.       |
 | Quote            | Request the default WETH → USDC swap                   | Requested, executable, receive, fee, binding rule, partial remainder, and expected portfolio values are readable. |
 | Space            | Select a different Space                               | The selected Space name and source-backed values update; no unexplained source is implied.                        |
 | Changed input    | Edit the amount after a quote                          | The old review is removed and a new quote is required.                                                            |
@@ -207,6 +242,10 @@ browser viewports. Record any failure using the issue template below.
 | Touch            | Inspect primary controls at 390px and 320px            | Interactive targets are at least 36px in both dimensions and have visible labels.                                 |
 | Keyboard         | Tab through navigation, forms, checkbox, and buttons   | Order is logical, controls are reachable, headings are semantic, and focused controls have a visible outline.     |
 | Non-color cues   | Inspect statuses, warnings, and charts                 | Meaning is available in text/labels, not by color alone; allocation has a text equivalent.                        |
+| Create           | Connect owner → `/spaces/new` → save a draft           | A durable `DRAFT` appears after the owner signature; no deployment or holdings are claimed.                       |
+| Activate         | Review a draft → **Deploy / activate**                 | A second owner signature changes the same Space to `ACTIVE` with its own policy/strategy identity and holdings.   |
+| Unauthorized     | Sign with another wallet or alter the reviewed draft   | The API rejects the request; the stored Space and nonce remain unchanged.                                         |
+| Persistence      | Create two Spaces, restart API, reload `/spaces`       | Both identities, metadata, rules, owner scope, and isolated holdings remain distinct.                             |
 
 ### Issue template
 

@@ -10,6 +10,7 @@ import {
   calculateDirectionalCapacity,
   calculateAssetValue,
   calculateAssetValueDown,
+  calculateAssetValueExact,
   establishDirectionalCapacity,
   calculateOptionSpaceFee,
   calculatePortfolioValuation,
@@ -802,6 +803,53 @@ describe("price protection", () => {
     expect(() => assertMinimumTreasuryExchangeValue(989n, 1_000n, 100)).toThrow(
       "Treasury exchange value below minimum",
     );
+  });
+
+  it("requires exact token-to-value conversion across six- and eighteen-decimal assets", () => {
+    expect(
+      calculateAssetValueExact(
+        {
+          balance: 1_000_000n,
+          decimals: 6,
+          price: 1n,
+          priceDecimals: 0,
+        },
+        0,
+      ),
+    ).toBe(1n);
+    expect(
+      calculateAssetValueExact(
+        {
+          balance: 1_562_500_000_000_000_000n,
+          decimals: 18,
+          price: 3_200n,
+          priceDecimals: 0,
+        },
+        0,
+      ),
+    ).toBe(5_000n);
+    expect(() =>
+      calculateAssetValueExact(
+        {
+          balance: 1n,
+          decimals: 6,
+          price: 1n,
+          priceDecimals: 0,
+        },
+        0,
+      ),
+    ).toThrow("not exactly representable");
+    expect(() =>
+      calculateAssetValueExact(
+        {
+          balance: 1_666_666_666_666_666_666n,
+          decimals: 18,
+          price: 3_000n,
+          priceDecimals: 0,
+        },
+        0,
+      ),
+    ).toThrow("not exactly representable");
   });
 
   it("keeps the stable price commitment unchanged when a fill is split", () => {

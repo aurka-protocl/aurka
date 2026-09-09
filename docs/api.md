@@ -38,6 +38,24 @@ summaries are available at `GET /v1/positions/{id}/fees`. See
 reorg semantics. Prepared quotes and unsigned transaction requests never count
 as earned revenue.
 
+Space management is exposed through the persistent Space read model:
+
+```text
+GET  /v1/spaces?ownerAddress=0x…&limit=20&cursor=…
+GET  /v1/spaces/:id
+GET  /v1/spaces/:id/changes
+POST /v1/spaces/prepare
+POST /v1/spaces/confirm
+```
+
+`prepare` returns the exact EIP-712 domain, typed data, payload hash, nonce, and
+five-minute deadline for `CREATE`, `UPDATE`, `ACTIVATE`, `PAUSE`, or `RESUME`.
+`confirm` recovers the signer against the recorded owner/controller, checks the
+exact draft and current nonce, rejects expiry/replay, persists the state and
+emits a durable Space change record. The no-RPC local demo creates isolated
+logical allocations; a fork keeps policy writes on the selected chain authority
+and does not load a server-held owner key.
+
 Task 7 adds a separate, deterministic risk surface:
 
 ```text
@@ -112,4 +130,10 @@ they are not production settlement evidence.
 Snapshot providers may implement `getPositionSnapshot(positionId)` for capacity
 reads that do not yet have an intent. The local demo implements this with its
 current clock; the service validates chain/router context for both position and
-intent snapshots. Existing providers retain the intent-based fallback.
+intent snapshots. Existing providers retain the intent-based fallback. Space and
+position read endpoints use that provider to refresh the durable portfolio,
+policy nonce, bounds, fee configuration, and source metadata before responding.
+A provider failure returns `SNAPSHOT_UNAVAILABLE` and dependent trading remains
+blocked; a stale authoritative snapshot returns `SNAPSHOT_STALE`. Explicit
+fork/RPC mode requires a provider that implements `getPositionSnapshot` and
+never falls back to `FixtureProvider`.

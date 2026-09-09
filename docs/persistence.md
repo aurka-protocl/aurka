@@ -22,13 +22,15 @@ common ancestor, removes the entire orphaned branch transactionally, and replays
 replacement logs. This handles empty blocks as well as duplicate delivery
 without treating the read model as contract authority.
 
-The read model includes policies, managed assets, risk certificates, positions,
-capacity epochs, signed intents/proposals, quotes, executions, settlement
-records, agent roles, versioned risk observations/evaluations, watchtower jobs,
-wallet policy fingerprints, risk audit events, idempotency responses,
-checkpoints, and raw events. Settlement records join `TradeExecuted` and
-`FeesRouted` by transaction/proposal for bounded activity pagination and fee
-aggregation; removed records remain marked orphaned for history but are excluded
-from earned revenue. Risk observations and decisions retain source, deployment,
-block, finality, hash, and configuration provenance; no private authorization
-key or Privy app secret is persisted.
+The read model includes Spaces and their durable draft/owner/state metadata,
+owner-authorized Space change records and replay-protected authorization nonces,
+policies, managed assets, risk certificates, positions, capacity epochs, signed
+intents/proposals, quotes, executions, settlement records, agent roles,
+versioned risk observations/evaluations, watchtower jobs, wallet policy
+fingerprints, risk audit events, idempotency responses, checkpoints, and raw
+events. Settlement records join `TradeExecuted` and `FeesRouted` by
+transaction/proposal for bounded activity pagination and fee aggregation;
+removed records remain marked orphaned for history but are excluded from earned
+revenue. Risk observations and decisions retain source, deployment, block,
+finality, hash, and configuration provenance; no private authorization key or
+Privy app secret is persisted.

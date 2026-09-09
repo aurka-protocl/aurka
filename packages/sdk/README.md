@@ -21,10 +21,11 @@ The client validates the API `{ok, data, requestId}` envelope and returns
 Transport failures use `NETWORK_ERROR`; a timeout covering headers and body uses
 `TIMEOUT`; malformed JSON or a schema mismatch uses `INVALID_RESPONSE`.
 
-Available methods: `health`, `readiness`, `listPositions`, `getPosition`,
-`getCapacity`, `prepareIntent`, `prepareIntentFromTokenAmount`, `submitIntent`,
-`getIntent`, `listProposals`, `quote`, `solve`, `execute`, `getExecution`,
-`evaluateRisk`, `saveRiskCertificate`, and `getRiskPosition`.
+Available methods: `health`, `readiness`, `listPositions`, `listSpaces`,
+`getSpace`, `prepareSpaceMutation`, `confirmSpaceMutation`, `listSpaceChanges`,
+`getPosition`, `getCapacity`, `prepareIntent`, `prepareIntentFromTokenAmount`,
+`submitIntent`, `getIntent`, `listProposals`, `quote`, `solve`, `execute`,
+`getExecution`, `evaluateRisk`, `saveRiskCertificate`, and `getRiskPosition`.
 
 `prepareIntent` accepts a position, trader/token addresses, requested and
 minimum output values, nonce, and deadline. The server provider supplies

@@ -43,6 +43,8 @@ import {
   POLICY_ID,
   POSITION_ID_HASH,
   STRATEGY_HASH,
+  DEFAULT_SPACE,
+  SECOND_SPACE,
 } from "./chain-snapshot.mjs";
 import {
   artifact,
@@ -283,6 +285,47 @@ async function main() {
       86400n,
       100,
     ]);
+    await write(wallet, client, policyRegistry, "createPolicy", [
+      SECOND_SPACE.policyId,
+      alice,
+      alice,
+      [
+        {
+          token: USDC,
+          decimals: 6,
+          minimumWeightBps: 7000,
+          maximumWeightBps: 10000,
+        },
+        {
+          token: WETH,
+          decimals: 18,
+          minimumWeightBps: 0,
+          maximumWeightBps: 3000,
+        },
+      ],
+      2500n,
+      {
+        baseFeeBps: 20,
+        slopeBps: 80,
+        maximumFeeBps: 100,
+        treasuryBaseFeeBps: 10,
+        solverFeeBps: 5,
+        protocolFeeBps: 5,
+        treasuryFeeRecipient: alice,
+        protocolFeeRecipient: accounts[2].address,
+      },
+    ]);
+    await write(wallet, client, policyRegistry, "setSettlementConfiguration", [
+      SECOND_SPACE.policyId,
+      SECOND_SPACE.positionIdHash,
+      SECOND_SPACE.strategyHash,
+      oracle.address,
+    ]);
+    await write(wallet, client, policyRegistry, "setPriceProtection", [
+      SECOND_SPACE.policyId,
+      86400n,
+      100,
+    ]);
     const block = await client.getBlock();
     for (const [token, price, byte] of [
       [USDC, 1n, "11"],
@@ -355,6 +398,17 @@ async function main() {
         token,
         amount,
       ]);
+    for (const [token, amount] of [
+      [USDC, 35000n * 1000000n],
+      [WETH, 5n * 10n ** 18n],
+    ])
+      await write(wallet, client, aqua, "seed", [
+        alice,
+        router.address,
+        SECOND_SPACE.strategyHash,
+        token,
+        amount,
+      ]);
     // Alice explicitly enables allowance and epoch from her browser wallet.
     manifest = {
       mode: "fork",
@@ -385,6 +439,10 @@ async function main() {
       ],
       funding:
         "Fork-only USDC holder impersonation and WETH deposit; dedicated public Anvil accounts 0/1",
+      spaces: [
+        { ...DEFAULT_SPACE, name: "Team inventory" },
+        { ...SECOND_SPACE, name: "Research inventory" },
+      ],
     };
     writeFileSync(manifestFile, stringify(manifest));
   }
@@ -411,13 +469,20 @@ async function main() {
   const epochs = existsSync(epochsFile)
     ? JSON.parse(readFileSync(epochsFile, "utf8"))
     : {};
+  const spaceDefinitions = manifest.spaces ?? [
+    { ...DEFAULT_SPACE, name: manifest.name },
+  ];
   class ForkProvider extends LocalChainSnapshotProvider {
+    constructor(space) {
+      super(client, contracts, solver.address, space);
+      this.space = space;
+    }
     async currentSnapshot() {
       const snapshot = await super.currentSnapshot();
       const active = await client.readContract({
         ...contracts.router,
         functionName: "capacityState",
-        args: [POSITION_ID_HASH, WETH, USDC],
+        args: [this.space.positionIdHash, WETH, USDC],
         blockNumber: snapshot.snapshotBlock,
       });
       const remembered = epochs[active.capacityEpochId];
@@ -442,7 +507,7 @@ async function main() {
           409,
         );
       const active = await read(client, contracts.router, "capacityState", [
-        POSITION_ID_HASH,
+        this.space.positionIdHash,
         WETH,
         USDC,
       ]);
@@ -458,7 +523,45 @@ async function main() {
       return snapshot;
     }
   }
-  const provider = new ForkProvider(client, contracts, solver.address);
+  const providers = new Map(
+    spaceDefinitions.map((space) => [
+      space.positionId,
+      new ForkProvider(space),
+    ]),
+  );
+  const provider = {
+    getPositionSnapshot: (positionId) => {
+      const selected = providers.get(positionId);
+      if (!selected)
+        throw new ServiceError("SPACE_NOT_FOUND", "Space was not found", 404);
+      return selected.getPositionSnapshot(positionId);
+    },
+    prepareIntent: (input) => {
+      const selected = providers.get(input.positionId);
+      if (!selected)
+        throw new ServiceError("SPACE_NOT_FOUND", "Space was not found", 404);
+      return selected.prepareIntent(input);
+    },
+    prepareTokenIntent: (input) => {
+      const selected = providers.get(input.positionId);
+      if (!selected)
+        throw new ServiceError("SPACE_NOT_FOUND", "Space was not found", 404);
+      return selected.prepareTokenIntent(input);
+    },
+    getSnapshot: (intent) => {
+      const selected = spaceDefinitions
+        .map((space) => providers.get(space.positionId))
+        .find(
+          (candidate) =>
+            candidate &&
+            intent.positionIdHash.toLowerCase() ===
+              candidate.space.positionIdHash.toLowerCase(),
+        );
+      if (!selected)
+        throw new ServiceError("SPACE_NOT_FOUND", "Space was not found", 404);
+      return selected.getSnapshot(intent);
+    },
+  };
   database = new ServiceDatabase({ filename: path.join(DIR, "service.db") });
   const service = new AurkaService({
     database,
@@ -468,19 +571,39 @@ async function main() {
     settlementContract: manifest.router,
     indexConfirmations: 0,
     rpcTransport: new JsonRpcHttpTransport(RPC),
+    spaceMode: "fork",
     seedFixture: false,
   });
   const indexer = new ChainEventIndexer(service.repository);
   let indexedBlock = BigInt(manifest.deploymentBlock) - 1n;
-  async function refresh() {
-    const snapshot = await provider.currentSnapshot();
+  async function refresh(spaceId = DEFAULT_SPACE.positionId) {
+    const selected = providers.get(spaceId);
+    if (!selected)
+      throw new ServiceError("SPACE_NOT_FOUND", "Space was not found", 404);
+    const definition = spaceDefinitions.find(
+      (space) => space.positionId === spaceId,
+    );
+    const snapshot = await selected.currentSnapshot();
     const position = positionForSnapshot(
       snapshot,
       manifest.policyRegistry,
       manifest.alice,
     );
-    position.name = manifest.name;
+    position.name = definition?.name ?? manifest.name;
     service.repository.savePosition(position);
+    service.repository.saveSpaceIdentity({
+      id: position.id,
+      name: position.name,
+      ownerAddress: position.owner,
+      controllerAddress: position.policy.governance,
+      treasuryAddress: position.treasury,
+      chainId: position.chainId,
+      policyId: position.policy.id,
+      strategyId: definition?.strategyHash ?? manifest.strategyHash,
+      policyRegistryAddress: position.policy.registry,
+      mode: "fork",
+      state: position.policy.paused ? "PAUSED" : "ACTIVE",
+    });
     const end = snapshot.snapshotBlock;
     if (end > indexedBlock) {
       const logs = await client.getLogs({
@@ -495,7 +618,7 @@ async function main() {
     }
     return snapshot;
   }
-  await refresh();
+  for (const space of spaceDefinitions) await refresh(space.positionId);
   api = createApiServer({ service });
   await listenApiServer(api, 0, "127.0.0.1");
   const apiPort = api.server.address().port;
@@ -508,7 +631,15 @@ async function main() {
     try {
       const url = new URL(request.url, "http://localhost");
       if (request.method === "GET" && url.pathname === "/fork") {
-        const snapshot = await refresh();
+        const spaceId =
+          url.searchParams.get("spaceId") ?? DEFAULT_SPACE.positionId;
+        const definition = spaceDefinitions.find(
+          (space) => space.positionId === spaceId,
+        );
+        const selected = providers.get(spaceId);
+        if (!definition || !selected)
+          throw new ServiceError("SPACE_NOT_FOUND", "Space was not found", 404);
+        const snapshot = await refresh(spaceId);
         const atBlock = {
           readContract: (request) =>
             client.readContract({
@@ -517,7 +648,7 @@ async function main() {
             }),
         };
         const active = await read(atBlock, contracts.router, "capacityState", [
-          POSITION_ID_HASH,
+          definition.positionIdHash,
           WETH,
           USDC,
         ]);
@@ -551,7 +682,7 @@ async function main() {
               manifest.policyRegistry,
               manifest.alice,
             ),
-            name: manifest.name,
+            name: definition.name,
           },
           balances,
           capacity: {
@@ -572,10 +703,18 @@ async function main() {
         response.end(payload);
       } else if (request.method === "GET" && url.pathname === "/fork/owner") {
         const action = url.searchParams.get("action");
+        const spaceId =
+          url.searchParams.get("spaceId") ?? DEFAULT_SPACE.positionId;
+        const definition = spaceDefinitions.find(
+          (space) => space.positionId === spaceId,
+        );
+        const selected = providers.get(spaceId);
+        if (!definition || !selected)
+          throw new ServiceError("SPACE_NOT_FOUND", "Space was not found", 404);
         let transaction;
         if (action === "pause" || action === "resume")
           transaction = tx(contracts.policyRegistry, "setPaused", [
-            POLICY_ID,
+            definition.policyId,
             action === "pause",
           ]);
         else if (action === "limit") {
@@ -587,7 +726,7 @@ async function main() {
           transaction = tx(
             contracts.policyRegistry,
             "setMaximumTransactionValue",
-            [POLICY_ID, value],
+            [definition.policyId, value],
           );
         } else if (action === "allowance" || action === "revoke")
           transaction = tx({ address: USDC, abi: erc20Abi }, "approve", [
@@ -595,10 +734,7 @@ async function main() {
             action === "revoke" ? 0n : 70000n * 1000000n,
           ]);
         else if (action === "authorize") {
-          const snapshot =
-            await LocalChainSnapshotProvider.prototype.currentSnapshot.call(
-              provider,
-            );
+          const snapshot = await selected.currentSnapshot();
           if (snapshot.chainPolicy.paused)
             throw new Error("Resume the policy before authorizing capacity.");
           const fill = calculateDirectSettlement({
@@ -622,7 +758,7 @@ async function main() {
           epochs[snapshot.capacityEpochId] = snapshot.capacityEpoch;
           writeFileSync(epochsFile, stringify(epochs));
           transaction = tx(contracts.router, "activateCapacityEpoch", [
-            POLICY_ID,
+            definition.policyId,
             contractEpoch(snapshot),
             contractPriceInput(snapshot),
           ]);
@@ -633,7 +769,7 @@ async function main() {
         });
         response.end(stringify(transaction));
       } else {
-        await refresh();
+        for (const space of spaceDefinitions) await refresh(space.positionId);
         const chunks = [];
         let size = 0;
         for await (const chunk of request) {

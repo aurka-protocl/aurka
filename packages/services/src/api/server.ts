@@ -36,6 +36,14 @@ import {
   submitIntentResponseSchema,
   unsignedTransactionRequestSchema,
   atomicSettlementIntentSchema,
+  spaceChangesResponseSchema,
+  spaceListQuerySchema,
+  spaceMutationConfirmRequestSchema,
+  spaceMutationPrepareRequestSchema,
+  spaceMutationPrepareResponseSchema,
+  spaceMutationResponseSchema,
+  spaceRecordSchema,
+  spacesResponseSchema,
   type AtomicSettlementIntent,
 } from "@aurka/shared";
 import { z } from "zod";
@@ -219,6 +227,21 @@ export function openApi(): Record<string, unknown> {
     ["/health", "get", undefined, healthResponseSchema],
     ["/ready", "get", undefined, readinessResponseSchema],
     ["/v1/positions", "get", undefined, positionsResponseSchema],
+    ["/v1/spaces", "get", undefined, spacesResponseSchema],
+    [
+      "/v1/spaces/prepare",
+      "post",
+      spaceMutationPrepareRequestSchema,
+      spaceMutationPrepareResponseSchema,
+    ],
+    [
+      "/v1/spaces/confirm",
+      "post",
+      spaceMutationConfirmRequestSchema,
+      spaceMutationResponseSchema,
+    ],
+    ["/v1/spaces/{id}", "get", undefined, spaceRecordSchema],
+    ["/v1/spaces/{id}/changes", "get", undefined, spaceChangesResponseSchema],
     ["/v1/activity", "get", undefined, activityResponseSchema],
     ["/v1/positions/{id}", "get", undefined, positionSchema],
     ["/v1/positions/{id}/fees", "get", undefined, feeSummaryResponseSchema],
@@ -283,6 +306,20 @@ export function openApi(): Record<string, unknown> {
     );
     if (path === "/v1/positions")
       parameters.push(
+        {
+          name: "limit",
+          in: "query",
+          schema: { type: "integer", minimum: 1, maximum: 100 },
+        },
+        { name: "cursor", in: "query", schema: { type: "string" } },
+      );
+    if (path === "/v1/spaces")
+      parameters.push(
+        {
+          name: "ownerAddress",
+          in: "query",
+          schema: { type: "string", pattern: "^0x[0-9a-fA-F]{40}$" },
+        },
         {
           name: "limit",
           in: "query",
@@ -392,8 +429,48 @@ async function handle(
       return;
     }
 
+    if (method === "GET" && path === "/v1/spaces") {
+      const query = spaceListQuerySchema.parse(queryValues(url));
+      await service.refreshSpaces(query.ownerAddress);
+      sendSuccess(
+        response,
+        200,
+        service.listSpaces(query.limit, query.cursor, query.ownerAddress),
+        request,
+        spacesResponseSchema,
+      );
+      return;
+    }
+
+    const spaceChangesMatch = path.match(/^\/v1\/spaces\/([^/]+)\/changes$/);
+    if (method === "GET" && spaceChangesMatch) {
+      sendSuccess(
+        response,
+        200,
+        service.listSpaceChanges(decodeURIComponent(spaceChangesMatch[1]!)),
+        request,
+        spaceChangesResponseSchema,
+      );
+      return;
+    }
+
+    const spaceMatch = path.match(/^\/v1\/spaces\/([^/]+)$/);
+    if (method === "GET" && spaceMatch) {
+      const spaceId = decodeURIComponent(spaceMatch[1]!);
+      await service.refreshSpace(spaceId);
+      sendSuccess(
+        response,
+        200,
+        service.getSpace(spaceId),
+        request,
+        spaceRecordSchema,
+      );
+      return;
+    }
+
     if (method === "GET" && path === "/v1/positions") {
       const query = listRequestSchema.parse(queryValues(url));
+      await service.refreshPositions();
       sendSuccess(
         response,
         200,
@@ -445,10 +522,12 @@ async function handle(
 
     const positionMatch = path.match(/^\/v1\/positions\/([^/]+)$/);
     if (method === "GET" && positionMatch) {
+      const positionId = decodeURIComponent(positionMatch[1]!);
+      await service.refreshPosition(positionId);
       sendSuccess(
         response,
         200,
-        service.getPosition(decodeURIComponent(positionMatch[1]!)),
+        service.getPosition(positionId),
         request,
         positionSchema,
       );
@@ -470,6 +549,38 @@ async function handle(
     }
 
     const payload = method === "POST" ? await body(request, limit) : undefined;
+    if (method === "POST" && path === "/v1/spaces/prepare") {
+      const input = spaceMutationPrepareRequestSchema.parse(payload);
+      sendSuccess(
+        response,
+        200,
+        service.prepareSpaceMutation(input),
+        request,
+        spaceMutationPrepareResponseSchema,
+      );
+      return;
+    }
+    if (method === "POST" && path === "/v1/spaces/confirm") {
+      const input = spaceMutationConfirmRequestSchema.parse(payload);
+      const result = await withIdempotency(
+        service,
+        request,
+        path,
+        payload,
+        async () => ({
+          statusCode: 200,
+          data: await service.confirmSpaceMutation(input),
+        }),
+      );
+      sendSuccess(
+        response,
+        result.statusCode,
+        result.data,
+        request,
+        spaceMutationResponseSchema,
+      );
+      return;
+    }
     if (method === "POST" && path === "/v1/intents/prepare") {
       const input = prepareIntentRequestSchema.parse(payload);
       service.getPosition(input.positionId);

@@ -81,13 +81,14 @@ obtained through the real WETH deposit function. No token code is replaced.
    the explicitly mocked price of 3,200 reference units/WETH, the request is
    worth 6,400, exceeding the 5,000 limit. The review shows exact raw-token-
    scaled input/output and fee legs.
-4. Accept the reviewed amounts. **Approve and sign** requests the required WETH
-   allowance and an EIP-712 intent signature. It then simulates the signed
-   router transaction. **Prepared** means it has not yet been submitted.
-5. **Submit trade**, approve the wallet request, and wait for **Trade:
-   confirmed**. Inspect the local receipt hash, block and gas. Both screens
-   refresh from the fork; reload them and use **Check last local receipt** to
-   query the saved hash.
+4. Accept the reviewed amounts. **Review and sign exact trade** requests the
+   required WETH allowance and an EIP-712 intent signature. It then simulates
+   the signed router transaction. **Prepared** means it has not yet been
+   submitted.
+5. **Submit exact trade**, approve the wallet request, and wait for **Saved
+   transaction confirmed**. Inspect the local receipt hash, block and gas. Both
+   screens refresh from the fork; reload them and use **Check last local
+   receipt** to query the saved hash.
 6. Check WETH conservation between Alice and Bob and USDC conservation across
    Alice, Bob, solver and protocol. Fees retained by Alice are part of her net
    balance change, not an extra transfer. Gas changes ETH separately.

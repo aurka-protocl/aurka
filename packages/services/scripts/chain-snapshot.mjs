@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {
+  calculateAssetValueExact,
   calculatePortfolioValuation,
   computeCapacityEpochId,
   computePortfolioPriceSnapshotHash,
@@ -18,6 +19,18 @@ export const POSITION_ID_HASH = hashBytes(POSITION_ID);
 export const STRATEGY_HASH = hashBytes("strategy:local-settlement-e2e");
 const ZERO_HASH = `0x${"00".repeat(32)}`;
 const MAX_VALUE = 50000n;
+export const DEFAULT_SPACE = {
+  positionId: POSITION_ID,
+  policyId: POLICY_ID,
+  positionIdHash: POSITION_ID_HASH,
+  strategyHash: STRATEGY_HASH,
+};
+export const SECOND_SPACE = {
+  positionId: "position:local-settlement-e2e-secondary",
+  policyId: hashBytes("policy:local-settlement-e2e-secondary"),
+  positionIdHash: hashBytes("position:local-settlement-e2e-secondary"),
+  strategyHash: hashBytes("strategy:local-settlement-e2e-secondary"),
+};
 function check(condition, message) {
   assert.ok(condition, message);
 }
@@ -81,10 +94,11 @@ export function policyFrom(raw) {
 }
 
 export class LocalChainSnapshotProvider {
-  constructor(publicClient, contracts, solverAddress) {
+  constructor(publicClient, contracts, solverAddress, space = DEFAULT_SPACE) {
     this.publicClient = publicClient;
     this.contracts = contracts;
     this.solverAddress = solverAddress;
+    this.space = space;
   }
 
   async getPositionSnapshot(positionId) {
@@ -101,7 +115,7 @@ export class LocalChainSnapshotProvider {
     const intent = {
       intentId: hashBytes(JSON.stringify(input)),
       policyId: snapshot.policyId,
-      positionIdHash: POSITION_ID_HASH,
+      positionIdHash: this.space.positionIdHash,
       trader: input.trader,
       traderInputToken: input.traderInputToken,
       traderOutputToken: input.traderOutputToken,
@@ -121,11 +135,65 @@ export class LocalChainSnapshotProvider {
     return intent;
   }
 
+  async prepareTokenIntent(input) {
+    const snapshot = await this.currentSnapshot();
+    if (input.positionId !== snapshot.positionId)
+      throw new ServiceError("INVALID_SNAPSHOT", "Unknown local position");
+    const asset = snapshot.portfolio.assets.find(
+      (candidate) =>
+        candidate.token.toLowerCase() === input.traderInputToken.toLowerCase(),
+    );
+    if (!asset)
+      throw new ServiceError(
+        "INVALID_SNAPSHOT",
+        "The selected input token is not managed by this Space",
+      );
+    let requestedValue;
+    try {
+      requestedValue = calculateAssetValueExact(
+        {
+          balance: input.requestedTraderInputAmount,
+          decimals: asset.decimals,
+          price: asset.price,
+          priceDecimals: asset.priceDecimals,
+        },
+        snapshot.portfolio.valueDecimals,
+      );
+    } catch (error) {
+      throw new ServiceError(
+        "UNREPRESENTABLE_AMOUNT",
+        error instanceof Error
+          ? error.message
+          : "Token amount cannot be represented in settlement value units",
+        400,
+      );
+    }
+    if (requestedValue === 0n)
+      throw new ServiceError(
+        "UNREPRESENTABLE_AMOUNT",
+        "Enter a larger token amount; it is below one settlement value unit",
+        400,
+      );
+    return this.prepareIntent({
+      positionId: input.positionId,
+      trader: input.trader,
+      traderInputToken: input.traderInputToken,
+      traderOutputToken: input.traderOutputToken,
+      requestedValue: requestedValue.toString(),
+      minimumTraderOutputValue: input.minimumTraderOutputValue,
+      nonce: input.nonce,
+      deadline: input.deadline,
+    });
+  }
+
   async getSnapshot(intent) {
     const snapshot = await this.currentSnapshot();
     if (intent.policyId.toLowerCase() !== snapshot.policyId.toLowerCase())
       throw new ServiceError("INVALID_SNAPSHOT", "Unknown policy");
-    if (intent.positionIdHash.toLowerCase() !== POSITION_ID_HASH.toLowerCase())
+    if (
+      intent.positionIdHash.toLowerCase() !==
+      this.space.positionIdHash.toLowerCase()
+    )
       throw new ServiceError("INVALID_SNAPSHOT", "Unknown position");
     if (
       intent.aquaStrategyHash.toLowerCase() !==
@@ -166,11 +234,11 @@ export class LocalChainSnapshotProvider {
         }),
     };
     const rawPolicy = await read(pinnedClient, policyRegistry, "getPolicy", [
-      POLICY_ID,
+      this.space.policyId,
     ]);
     const chainPolicy = policyFrom(rawPolicy);
     const tokenAddresses = await read(pinnedClient, policyRegistry, "assets", [
-      POLICY_ID,
+      this.space.policyId,
     ]);
     const fee = chainPolicy.fee;
     const managedAssets = [];
@@ -186,7 +254,7 @@ export class LocalChainSnapshotProvider {
         pinnedClient,
         policyRegistry,
         "assetBounds",
-        [POLICY_ID, tokenAddress],
+        [this.space.policyId, tokenAddress],
       );
       const priceRaw = await read(pinnedClient, oracle, "getPrice", [
         tokenAddress,
@@ -194,7 +262,7 @@ export class LocalChainSnapshotProvider {
       const balanceRaw = await read(pinnedClient, aqua, "rawBalances", [
         chainPolicy.treasury,
         router.address,
-        STRATEGY_HASH,
+        this.space.strategyHash,
         tokenAddress,
       ]);
       const bounds = {
@@ -265,7 +333,7 @@ export class LocalChainSnapshotProvider {
       balances,
     );
     const capacityEpoch = {
-      positionId: POSITION_ID,
+      positionId: this.space.positionId,
       traderInputToken: inputAsset.token,
       traderOutputToken: outputAsset.token,
       balanceSnapshot: balancesHash,
@@ -273,14 +341,14 @@ export class LocalChainSnapshotProvider {
       portfolioPriceSnapshot,
       policyNonce: chainPolicy.nonce,
       riskCertificateHash: ZERO_HASH,
-      aquaStrategyHash: STRATEGY_HASH,
+      aquaStrategyHash: this.space.strategyHash,
       capacityBaselineValue: chainPolicy.maximumTransactionValue,
       consumedBefore: 0n,
       chainId: BigInt(CHAIN_ID),
       verifyingContract: router.address,
     };
     const portfolioSnapshot = {
-      positionId: POSITION_ID,
+      positionId: this.space.positionId,
       blockNumber: block.number.toString(),
       observedAt: blockTimestamp,
       nav: portfolio.nav.toString(),
@@ -298,10 +366,10 @@ export class LocalChainSnapshotProvider {
       snapshotHash: hashCanonical(portfolio),
     };
     return {
-      positionId: POSITION_ID,
+      positionId: this.space.positionId,
       chainId: CHAIN_ID,
       verifyingContract: router.address,
-      policyId: POLICY_ID,
+      policyId: this.space.policyId,
       policy: {
         maximumTransactionValue: chainPolicy.maximumTransactionValue,
         assets: managedAssets.map((asset) => ({
@@ -328,6 +396,7 @@ export class LocalChainSnapshotProvider {
       riskMode: "NORMAL",
       riskCertificateHash: ZERO_HASH,
       policyNonce: chainPolicy.nonce.toString(),
+      paused: chainPolicy.paused,
       chainPolicy,
       portfolio,
       portfolioSnapshot,
@@ -335,7 +404,7 @@ export class LocalChainSnapshotProvider {
       capacityEpochId: computeCapacityEpochId(capacityEpoch),
       priceProtection,
       snapshotBlock: block.number,
-      aquaStrategyHash: STRATEGY_HASH,
+      aquaStrategyHash: this.space.strategyHash,
       balancesHash,
       rawAmountsForValue: (traderInputValue, treasuryOutputValue) => ({
         traderInputAmount: valueToRaw(traderInputValue, inputAsset),
@@ -395,7 +464,7 @@ export function positionForSnapshot(snapshot, registry, treasury) {
 
 export function contractEpoch(snapshot) {
   return {
-    positionIdHash: POSITION_ID_HASH,
+    positionIdHash: hashBytes(snapshot.positionId),
     traderInputTokenId: bytes32Address(snapshot.capacityEpoch.traderInputToken),
     traderOutputTokenId: bytes32Address(
       snapshot.capacityEpoch.traderOutputToken,

@@ -47,6 +47,20 @@ import {
   listRequestSchema,
   positionsResponseSchema,
   proposalsResponseSchema,
+  spaceChangesResponseSchema,
+  spaceListQuerySchema,
+  spaceMutationConfirmRequestSchema,
+  spaceMutationPrepareRequestSchema,
+  spaceMutationPrepareResponseSchema,
+  spaceMutationResponseSchema,
+  spaceRecordSchema,
+  spacesResponseSchema,
+  type SpaceMutationConfirmRequest,
+  type SpaceMutationPrepareRequest,
+  type SpaceRecord,
+  type SpaceMutationPrepareResponse,
+  type SpaceMutationResponse,
+  type SpaceChange,
 } from "@aurka/shared";
 
 export interface AurkaClientOptions {
@@ -188,6 +202,68 @@ export class AurkaClient {
       `/v1/positions/${encodeURIComponent(id)}`,
       undefined,
       positionSchema,
+    );
+  }
+
+  async listSpaces(
+    limit?: number,
+    ownerAddress?: string,
+    cursor?: string,
+  ): Promise<{ items: SpaceRecord[]; nextCursor: string | null }> {
+    const queryInput = spaceListQuerySchema.parse({
+      ...(limit === undefined ? {} : { limit }),
+      ...(ownerAddress === undefined ? {} : { ownerAddress }),
+      ...(cursor === undefined ? {} : { cursor }),
+    });
+    const params = new URLSearchParams({ limit: String(queryInput.limit) });
+    if (queryInput.ownerAddress)
+      params.set("ownerAddress", queryInput.ownerAddress);
+    if (queryInput.cursor) params.set("cursor", queryInput.cursor);
+    return this.request(
+      "GET",
+      `/v1/spaces?${params.toString()}`,
+      undefined,
+      spacesResponseSchema,
+    );
+  }
+
+  async getSpace(id: string): Promise<SpaceRecord> {
+    return this.request(
+      "GET",
+      `/v1/spaces/${encodeURIComponent(id)}`,
+      undefined,
+      spaceRecordSchema,
+    );
+  }
+
+  async prepareSpaceMutation(
+    input: SpaceMutationPrepareRequest,
+  ): Promise<SpaceMutationPrepareResponse> {
+    return this.request(
+      "POST",
+      "/v1/spaces/prepare",
+      spaceMutationPrepareRequestSchema.parse(input),
+      spaceMutationPrepareResponseSchema,
+    );
+  }
+
+  async confirmSpaceMutation(
+    input: SpaceMutationConfirmRequest,
+  ): Promise<SpaceMutationResponse> {
+    return this.request(
+      "POST",
+      "/v1/spaces/confirm",
+      spaceMutationConfirmRequestSchema.parse(input),
+      spaceMutationResponseSchema,
+    );
+  }
+
+  async listSpaceChanges(id: string): Promise<SpaceChange[]> {
+    return this.request(
+      "GET",
+      `/v1/spaces/${encodeURIComponent(id)}/changes`,
+      undefined,
+      spaceChangesResponseSchema,
     );
   }
 

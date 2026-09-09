@@ -10,6 +10,7 @@ import Spaces from "./pages/Spaces";
 import { SpaceHoldings, SpaceOverview, SpaceSettings } from "./pages/Space";
 import Trade from "./pages/Trade";
 import History from "./pages/History";
+import SpaceForm from "./pages/SpaceForm";
 import { WalletProvider } from "./wallet";
 import { spaceAdapter, spaceUrl } from "./domain/spaces";
 import { useEffect, useState } from "react";
@@ -24,10 +25,13 @@ function LegacySpaceRedirect({
   useEffect(() => {
     let active = true;
     spaceAdapter
-      .listSpaces(1)
+      .listSpaces(100)
       .then((spaces) => {
-        if (active && spaces[0])
-          navigate(spaceUrl(spaces[0].identity.id, section), { replace: true });
+        const space = spaces.find(
+          (candidate) => candidate.identity.state === "ACTIVE",
+        );
+        if (active && space)
+          navigate(spaceUrl(space.identity.id, section), { replace: true });
         else if (active) setError("No Space is available in this environment.");
       })
       .catch((requestError: unknown) => {
@@ -71,6 +75,7 @@ function AppRoutes() {
           />
 
           <Route path="/spaces" element={<Spaces />} />
+          <Route path="/spaces/new" element={<SpaceForm />} />
           <Route path="/spaces/:spaceId" element={<SpaceOverview />} />
           <Route path="/spaces/:spaceId/overview" element={<SpaceOverview />} />
           <Route path="/spaces/:spaceId/holdings" element={<SpaceHoldings />} />

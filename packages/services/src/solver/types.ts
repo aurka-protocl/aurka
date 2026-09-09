@@ -30,6 +30,8 @@ export interface SolverSnapshot {
   readonly riskMode: RiskMode;
   readonly riskCertificateHash: string;
   readonly policyNonce: string;
+  /** Authoritative chain/provider pause state when the source exposes it. */
+  readonly paused?: boolean;
   readonly portfolio: PortfolioValuation;
   readonly portfolioSnapshot: PortfolioSnapshot;
   readonly capacityEpoch: CapacityEpoch;

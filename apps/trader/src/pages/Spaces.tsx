@@ -6,23 +6,32 @@ import {
   formatValueAmount,
   snapshotFreshness,
 } from "@aurka/shared";
-import { appMode, environmentLabel } from "../config";
+import { appMode } from "../config";
 import { spaceAdapter, spaceUrl, type SpaceRecord } from "../domain/spaces";
+import { useWallet } from "../wallet";
 
 function shortAddress(value: string): string {
   return `${value.slice(0, 6)}…${value.slice(-4)}`;
 }
 
 function SpaceCard({ space }: { readonly space: SpaceRecord }) {
-  const snapshot = space.position.currentPortfolio;
+  const snapshot = space.position?.currentPortfolio;
   const now = Math.floor(Date.now() / 1000);
   const freshness = snapshot
     ? snapshotFreshness(
         snapshot.observedAt,
         now,
-        space.position.policy.priceMaxAgeSeconds,
+        space.position?.policy.priceMaxAgeSeconds,
       )
     : "unknown";
+  const stateClass =
+    space.identity.state === "ACTIVE"
+      ? "border-emerald-800 bg-emerald-950/30 text-emerald-300"
+      : space.identity.state === "PAUSED"
+        ? "border-amber-800 bg-amber-950/30 text-amber-300"
+        : space.identity.state === "FAILED"
+          ? "border-red-800 bg-red-950/30 text-red-300"
+          : "border-slate-700 bg-slate-950 text-slate-300";
   return (
     <article className="min-w-0 rounded-2xl border border-slate-700 bg-slate-900 p-5 transition hover:border-cyan-700 sm:p-6">
       <div className="flex items-start justify-between gap-4">
@@ -35,13 +44,15 @@ function SpaceCard({ space }: { readonly space: SpaceRecord }) {
               {space.identity.name}
             </h2>
             <p className="mt-1 text-sm text-slate-400">
-              Owner {shortAddress(space.identity.ownerAddress)} · chain{" "}
-              {space.identity.chainId}
+              {space.identity.ownerAddress
+                ? `Owner ${shortAddress(space.identity.ownerAddress)} · `
+                : ""}
+              chain {space.identity.chainId}
             </p>
           </div>
         </div>
         <span className="shrink-0 rounded-full border border-slate-700 px-2.5 py-1 text-[11px] text-slate-400">
-          {environmentLabel}
+          {space.identity.state}
         </span>
       </div>
 
@@ -53,7 +64,9 @@ function SpaceCard({ space }: { readonly space: SpaceRecord }) {
           <dd className="mt-1 font-semibold text-cyan-200">
             {snapshot
               ? `${formatValueAmount(snapshot.nav, snapshot.valueDecimals)} value units`
-              : "Unavailable"}
+              : space.draft
+                ? "Not deployed"
+                : "Unavailable"}
           </dd>
         </div>
         <div>
@@ -61,7 +74,7 @@ function SpaceCard({ space }: { readonly space: SpaceRecord }) {
             Managed assets
           </dt>
           <dd className="mt-1 font-semibold text-white">
-            {snapshot?.assets.length ?? "—"}
+            {snapshot?.assets.length ?? space.draft?.assets.length ?? "—"}
           </dd>
         </div>
         <div>
@@ -69,20 +82,25 @@ function SpaceCard({ space }: { readonly space: SpaceRecord }) {
             Snapshot
           </dt>
           <dd
-            className={
-              freshness === "stale"
-                ? "mt-1 font-semibold text-amber-300"
-                : "mt-1 font-semibold text-emerald-300"
-            }
+            className={`mt-1 font-semibold ${freshness === "stale" ? "text-amber-300" : "text-emerald-300"}`}
           >
             {snapshot
               ? `${freshness === "stale" ? "Stale" : "Observed"} · ${formatSnapshotAge(snapshot.observedAt, now)}`
-              : "Unavailable"}
+              : space.identity.state === "DRAFT"
+                ? "Save complete · activation pending"
+                : "Unavailable"}
           </dd>
         </div>
       </dl>
 
       <div className="mt-6 flex flex-wrap items-center gap-3">
+        <span
+          className={`rounded-full border px-2.5 py-1 text-[11px] ${stateClass}`}
+        >
+          {space.identity.state === "PENDING"
+            ? "Deployment pending"
+            : space.identity.state}
+        </span>
         <Link
           to={spaceUrl(space.identity.id)}
           className="inline-flex min-h-10 items-center gap-2 rounded-lg bg-cyan-700 px-4 py-2.5 text-sm font-medium text-white hover:bg-cyan-600"
@@ -101,6 +119,7 @@ function SpaceCard({ space }: { readonly space: SpaceRecord }) {
 }
 
 export default function Spaces() {
+  const wallet = useWallet();
   const [spaces, setSpaces] = useState<SpaceRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -111,7 +130,7 @@ export default function Spaces() {
     setLoading(true);
     setError(null);
     spaceAdapter
-      .listSpaces()
+      .listSpaces(50, wallet.address ?? undefined)
       .then((next) => {
         if (active) setSpaces(next);
       })
@@ -129,7 +148,7 @@ export default function Spaces() {
     return () => {
       active = false;
     };
-  }, [refreshKey]);
+  }, [refreshKey, wallet.address]);
 
   return (
     <section className="space-y-6 text-slate-200">
@@ -139,21 +158,31 @@ export default function Spaces() {
             AURKA Spaces
           </p>
           <h1 className="mt-2 text-3xl font-semibold tracking-tight text-white sm:text-4xl">
-            Choose a managed portfolio
+            {wallet.address ? "Your Aurka Spaces" : "Available Aurka Spaces"}
           </h1>
           <p className="mt-3 max-w-2xl leading-7 text-slate-400">
-            A Space combines an owner-controlled trading mandate, its current
-            holdings, and the activity that proves what changed. Select one to
-            inspect its rules or trade.
+            {wallet.address
+              ? "Create and manage the portfolios authorized by your connected wallet."
+              : "Connect a wallet to see your Spaces and manage their rules. You can still inspect available demo portfolios."}
           </p>
         </div>
-        <button
-          type="button"
-          onClick={() => setRefreshKey((current) => current + 1)}
-          className="inline-flex min-h-10 items-center gap-2 rounded-lg border border-slate-700 px-3 py-2 text-sm text-slate-200 hover:border-cyan-500"
-        >
-          <RefreshCw className="h-4 w-4" aria-hidden="true" /> Refresh
-        </button>
+        <div className="flex flex-wrap gap-2">
+          {wallet.address && appMode !== "fork" && (
+            <Link
+              to="/spaces/new"
+              className="inline-flex min-h-10 items-center rounded-lg bg-cyan-700 px-3 py-2 text-sm font-medium text-white hover:bg-cyan-600"
+            >
+              Create Space
+            </Link>
+          )}
+          <button
+            type="button"
+            onClick={() => setRefreshKey((current) => current + 1)}
+            className="inline-flex min-h-10 items-center gap-2 rounded-lg border border-slate-700 px-3 py-2 text-sm text-slate-200 hover:border-cyan-500"
+          >
+            <RefreshCw className="h-4 w-4" aria-hidden="true" /> Refresh
+          </button>
+        </div>
       </div>
 
       {loading ? (
@@ -186,8 +215,9 @@ export default function Spaces() {
         <div className="rounded-2xl border border-slate-700 bg-slate-900 p-6">
           <h2 className="text-lg font-semibold text-white">No Spaces yet</h2>
           <p className="mt-2 max-w-xl leading-6 text-slate-400">
-            No configured portfolio is available in this environment. Space
-            creation is not enabled here.
+            {wallet.address
+              ? "Create a Space to define its supported assets, allocation ranges, and transaction limit."
+              : "No configured portfolio is available in this environment. Connect the owner wallet to create a Space."}
           </p>
         </div>
       ) : (

@@ -1,33 +1,19 @@
 import { AurkaClient } from "@aurka/sdk";
-import type { Position, SpaceAdapter, SpaceRecord } from "@aurka/shared";
-import { apiBaseUrl, appMode } from "../config";
+import type { SpaceAdapter, SpaceRecord } from "@aurka/shared";
+import { apiBaseUrl } from "../config";
 
 export type { SpaceAdapter, SpaceRecord };
-
-function toSpaceRecord(position: Position): SpaceRecord {
-  return {
-    identity: {
-      id: position.id,
-      name: position.name,
-      ownerAddress: position.owner,
-      treasuryAddress: position.treasury,
-      chainId: position.chainId,
-      mode: appMode,
-    },
-    position,
-  };
-}
 
 class ApiSpaceAdapter implements SpaceAdapter {
   private readonly client = new AurkaClient({ baseUrl: apiBaseUrl });
 
-  async listSpaces(limit = 50): Promise<SpaceRecord[]> {
-    const response = await this.client.listPositions(limit);
-    return response.items.map(toSpaceRecord);
+  async listSpaces(limit = 50, ownerAddress?: string): Promise<SpaceRecord[]> {
+    const response = await this.client.listSpaces(limit, ownerAddress);
+    return response.items;
   }
 
   async getSpace(spaceId: string): Promise<SpaceRecord> {
-    return toSpaceRecord(await this.client.getPosition(spaceId));
+    return this.client.getSpace(spaceId);
   }
 }
 

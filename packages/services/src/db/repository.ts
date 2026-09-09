@@ -21,6 +21,10 @@ import {
   positionSchema,
   protocolEventSchema,
   quoteSchema,
+  spaceChangeSchema,
+  spaceDraftSchema,
+  spaceIdentitySchema,
+  spaceRecordSchema,
   type AtomicSettlementIntent,
   type AtomicSettlementProposal,
   type ActivityItem,
@@ -31,6 +35,10 @@ import {
   type ProtocolEvent,
   type Quote,
   type SimulationStatus,
+  type SpaceChange,
+  type SpaceDraft,
+  type SpaceIdentity,
+  type SpaceRecord,
 } from "@aurka/shared";
 
 import {
@@ -55,6 +63,8 @@ import {
   riskWorkflows,
   riskAuditEvents,
   settlementRecords,
+  spaces,
+  spaceChanges,
   walletPolicies,
 } from "./schema.js";
 import type { ServiceDrizzleDatabase } from "./database.js";
@@ -223,7 +233,227 @@ export class ServiceRepository {
         },
       })
       .run();
+
+    const existingSpace = this.db
+      .select({ state: spaces.state })
+      .from(spaces)
+      .where(eq(spaces.id, value.id))
+      .get();
+    const syncedState =
+      existingSpace &&
+      (existingSpace.state === "DRAFT" ||
+        existingSpace.state === "PENDING" ||
+        existingSpace.state === "FAILED")
+        ? existingSpace.state
+        : value.policy.paused
+          ? "PAUSED"
+          : "ACTIVE";
+    this.db
+      .insert(spaces)
+      .values({
+        id: value.id,
+        name: value.name,
+        owner: value.owner,
+        controller: value.policy.governance,
+        treasury: value.treasury,
+        chainId: value.chainId,
+        policyId: value.policy.id,
+        strategyId: `0x${"00".repeat(32)}`,
+        policyRegistry: value.policy.registry,
+        mode: "demo",
+        state: syncedState,
+        positionId: value.id,
+        draftJson: null,
+        failureReason: null,
+        updatedAt: value.updatedAt,
+        createdAt: value.createdAt,
+      })
+      .onConflictDoUpdate({
+        target: spaces.id,
+        set: {
+          name: value.name,
+          owner: value.owner,
+          controller: value.policy.governance,
+          treasury: value.treasury,
+          chainId: value.chainId,
+          policyId: value.policy.id,
+          policyRegistry: value.policy.registry,
+          state: syncedState,
+          positionId: value.id,
+          failureReason: null,
+          updatedAt: value.updatedAt,
+        },
+      })
+      .run();
     return value;
+  }
+
+  saveSpaceIdentity(
+    identity: SpaceIdentity,
+    draft?: SpaceDraft,
+    failureReason?: string,
+  ): SpaceIdentity {
+    const value = spaceIdentitySchema.parse(identity);
+    const parsedDraft =
+      draft === undefined ? undefined : spaceDraftSchema.parse(draft);
+    this.db
+      .insert(spaces)
+      .values({
+        id: value.id,
+        name: value.name,
+        owner: value.ownerAddress,
+        controller: value.controllerAddress,
+        treasury: value.treasuryAddress,
+        chainId: value.chainId,
+        policyId: value.policyId,
+        strategyId: value.strategyId,
+        policyRegistry: value.policyRegistryAddress,
+        mode: value.mode,
+        state: value.state,
+        positionId: value.id,
+        draftJson: parsedDraft === undefined ? null : json(parsedDraft),
+        failureReason: failureReason ?? null,
+        updatedAt: now(),
+        createdAt: now(),
+      })
+      .onConflictDoUpdate({
+        target: spaces.id,
+        set: {
+          name: value.name,
+          owner: value.ownerAddress,
+          controller: value.controllerAddress,
+          treasury: value.treasuryAddress,
+          chainId: value.chainId,
+          policyId: value.policyId,
+          strategyId: value.strategyId,
+          policyRegistry: value.policyRegistryAddress,
+          mode: value.mode,
+          state: value.state,
+          positionId: value.id,
+          ...(parsedDraft === undefined
+            ? {}
+            : { draftJson: json(parsedDraft) }),
+          failureReason: failureReason ?? null,
+          updatedAt: now(),
+        },
+      })
+      .run();
+    return value;
+  }
+
+  getSpace(id: string): SpaceRecord | undefined {
+    const row = this.db.select().from(spaces).where(eq(spaces.id, id)).get();
+    if (!row) return undefined;
+    const position = this.getPosition(row.positionId ?? row.id);
+    const identity = spaceIdentitySchema.parse({
+      id: row.id,
+      name: row.name,
+      ownerAddress: row.owner,
+      controllerAddress: row.controller,
+      treasuryAddress: row.treasury,
+      chainId: row.chainId,
+      policyId: row.policyId,
+      strategyId: row.strategyId,
+      policyRegistryAddress: row.policyRegistry,
+      mode: row.mode,
+      state: row.state,
+    });
+    return spaceRecordSchema.parse({
+      identity,
+      ...(position ? { position } : {}),
+      ...(row.draftJson ? { draft: parse<SpaceDraft>(row.draftJson) } : {}),
+      ...(row.failureReason ? { failureReason: row.failureReason } : {}),
+    }) as SpaceRecord;
+  }
+
+  listSpaces(
+    limit: number,
+    cursor?: string,
+    ownerAddress?: string,
+  ): Page<SpaceRecord> {
+    const rows = this.db
+      .select({ id: spaces.id })
+      .from(spaces)
+      .where(
+        and(
+          cursor ? gt(spaces.id, cursor) : undefined,
+          ownerAddress
+            ? sql`lower(${spaces.owner}) = lower(${ownerAddress})`
+            : undefined,
+        ),
+      )
+      .orderBy(asc(spaces.id))
+      .limit(limit + 1)
+      .all();
+    const items = rows.flatMap((row) => {
+      const space = this.getSpace(row.id);
+      return space ? [space] : [];
+    });
+    return {
+      items: items.slice(0, limit),
+      nextCursor:
+        rows.length > limit ? (items.at(limit - 1)?.identity.id ?? null) : null,
+    };
+  }
+
+  getSpaceAuthNonce(spaceId: string): string {
+    const row = this.db
+      .select({ authNonce: spaces.authNonce })
+      .from(spaces)
+      .where(eq(spaces.id, spaceId))
+      .get();
+    return row?.authNonce ?? "0";
+  }
+
+  consumeSpaceAuthNonce(spaceId: string, expectedNonce: string): boolean {
+    const next = (BigInt(expectedNonce) + 1n).toString();
+    const result = this.db
+      .update(spaces)
+      .set({ authNonce: next, updatedAt: now() })
+      .where(and(eq(spaces.id, spaceId), eq(spaces.authNonce, expectedNonce)))
+      .run();
+    return result.changes === 1;
+  }
+
+  saveSpaceChange(input: SpaceChange): SpaceChange {
+    const value = spaceChangeSchema.parse(input);
+    this.db
+      .insert(spaceChanges)
+      .values({
+        id: value.id,
+        spaceId: value.spaceId,
+        eventType: value.eventType,
+        actor: value.actor,
+        status: value.status,
+        receiptHash: value.receiptHash ?? null,
+        payloadJson: json(value.payload),
+        createdAt: value.createdAt,
+      })
+      .onConflictDoNothing()
+      .run();
+    return value;
+  }
+
+  listSpaceChanges(spaceId: string, limit = 100): SpaceChange[] {
+    return this.db
+      .select()
+      .from(spaceChanges)
+      .where(eq(spaceChanges.spaceId, spaceId))
+      .orderBy(desc(spaceChanges.createdAt), desc(spaceChanges.id))
+      .limit(limit)
+      .all()
+      .map((row) =>
+        spaceChangeSchema.parse({
+          id: row.id,
+          spaceId: row.spaceId,
+          eventType: row.eventType,
+          actor: row.actor,
+          status: row.status,
+          ...(row.receiptHash ? { receiptHash: row.receiptHash } : {}),
+          payload: parse<Record<string, unknown>>(row.payloadJson),
+          createdAt: row.createdAt,
+        }),
+      );
   }
 
   getPosition(id: string): Position | undefined {

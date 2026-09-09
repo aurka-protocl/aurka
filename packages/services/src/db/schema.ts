@@ -28,6 +28,56 @@ export const positions = sqliteTable(
   (table) => [index("positions_chain_idx").on(table.chainId)],
 );
 
+/** Durable Space identity and lifecycle state. Positions remain the canonical
+ * settlement read model; this table owns user-facing metadata and drafts. */
+export const spaces = sqliteTable(
+  "spaces",
+  {
+    id: text("id").primaryKey(),
+    name: text("name").notNull(),
+    owner: text("owner").notNull(),
+    controller: text("controller").notNull(),
+    treasury: text("treasury").notNull(),
+    chainId: integer("chain_id").notNull(),
+    policyId: text("policy_id").notNull(),
+    strategyId: text("strategy_id").notNull(),
+    policyRegistry: text("policy_registry").notNull(),
+    mode: text("mode").notNull(),
+    state: text("state").notNull(),
+    positionId: text("position_id"),
+    draftJson: text("draft_json"),
+    failureReason: text("failure_reason"),
+    authNonce: text("auth_nonce").notNull().default("0"),
+    createdAt: createdAt(),
+    updatedAt: createdAt("updated_at"),
+  },
+  (table) => [
+    index("spaces_owner_idx").on(table.owner, table.id),
+    index("spaces_state_idx").on(table.state, table.updatedAt),
+  ],
+);
+
+export const spaceChanges = sqliteTable(
+  "space_changes",
+  {
+    id: text("id").primaryKey(),
+    spaceId: text("space_id").notNull(),
+    eventType: text("event_type").notNull(),
+    actor: text("actor").notNull(),
+    status: text("status").notNull(),
+    receiptHash: text("receipt_hash"),
+    payloadJson: text("payload_json").notNull(),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    index("space_changes_space_idx").on(
+      table.spaceId,
+      table.createdAt,
+      table.id,
+    ),
+  ],
+);
+
 export const policies = sqliteTable(
   "policies",
   {
@@ -424,6 +474,8 @@ export const riskWorkflows = sqliteTable("risk_workflows", {
 export const schema = {
   riskWorkflows,
   riskStates,
+  spaces,
+  spaceChanges,
   positions,
   policies,
   managedAssets,

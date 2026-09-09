@@ -295,7 +295,7 @@ async function main() {
     result.checks.push("legacy aliases redirect to canonical routes");
 
     await page.goto(`${appUrl}/trade/${spaceId}`, { waitUntil: "networkidle" });
-    await page.getByRole("heading", { name: "Try a swap" }).waitFor();
+    await page.getByRole("heading", { name: "Trade" }).waitFor();
     await page.getByRole("button", { name: "Get quote", exact: true }).click();
     await page
       .getByRole("heading", { name: "Review what would happen" })

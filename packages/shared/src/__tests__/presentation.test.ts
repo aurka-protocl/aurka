@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   formatBasisPoints,
   formatDecimalUnits,
+  formatGroupedDecimalUnits,
   formatScaledBasisPoints,
   formatSnapshotAge,
   parseDecimalUnits,
@@ -22,6 +23,13 @@ describe("lossless financial presentation", () => {
     const maximum = (2n ** 256n - 1n).toString();
     expect(formatDecimalUnits(maximum, 0)).toBe(maximum);
     expect(formatDecimalUnits(-1234567n, 6)).toBe("-1.234567");
+  });
+
+  it("groups rendered amounts without losing decimal precision", () => {
+    expect(formatGroupedDecimalUnits("1234567890123456789000000000", 18)).toBe(
+      "1,234,567,890.123456789",
+    );
+    expect(formatGroupedDecimalUnits(-1234567n, 2)).toBe("-12,345.67");
   });
 
   it("rejects unrepresentable precision instead of rounding", () => {

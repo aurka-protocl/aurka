@@ -6,7 +6,7 @@ const environmentSchema = z.object({
     .default("development"),
   HOST: z.string().min(1).default("127.0.0.1"),
   PORT: z.coerce.number().int().min(1).max(65_535).default(8787),
-  DATABASE_URL: z.string().min(1).default(":memory:"),
+  DATABASE_URL: z.string().min(1).default(".aurka/service.sqlite"),
   CHAIN_ID: z.coerce.number().int().positive().safe().default(31_337),
   RISK_RUNTIME_MODULE: z.string().min(1).optional(),
   RPC_URL: z.string().url().optional(),
