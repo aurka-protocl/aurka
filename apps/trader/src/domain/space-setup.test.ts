@@ -271,4 +271,281 @@ describe("atomic Space setup recovery", () => {
       ),
     ).toBeNull();
   });
+
+  it("rejects a prepared step with no transaction before asking the wallet to send", async () => {
+    const local = storage();
+    vi.stubGlobal("localStorage", local);
+    const provider = {
+      request: vi.fn(async ({ method }: { method: string }) => {
+        if (method === "eth_chainId") return "0x7a69";
+        throw new Error(`Unexpected provider method ${method}`);
+      }),
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        json: async () => ({ ...prepare, transaction: undefined }),
+      })),
+    );
+
+    await expect(
+      activateForkSpace("space:missing-transaction", owner, provider, () => {}),
+    ).rejects.toThrow("did not return the transaction");
+    expect(provider.request).not.toHaveBeenCalledWith(
+      expect.objectContaining({ method: "eth_sendTransaction" }),
+    );
+  });
+
+  it("reconciles a saved single transaction after reload without sending again", async () => {
+    const local = storage();
+    const key =
+      "aurka:space-setup:31337:0x1111111111111111111111111111111111111111:space:reload:ACTIVATE";
+    const hash = `0x${"66".repeat(32)}`;
+    local.setItem(
+      key,
+      JSON.stringify({
+        step: 0,
+        hash,
+        spaceId: "space:reload",
+        operation: "ACTIVATE",
+        owner,
+        chainId: 31337,
+      }),
+    );
+    vi.stubGlobal("localStorage", local);
+    const provider = {
+      request: vi.fn(async ({ method }: { method: string }) => {
+        if (method === "eth_chainId") return "0x7a69";
+        if (method === "eth_accounts") return [owner];
+        throw new Error(`Unexpected provider method ${method}`);
+      }),
+    };
+    const fetchMock = vi.fn(
+      async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body));
+        if (body.hash === hash)
+          return {
+            ok: true,
+            json: async () => ({ complete: true, space: { identity: {} } }),
+          };
+        return { ok: true, json: async () => prepare };
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      activateForkSpace("space:reload", owner, provider, () => {}),
+    ).resolves.toMatchObject({ identity: {} });
+    expect(
+      provider.request.mock.calls.some(
+        ([input]) => input.method === "eth_sendTransaction",
+      ),
+    ).toBe(false);
+    expect(local.getItem(key)).toBeNull();
+  });
+
+  it("blocks a saved transaction when the wallet is on a different fork instance", async () => {
+    const local = storage();
+    vi.stubGlobal("localStorage", local);
+    const forked = {
+      ...prepare,
+      forkGeneration: "fork-new",
+      forkAnchor: {
+        blockNumber: "10",
+        blockHash: `0x${"77".repeat(32)}`,
+      },
+    };
+    const provider = {
+      request: vi.fn(async ({ method }: { method: string }) => {
+        if (method === "eth_chainId") return "0x7a69";
+        if (method === "eth_accounts") return [owner];
+        if (method === "eth_getBlockByNumber")
+          return { hash: `0x${"88".repeat(32)}` };
+        throw new Error(`Unexpected provider method ${method}`);
+      }),
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({ ok: true, json: async () => forked })),
+    );
+
+    await expect(
+      activateForkSpace("space:fork-mismatch", owner, provider, () => {}),
+    ).rejects.toMatchObject({ state: "fork-mismatch" });
+    expect(provider.request).not.toHaveBeenCalledWith(
+      expect.objectContaining({ method: "eth_sendTransaction" }),
+    );
+  });
+
+  it("requires an explicit safe recovery action before retrying a missing first step", async () => {
+    const local = storage();
+    const key =
+      "aurka:space-setup:31337:0x1111111111111111111111111111111111111111:space:safe-retry:ACTIVATE";
+    const oldHash = `0x${"99".repeat(32)}`;
+    const newHash = `0x${"aa".repeat(32)}`;
+    local.setItem(
+      key,
+      JSON.stringify({
+        step: 0,
+        hash: oldHash,
+        spaceId: "space:safe-retry",
+        operation: "ACTIVATE",
+        owner,
+        chainId: 31337,
+      }),
+    );
+    vi.stubGlobal("localStorage", local);
+    const provider = {
+      request: vi.fn(async ({ method }: { method: string }) => {
+        if (method === "eth_chainId") return "0x7a69";
+        if (method === "eth_accounts") return [owner];
+        if (method === "eth_sendTransaction") return newHash;
+        if (method === "eth_getTransactionReceipt") return { status: "0x1" };
+        throw new Error(`Unexpected provider method ${method}`);
+      }),
+    };
+    const fetchMock = vi.fn(
+      async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body));
+        if (body.hash === oldHash && body.step === 0 && body.operation)
+          return { ok: true, json: async () => prepare };
+        if (body.hash === newHash)
+          return {
+            ok: true,
+            json: async () => ({ complete: true, space: { identity: {} } }),
+          };
+        return { ok: true, json: async () => prepare };
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      activateForkSpace(
+        "space:safe-retry",
+        owner,
+        provider,
+        () => {},
+        "ACTIVATE",
+        "retry",
+      ),
+    ).resolves.toMatchObject({ identity: {} });
+    expect(
+      provider.request.mock.calls.filter(
+        ([input]) => input.method === "eth_sendTransaction",
+      ),
+    ).toHaveLength(1);
+    expect(
+      fetchMock.mock.calls.some(([input]) =>
+        String(input).endsWith("/fork/spaces/recover"),
+      ),
+    ).toBe(true);
+  });
+
+  it("uses explicit token approvals followed by exactly one ordinary setup transaction", async () => {
+    const local = storage();
+    vi.stubGlobal("localStorage", local);
+    const setupTransaction = {
+      to: "0x2222222222222222222222222222222222222222",
+      data: "0xdeadbeef",
+      value: "0x0",
+    };
+    const prerequisites = [
+      {
+        token: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        symbol: "USDC",
+        amount: "35000000000",
+        spender: setupTransaction.to,
+        transaction: {
+          to: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          data: "0xapproveusdc",
+          value: "0x0",
+        },
+      },
+      {
+        token: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        symbol: "WETH",
+        amount: "5000000000000000000",
+        spender: setupTransaction.to,
+        transaction: {
+          to: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          data: "0xapproveweth",
+          value: "0x0",
+        },
+      },
+    ];
+    const setup = {
+      complete: false,
+      mode: "single-transaction" as const,
+      ownerAddress: owner,
+      treasury: "0xcccccccccccccccccccccccccccccccccccccccc",
+      step: 0,
+      total: 1,
+      label: "Create, fund, configure and activate Space",
+      transaction: setupTransaction,
+      prerequisites,
+    };
+    const requests: { method: string; params?: unknown[] }[] = [];
+    const hashes = [
+      `0x${"11".repeat(32)}`,
+      `0x${"22".repeat(32)}`,
+      `0x${"33".repeat(32)}`,
+    ];
+    const provider = {
+      request: vi.fn(async (input: { method: string; params?: unknown[] }) => {
+        requests.push(input);
+        if (input.method === "eth_chainId") return "0x7a69";
+        if (input.method === "eth_accounts") return [owner];
+        if (input.method === "eth_sendTransaction")
+          return hashes[
+            requests.filter(({ method }) => method === "eth_sendTransaction")
+              .length - 1
+          ];
+        if (input.method === "eth_getTransactionReceipt")
+          return { status: "0x1" };
+        throw new Error(`Unexpected provider method ${input.method}`);
+      }),
+    };
+    let prepares = 0;
+    const fetchMock = vi.fn(
+      async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body));
+        if (body.hash === hashes[2])
+          return {
+            ok: true,
+            json: async () => ({ complete: true, space: { identity: {} } }),
+          };
+        if (body.hash) return { ok: true, json: async () => setup };
+        prepares += 1;
+        return {
+          ok: true,
+          json: async () =>
+            prepares === 1 ? setup : { ...setup, prerequisites: [] },
+        };
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      activateForkSpace("space:single", owner, provider, () => {}),
+    ).resolves.toMatchObject({ identity: {} });
+    expect(
+      requests.filter(({ method }) => method === "eth_sendTransaction"),
+    ).toHaveLength(3);
+    expect(
+      requests.some(({ method }) => method === "wallet_getCapabilities"),
+    ).toBe(false);
+    expect(requests.some(({ method }) => method === "wallet_sendCalls")).toBe(
+      false,
+    );
+    expect(
+      (
+        requests.find(
+          ({ method, params }) =>
+            method === "eth_sendTransaction" &&
+            (params?.[0] as { data?: string }).data === "0xdeadbeef",
+        )?.params?.[0] as { to: string }
+      ).to,
+    ).toBe(setupTransaction.to);
+  });
 });

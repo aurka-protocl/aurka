@@ -72,6 +72,8 @@ contract AurkaPolicyRegistry {
     error UnsupportedAsset(bytes32 policyId, address token);
     error InvalidSettlementConfiguration();
     error InvalidPriceProtectionConfiguration();
+    error UnauthorizedInitialization();
+    error InitializationFactoryAlreadySet();
 
     event PolicyCreated(
         bytes32 indexed policyId,
@@ -126,12 +128,31 @@ contract AurkaPolicyRegistry {
         uint16 maximumPriceDeviationBps,
         uint256 nonce
     );
+    event InitializationFactorySet(address indexed factory);
+
+    /// @dev The deployer may nominate the one immutable setup entry point.
+    ///      The authority is cleared after that one-time hand-off.
+    address public initializationAuthority;
+    address public initializationFactory;
 
     mapping(bytes32 policyId => Policy policy) private _policies;
     mapping(bytes32 policyId => address[] assets) private _assets;
     mapping(bytes32 policyId => mapping(address token => AssetBounds bounds)) private _bounds;
     mapping(bytes32 policyId => mapping(bytes32 positionIdHash => SettlementConfiguration)) private
         _settlementConfigurations;
+
+    constructor() {
+        initializationAuthority = msg.sender;
+    }
+
+    function setInitializationFactory(address factory) external {
+        if (msg.sender != initializationAuthority) revert UnauthorizedInitialization();
+        if (initializationFactory != address(0)) revert InitializationFactoryAlreadySet();
+        if (factory == address(0)) revert InvalidAddress();
+        initializationFactory = factory;
+        initializationAuthority = address(0);
+        emit InitializationFactorySet(factory);
+    }
 
     modifier onlyGovernance(bytes32 policyId) {
         Policy storage policy = _policy(policyId);
@@ -147,11 +168,44 @@ contract AurkaPolicyRegistry {
         uint256 maximumTransactionValue_,
         FeeConfig calldata fee
     ) external {
+        if (msg.sender != governance) revert NotGovernance(policyId, msg.sender);
+        _createPolicy(policyId, treasury, governance, assets_, maximumTransactionValue_, fee);
+    }
+
+    /// @notice Creates the policy and its setup-only configuration inside the
+    /// factory's single owner transaction.
+    function createPolicyFromFactory(
+        bytes32 policyId,
+        address treasury,
+        address governance,
+        AssetConfig[] calldata assets_,
+        uint256 maximumTransactionValue_,
+        FeeConfig calldata fee,
+        bytes32 positionIdHash,
+        bytes32 aquaStrategyHash,
+        address priceOracle,
+        uint64 priceMaxAgeSeconds,
+        uint16 maximumPriceDeviationBps
+    ) external returns (uint256 nonce) {
+        if (msg.sender != initializationFactory) revert UnauthorizedInitialization();
+        _createPolicy(policyId, treasury, governance, assets_, maximumTransactionValue_, fee);
+        _setSettlementConfiguration(policyId, positionIdHash, aquaStrategyHash, priceOracle);
+        _setPriceProtection(policyId, priceMaxAgeSeconds, maximumPriceDeviationBps);
+        return _policies[policyId].nonce;
+    }
+
+    function _createPolicy(
+        bytes32 policyId,
+        address treasury,
+        address governance,
+        AssetConfig[] calldata assets_,
+        uint256 maximumTransactionValue_,
+        FeeConfig calldata fee
+    ) internal {
         if (_policies[policyId].exists) revert AlreadyExists(policyId);
         if (policyId == bytes32(0) || treasury == address(0) || governance == address(0)) {
             revert InvalidAddress();
         }
-        if (msg.sender != governance) revert NotGovernance(policyId, msg.sender);
         if (assets_.length < 2 || assets_.length > MAX_ASSETS) revert InvalidAssetCount();
         if (maximumTransactionValue_ == 0) {
             revert InvalidMaximumTransactionValue(maximumTransactionValue_);
@@ -238,6 +292,14 @@ contract AurkaPolicyRegistry {
         uint64 priceMaxAgeSeconds,
         uint16 maximumPriceDeviationBps
     ) external onlyGovernance(policyId) {
+        _setPriceProtection(policyId, priceMaxAgeSeconds, maximumPriceDeviationBps);
+    }
+
+    function _setPriceProtection(
+        bytes32 policyId,
+        uint64 priceMaxAgeSeconds,
+        uint16 maximumPriceDeviationBps
+    ) internal {
         if (
             priceMaxAgeSeconds == 0 || priceMaxAgeSeconds > 86_400
                 || maximumPriceDeviationBps > BASIS_POINTS
@@ -267,6 +329,15 @@ contract AurkaPolicyRegistry {
         bytes32 aquaStrategyHash,
         address priceOracle
     ) external onlyGovernance(policyId) {
+        _setSettlementConfiguration(policyId, positionIdHash, aquaStrategyHash, priceOracle);
+    }
+
+    function _setSettlementConfiguration(
+        bytes32 policyId,
+        bytes32 positionIdHash,
+        bytes32 aquaStrategyHash,
+        address priceOracle
+    ) internal {
         if (
             positionIdHash == bytes32(0) || aquaStrategyHash == bytes32(0)
                 || priceOracle == address(0)

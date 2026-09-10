@@ -80,7 +80,13 @@ async function pageFor(index, width) {
       transactions.push({ owner: accounts[index].address, hash, to: tx.to });
       return hash;
     }
-    if (["eth_getTransactionReceipt", "eth_call"].includes(request.method))
+    if (
+      [
+        "eth_getTransactionReceipt",
+        "eth_getBlockByNumber",
+        "eth_call",
+      ].includes(request.method)
+    )
       return rpc.request(request);
     throw new Error(`Unsupported test wallet method: ${request.method}`);
   });
@@ -133,12 +139,13 @@ try {
       .getByRole("button", { name: "Save draft", exact: true })
       .click();
     await owner.waitForURL(/\/settings$/);
-    const id = decodeURIComponent(new URL(owner.url()).pathname.split("/")[2]);
-    ids.push(id);
-    assert.equal(
-      (await api(`/v1/spaces/${encodeURIComponent(id)}`)).identity.state,
-      "DRAFT",
+    const routeId = decodeURIComponent(
+      new URL(owner.url()).pathname.split("/")[2],
     );
+    const created = await api(`/v1/spaces/${encodeURIComponent(routeId)}`);
+    const id = created.identity.id;
+    ids.push(id);
+    assert.equal(created.identity.state, "DRAFT");
     await owner.reload();
     await nextToReview(owner);
     if (suffix === "one") {
@@ -147,7 +154,7 @@ try {
       );
       await owner
         .getByRole("button", {
-          name: "Deploy / continue activation",
+          name: "Create Space",
           exact: true,
         })
         .click();
@@ -162,28 +169,30 @@ try {
       await owner.reload();
       await nextToReview(owner);
     }
+    const creationStart = transactions.length;
     await owner
       .getByRole("button", {
-        name: "Deploy / continue activation",
+        name: "Create Space",
         exact: true,
       })
       .click();
     if (suffix === "one") {
-      await owner.waitForFunction(() =>
-        Object.keys(localStorage).some(
-          (key) =>
-            key.startsWith("aurka:space-setup:") &&
-            JSON.parse(localStorage.getItem(key)).step === 0,
-        ),
-      );
-      await owner.reload();
-      await nextToReview(owner);
-      await owner
-        .getByRole("button", {
-          name: "Deploy / continue activation",
-          exact: true,
-        })
-        .click();
+      await owner.waitForTimeout(250);
+      if (
+        await owner.evaluate(() =>
+          Object.keys(localStorage).some(
+            (key) =>
+              key.startsWith("aurka:space-setup:") &&
+              JSON.parse(localStorage.getItem(key)).step === 0,
+          ),
+        )
+      ) {
+        await owner.reload();
+        await nextToReview(owner);
+        await owner
+          .getByRole("button", { name: "Create Space", exact: true })
+          .click();
+      }
     }
     await waitFor(
       owner,
@@ -193,9 +202,21 @@ try {
       "activation",
       180,
     );
+    const creationTransactions = transactions.slice(creationStart);
+    assert.equal(
+      creationTransactions.length,
+      3,
+      "Each new Space requires two explicit token approvals and one setup transaction",
+    );
+    assert.deepEqual(
+      creationTransactions.map((transaction) => transaction.to.toLowerCase()),
+      [manifest.usdc, manifest.weth, manifest.vaultFactory].map((address) =>
+        address.toLowerCase(),
+      ),
+    );
     await owner.reload();
     await owner
-      .getByRole("button", { name: "Save transaction limit", exact: true })
+      .getByRole("button", { name: "Save changes", exact: true })
       .waitFor();
     await owner.screenshot({
       path: path.join(output, `mvp002-${suffix}-active.png`),
@@ -303,7 +324,7 @@ try {
   );
   await owner.getByRole("textbox").fill("2500");
   await owner
-    .getByRole("button", { name: "Save transaction limit", exact: true })
+    .getByRole("button", { name: "Save changes", exact: true })
     .click();
   await waitFor(
     owner,
@@ -349,7 +370,7 @@ try {
   );
   await owner.reload();
   await owner
-    .getByRole("button", { name: "Save transaction limit", exact: true })
+    .getByRole("button", { name: "Save changes", exact: true })
     .waitFor();
   await owner.screenshot({
     path: path.join(output, "mvp002-owner-settings.png"),

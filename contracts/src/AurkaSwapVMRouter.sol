@@ -280,6 +280,64 @@ contract AurkaSwapVMRouter {
         if (msg.sender != policy.governance && msg.sender != policy.treasury) {
             revert PolicyStateMismatch();
         }
+        _activateCapacityEpoch(policyId, epoch, priceInput);
+    }
+
+    /// @notice Factory-only activation used while the vault is being created.
+    /// @dev The factory commits the post-funding snapshots, while this router
+    /// derives the baseline and epoch id from the actual Aqua balances.
+    function activateCapacityEpochFromFactory(
+        bytes32 policyId,
+        DirectSettlement.CapacityEpoch calldata committedEpoch,
+        PriceProtection.SettlementInput calldata priceInput
+    ) external returns (bytes32 capacityEpochId, uint256 capacityBaseline) {
+        if (msg.sender != policyRegistry.initializationFactory()) {
+            revert StrategyNotAuthorized();
+        }
+        if (committedEpoch.capacityBaseline != 0 || committedEpoch.capacityEpochId != bytes32(0)) {
+            revert InvalidCapacityEpoch();
+        }
+        if (committedEpoch.consumedBefore != 0) revert InvalidCapacityEpoch();
+        if (
+            committedEpoch.chainId != block.chainid
+                || committedEpoch.verifyingContract != address(this)
+        ) revert InvalidCapacityEpoch();
+        if (
+            _tokenFromId(committedEpoch.traderInputTokenId) != priceInput.traderInputToken
+                || _tokenFromId(committedEpoch.traderOutputTokenId) != priceInput.traderOutputToken
+        ) revert InvalidCapacityEpoch();
+
+        (
+            address[] memory tokens,
+            uint256[] memory balances,
+            PortfolioBounds.AssetState[] memory assets,
+            bytes32 portfolioPriceSnapshot
+        ) = settlementAuthority.authoritativePortfolio(
+            policyId, committedEpoch.positionIdHash, committedEpoch.aquaStrategyHash, priceInput
+        );
+        if (keccak256(abi.encode(tokens, balances)) != committedEpoch.balanceSnapshot) {
+            revert PolicyStateMismatch();
+        }
+        if (
+            committedEpoch.priceSnapshot != priceSnapshotHash(priceInput)
+                || committedEpoch.portfolioPriceSnapshot != portfolioPriceSnapshot
+        ) revert PortfolioPriceSnapshotMismatch();
+        capacityBaseline =
+            settlementAuthority.deriveCapacityBaseline(policyId, committedEpoch, priceInput, assets);
+        if (capacityBaseline == 0) revert CapacityBaselineMismatch(1, 0);
+        DirectSettlement.CapacityEpoch memory resolved = committedEpoch;
+        resolved.capacityBaseline = capacityBaseline;
+        resolved.capacityEpochId = DirectSettlement.capacityEpochId(resolved);
+        _activateCapacityEpoch(policyId, resolved, priceInput);
+        return (resolved.capacityEpochId, capacityBaseline);
+    }
+
+    function _activateCapacityEpoch(
+        bytes32 policyId,
+        DirectSettlement.CapacityEpoch memory epoch,
+        PriceProtection.SettlementInput calldata priceInput
+    ) private {
+        AurkaPolicyRegistry.Policy memory policy = policyRegistry.getPolicy(policyId);
         if (
             epoch.chainId != block.chainid || epoch.verifyingContract != address(this)
                 || epoch.capacityEpochId != DirectSettlement.capacityEpochId(epoch)
@@ -708,7 +766,7 @@ contract AurkaSwapVMRouter {
         return settlementAuthority.portfolioPriceSnapshot(policyId, positionIdHash);
     }
 
-    function _authorityHash(bytes32 policyId, DirectSettlement.CapacityEpoch calldata epoch)
+    function _authorityHash(bytes32 policyId, DirectSettlement.CapacityEpoch memory epoch)
         private
         pure
         returns (bytes32)

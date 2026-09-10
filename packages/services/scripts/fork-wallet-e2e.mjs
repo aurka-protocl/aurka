@@ -127,9 +127,12 @@ async function pageFor(index, width) {
       return hash;
     }
     if (
-      ["eth_call", "eth_getTransactionReceipt", "eth_getBalance"].includes(
-        request.method,
-      )
+      [
+        "eth_call",
+        "eth_getTransactionReceipt",
+        "eth_getBlockByNumber",
+        "eth_getBalance",
+      ].includes(request.method)
     )
       return publicClient.request(request);
     throw new Error(`Unsupported test wallet request: ${request.method}`);

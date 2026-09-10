@@ -734,4 +734,36 @@ describe("MVP-002 Space management", () => {
       service.close();
     }
   });
+
+  it("updates a pending Space change once without allowing a late downgrade", () => {
+    const service = new AurkaService({ seedFixture: true });
+    const spaceId = "space:activity-transition";
+    const pending = {
+      id: "space-change:activity-transition",
+      spaceId,
+      eventType: "SPACE_PAUSED" as const,
+      actor: OWNER.address,
+      status: "PENDING" as const,
+      payload: { operation: "PAUSE" },
+      createdAt: 1_000,
+    };
+    try {
+      service.repository.saveSpaceChange(pending);
+      service.repository.updateSpaceChange({
+        ...pending,
+        status: "CONFIRMED",
+        receiptHash: `0x${"ab".repeat(32)}`,
+        createdAt: 1_001,
+      });
+      service.repository.updateSpaceChange(pending);
+      expect(service.repository.listSpaceChanges(spaceId)).toEqual([
+        expect.objectContaining({
+          status: "CONFIRMED",
+          receiptHash: `0x${"ab".repeat(32)}`,
+        }),
+      ]);
+    } finally {
+      service.close();
+    }
+  });
 });

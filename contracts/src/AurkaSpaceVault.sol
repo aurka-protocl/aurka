@@ -6,12 +6,33 @@ pragma solidity 0.8.28;
 /// approves the settlement custodian, and allows its owner to withdraw tokens.
 contract AurkaSpaceVault {
     address public immutable owner;
+    address public immutable initializationAuthority;
+    bool public initializationFinalized;
 
     error NotOwner();
+    error NotInitializationAuthority();
+    error InitializationFinalized();
+    error InvalidAddress();
     error TokenCallFailed();
 
-    constructor(address owner_) {
+    constructor(address owner_, address initializationAuthority_) {
+        if (owner_ == address(0) || initializationAuthority_ == address(0)) {
+            revert InvalidAddress();
+        }
         owner = owner_;
+        initializationAuthority = initializationAuthority_;
+    }
+
+    function initializeApproval(address token, address spender, uint256 amount) external {
+        if (msg.sender != initializationAuthority) revert NotInitializationAuthority();
+        if (initializationFinalized) revert InitializationFinalized();
+        _call(token, abi.encodeWithSignature("approve(address,uint256)", spender, amount));
+    }
+
+    function finalizeInitialization() external {
+        if (msg.sender != initializationAuthority) revert NotInitializationAuthority();
+        if (initializationFinalized) revert InitializationFinalized();
+        initializationFinalized = true;
     }
 
     function approve(address token, address spender, uint256 amount) external {

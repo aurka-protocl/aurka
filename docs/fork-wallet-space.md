@@ -56,28 +56,23 @@ known accounts.
 - Protocol fee recipient: account index 2; the manifest also identifies the
   public test solver fee recipient.
 
-### Space creation batching
+### Single-transaction Space creation
 
-The reduced-prompt creation path requires an EIP-5792 wallet that reports
-`atomic.status` as `supported` or `ready` for chain 31337 through
-`wallet_getCapabilities`, and returns the standard `{ id }` object from
-`wallet_sendCalls`. The app submits the reviewed owner-scoped deployment,
-configuration, funding, allowance, and MockAqua setup calls with
-`atomicRequired: true`. It accepts only a status-200 result with `atomic: true`;
-the server verifies the owner execution trace against the immutable reviewed
-call plan before advancing the Space.
+New fork Spaces use an ordinary `eth_sendTransaction` to
+`AurkaSpaceVaultFactory.createAndInitializeSpace`. The reviewed call deploys the
+deterministic owner vault, pulls exactly **35,000 USDC + 5 WETH**, configures
+the policy and price protection, registers the balances in the explicit local
+MockAqua adapter, derives capacity from the post-funding onchain state, and
+activates trading. There is no normal `wallet_getCapabilities` probe,
+`wallet_sendCalls` batch, separate capacity transaction, or eleven-transaction
+fallback.
 
-On that supported path, the intended owner interactions are: one draft
-signature, one atomic setup batch, and one capacity-authorization transaction
-(three total). This is a capability target, not evidence of compatibility with
-every browser wallet. Wallets without EIP-5792 atomic support use the labelled
-fallback of eleven separate setup transactions, plus the draft signature; the
-fallback is never presented as meeting the three-interaction target. A status
-400 is safe to retry. Status 500/600 outcomes remain in local storage until the
-server verifies the canonical receipt(s): a verified atomic full revert releases
-the old identity for a fresh batch, while a verified successful direct prefix
-continues from the next frozen call. Ambiguous outcomes or RPC outages retain
-the batch and never silently resubmit funding.
+If the owner has insufficient allowance, the review shows one exact approval for
+each required token to the factory spender. Those approvals are separate
+prerequisites and are counted honestly; the subsequent creation remains one
+setup transaction. Existing sufficient allowance is reused. A submitted setup
+hash is stored before confirmation, and pending, missing, reverted, replaced, or
+fork-mismatched hashes remain actionable without an automatic replacement.
 
 Actual fork tokens:
 
@@ -95,10 +90,11 @@ obtained through the real WETH deposit function. No token code is replaced.
 1. Open the canonical app, open the Space's Settings route, choose Alice in the
    wallet, and connect on chain 31337. Inspect holdings, controlling account,
    40% maximum WETH allocation, and the 5,000 reference-unit transaction limit.
-2. Grant USDC allowance to the mocked Aqua contract through the wallet, then
-   **Authorize trading capacity** through the wallet. Each action has its own
-   submitted/confirmed receipt. No trade occurs yet. The policy is preconfigured
-   during deployment; the runner does not continue signing owner actions.
+2. Choose **Create Space**. Review the exact funding, bounds, limit, and any
+   token approval spender shown by the app. Approve only the disclosed USDC/WETH
+   prerequisites if requested, then approve the one factory setup transaction.
+   The Space is ready only after its canonical receipt and initialized state are
+   verified; no Grant allowance or Authorize capacity step follows.
 3. Open the same app in another profile at the Space's `/trade/:spaceId` route
    with Bob selected. Connect, request 2 WETH, and inspect the partial fill. At
    the explicitly mocked price of 3,200 reference units/WETH, the request is
@@ -173,10 +169,12 @@ forge test --match-contract 'AurkaPolicyRegistryTest|AurkaSwapVMRouterTest|Direc
   account. MockPriceOracle holds fixed USDC=1 and WETH=3200 reference prices.
   FixtureProposalSigner is the public test solver. All are named in the UI and
   deployment manifest. The price is not an executable external market quote.
-- Scope is one Space, one direction (Alice acquires WETH), two fork tokens and
-  local funds. There is no factory, model, external routing or live deployment.
-  Task 030 must extend this actual governance/capacity authority for its
-  mandate.
+- New user Spaces use the typed factory entry point and the two fork tokens. The
+  predefined demo Spaces retain their seeded fixture allocations. The factory
+  keeps owner governance on each policy and finalized vault; it has no owner
+  withdrawal path or arbitrary-call surface. Task 030 must replace the explicit
+  MockAqua seed adapter with a production-supported Aqua initialization path if
+  live external custody is required.
 - Standard application startup without `VITE_AURKA_MODE=fork` retains the
   labelled unsigned demo. Fork mode uses the same canonical routes and shell;
   its wallet state is shared by the header, Space settings, and trade flow.

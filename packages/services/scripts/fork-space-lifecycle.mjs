@@ -1,15 +1,18 @@
 import { existsSync, readFileSync, writeFileSync, renameSync } from "node:fs";
-import { encodeFunctionData } from "viem";
+import { decodeEventLog, encodeFunctionData } from "viem";
 import { hashBytes, ServiceError } from "../dist/index.js";
 import {
   calculateDirectSettlement,
   computeCapacityEpochId,
+  computePortfolioPriceSnapshotHash,
+  computeSettlementPriceSnapshotHash,
 } from "@aurka/shared";
 import {
   contractEpoch,
   contractPriceInput,
   positionForSnapshot,
 } from "./chain-snapshot.mjs";
+import { hashAquaBalances } from "../dist/index.js";
 
 const same = (a, b) =>
   typeof a === "string" &&
@@ -27,6 +30,28 @@ const json = (value) =>
     (_, v) => (typeof v === "bigint" ? v.toString() : v),
     2,
   );
+const ZERO_HASH = `0x${"00".repeat(32)}`;
+
+function asObject(value, index, field) {
+  return value && typeof value === "object" && field in value
+    ? value[field]
+    : value?.[index];
+}
+
+function bytes32Address(address) {
+  return `0x${address.slice(2).toLowerCase().padStart(64, "0")}`;
+}
+
+function ceilDiv(numerator, denominator) {
+  return numerator === 0n ? 0n : (numerator - 1n) / denominator + 1n;
+}
+
+function valueToRaw(value, asset) {
+  return ceilDiv(
+    value * 10n ** BigInt(asset.decimals) * 10n ** BigInt(asset.priceDecimals),
+    asset.price,
+  );
+}
 
 /** A hash is only evidence after its transaction and canonical successful receipt match the server plan. */
 export async function verifySpaceReceipt(
@@ -41,10 +66,35 @@ export async function verifySpaceReceipt(
     fail("A transaction hash is required");
   if ((await client.getChainId()) !== chainId)
     fail("Configured chain mismatch");
-  const [receipt, transaction] = await Promise.all([
-    client.getTransactionReceipt({ hash }),
-    client.getTransaction({ hash }),
-  ]);
+  let receipt;
+  let transaction;
+  try {
+    [receipt, transaction] = await Promise.all([
+      client.getTransactionReceipt({ hash }),
+      client.getTransaction({ hash }),
+    ]);
+  } catch (error) {
+    throw new ServiceError(
+      "SPACE_RPC_UNAVAILABLE",
+      `The fork RPC could not verify setup transaction ${hash}: ${error instanceof Error ? error.message : String(error)}`,
+      503,
+      { hash, retryable: true },
+    );
+  }
+  if (transaction && !receipt)
+    throw new ServiceError(
+      "SPACE_TRANSACTION_PENDING",
+      `Setup transaction ${hash} is known by the configured fork but is not mined yet; keep it pending and check again.`,
+      409,
+      { hash, retryable: true, state: "PENDING" },
+    );
+  if (!receipt || !transaction)
+    throw new ServiceError(
+      "SPACE_TRANSACTION_NOT_FOUND",
+      `Setup transaction ${hash} is not available on the configured fork yet; keep it pending and check again before retrying.`,
+      409,
+      { hash, retryable: true, state: "NOT_FOUND" },
+    );
   if (!same(transaction.from, owner) || !same(receipt.from, owner))
     fail("Transaction caller is not the Space owner");
   if (
@@ -85,10 +135,35 @@ async function canonicalReceipt(
     fail("A transaction hash is required");
   if ((await client.getChainId()) !== chainId)
     fail("Configured chain mismatch");
-  const [receipt, transaction] = await Promise.all([
-    client.getTransactionReceipt({ hash }),
-    client.getTransaction({ hash }),
-  ]);
+  let receipt;
+  let transaction;
+  try {
+    [receipt, transaction] = await Promise.all([
+      client.getTransactionReceipt({ hash }),
+      client.getTransaction({ hash }),
+    ]);
+  } catch (error) {
+    throw new ServiceError(
+      "SPACE_RPC_UNAVAILABLE",
+      `The fork RPC could not verify setup batch ${hash}: ${error instanceof Error ? error.message : String(error)}`,
+      503,
+      { hash, retryable: true },
+    );
+  }
+  if (transaction && !receipt)
+    throw new ServiceError(
+      "SPACE_TRANSACTION_PENDING",
+      `Setup batch transaction ${hash} is known by the configured fork but is not mined yet; keep it pending and check again.`,
+      409,
+      { hash, retryable: true, state: "PENDING" },
+    );
+  if (!receipt || !transaction)
+    throw new ServiceError(
+      "SPACE_TRANSACTION_NOT_FOUND",
+      `Setup batch transaction ${hash} is not available on the configured fork yet; keep it pending and check again before retrying.`,
+      409,
+      { hash, retryable: true, state: "NOT_FOUND" },
+    );
   if (!same(transaction.from, owner) || !same(receipt.from, owner))
     fail("Batch transaction caller is not the Space owner");
   if (Number(transaction.chainId) !== chainId)
@@ -354,12 +429,24 @@ export class ForkSpaceLifecycle {
     );
     renameSync(`${this.file}.tmp`, this.file);
   }
+  saveSpaceChange(change) {
+    const repository = this.service.repository;
+    if (typeof repository.updateSpaceChange === "function")
+      repository.updateSpaceChange(change);
+    else repository.saveSpaceChange(change);
+  }
   tx(contract, functionName, args) {
     return {
       to: contract.address,
       data: encodeFunctionData({ abi: contract.abi, functionName, args }),
       value: "0x0",
     };
+  }
+  isSingleTransactionMode() {
+    return (
+      this.manifest.spaceCreationMode === "single-transaction" &&
+      this.manifest.vaultFactoryVersion === 2
+    );
   }
   async plan(spaceId) {
     const space = this.service.getSpace(spaceId);
@@ -380,6 +467,15 @@ export class ForkSpaceLifecycle {
     )
       fail("Save an owner-signed fork draft first");
     const draft = space.draft;
+    if (
+      this.isSingleTransactionMode() &&
+      (draft.assets.length !== 2 ||
+        !same(draft.assets[0]?.token, this.manifest.usdc) ||
+        !same(draft.assets[1]?.token, this.manifest.weth))
+    )
+      fail(
+        "This fork supports atomic creation only for the disclosed USDC/WETH configuration; unsupported asset configurations are unavailable.",
+      );
     // The local creation flow funds a fixed, disclosed 35,000 USDC + 5 WETH portfolio.
     // Reject incompatible ranges before asking the wallet to move funds.
     for (const asset of draft.assets) {
@@ -419,6 +515,133 @@ export class ForkSpaceLifecycle {
     const { policyRegistry, vaultFactory, vaultAbi, erc20Abi, aqua } =
       this.contracts;
     const { usdc, weth, oracle, router, protocolRecipient } = this.manifest;
+
+    if (this.isSingleTransactionMode()) {
+      const block = await this.client.getBlock();
+      const prices = [];
+      for (const token of [usdc, weth]) {
+        const raw = await this.client.readContract({
+          ...this.contracts.oracle,
+          functionName: "getPrice",
+          args: [token],
+        });
+        prices.push({
+          token,
+          price: BigInt(asObject(raw, 0, "price")),
+          priceDecimals: Number(asObject(raw, 1, "priceDecimals")),
+          observedAt: Number(asObject(raw, 2, "observedAt")),
+          snapshotId: asObject(raw, 3, "snapshotId"),
+        });
+      }
+      const inputPrice = prices[1];
+      const outputPrice = prices[0];
+      const inputAsset = {
+        decimals: draft.assets[1].decimals,
+        price: inputPrice.price,
+        priceDecimals: inputPrice.priceDecimals,
+      };
+      const outputAsset = {
+        decimals: draft.assets[0].decimals,
+        price: outputPrice.price,
+        priceDecimals: outputPrice.priceDecimals,
+      };
+      const priceCommitment = {
+        traderInputToken: weth,
+        traderOutputToken: usdc,
+        traderInputReferencePrice: inputPrice,
+        traderInputExecutionPrice: inputPrice,
+        traderOutputReferencePrice: outputPrice,
+        traderOutputExecutionPrice: outputPrice,
+        approvedTraderInputSnapshotId: inputPrice.snapshotId,
+        approvedTraderOutputSnapshotId: outputPrice.snapshotId,
+        traderInputAmount: valueToRaw(50000n, inputAsset),
+        traderOutputAmount: valueToRaw(50000n, outputAsset),
+        traderInputDecimals: inputAsset.decimals,
+        traderOutputDecimals: outputAsset.decimals,
+        valueDecimals: 0,
+        nowSeconds: Number(block.timestamp),
+        maximumPriceAgeSeconds: 86400,
+        maximumPriceDeviationBps: 100,
+      };
+      const initialBalances = [35000n * 1000000n, 5n * 10n ** 18n];
+      const epoch = {
+        positionIdHash: definition.positionIdHash,
+        traderInputTokenId: bytes32Address(weth),
+        traderOutputTokenId: bytes32Address(usdc),
+        balanceSnapshot: hashAquaBalances([usdc, weth], initialBalances),
+        priceSnapshot: computeSettlementPriceSnapshotHash(priceCommitment),
+        portfolioPriceSnapshot: computePortfolioPriceSnapshotHash(prices),
+        policyNonce: 3n,
+        riskCertificateHash: ZERO_HASH,
+        aquaStrategyHash: definition.strategyHash,
+        capacityBaseline: 0n,
+        consumedBefore: 0n,
+        chainId: BigInt(this.manifest.chainId),
+        verifyingContract: router,
+        capacityEpochId: ZERO_HASH,
+      };
+      const fee = {
+        baseFeeBps: 20,
+        slopeBps: 80,
+        maximumFeeBps: 100,
+        treasuryBaseFeeBps: 10,
+        solverFeeBps: 5,
+        protocolFeeBps: 5,
+        treasuryFeeRecipient: treasury,
+        protocolFeeRecipient: protocolRecipient,
+      };
+      const priceInput = {
+        ...priceCommitment,
+        currentTime: BigInt(block.timestamp),
+      };
+      delete priceInput.nowSeconds;
+      plan.singleTransaction = true;
+      plan.steps.push({
+        label: "Create, fund, configure and activate Space",
+        transaction: this.tx(vaultFactory, "createAndInitializeSpace", [
+          {
+            spaceId: definition.positionIdHash,
+            policyId: definition.policyId,
+            strategyHash: definition.strategyHash,
+            owner: draft.ownerAddress,
+            assets: draft.assets.map(
+              ({ token, decimals, minimumWeightBps, maximumWeightBps }) => ({
+                token,
+                decimals,
+                minimumWeightBps,
+                maximumWeightBps,
+              }),
+            ),
+            maximumTransactionValue: BigInt(draft.maximumTransactionValue),
+            fee,
+            priceOracle: oracle,
+            priceMaxAgeSeconds: 86400,
+            maximumPriceDeviationBps: 100,
+            capacityEpoch: epoch,
+            priceInput,
+          },
+        ]),
+      });
+      plan.capacityEpoch = epoch;
+      plan.priceInput = priceInput;
+      this.plans[spaceId] = plan;
+      this.persist();
+      this.saveSpaceChange({
+        id: plan.activityId,
+        spaceId,
+        eventType: "SPACE_ACTIVATED",
+        actor: draft.ownerAddress,
+        status: "PENDING",
+        payload: {
+          authority: "fork-receipts",
+          operation: "ACTIVATE",
+          mode: "single-transaction",
+        },
+        createdAt: Math.floor(Date.now() / 1000),
+      });
+      return plan;
+    }
+
     const vault = { address: treasury, abi: vaultAbi };
     const add = (label, contract, method, args) =>
       plan.steps.push({ label, transaction: this.tx(contract, method, args) });
@@ -491,7 +714,7 @@ export class ForkSpaceLifecycle {
     }
     this.plans[spaceId] = plan;
     this.persist();
-    this.service.repository.saveSpaceChange({
+    this.saveSpaceChange({
       id: plan.activityId,
       spaceId,
       eventType: "SPACE_ACTIVATED",
@@ -625,6 +848,59 @@ export class ForkSpaceLifecycle {
       ]),
     };
   }
+  async fundingPrerequisites(plan) {
+    if (!plan.singleTransaction) return [];
+    const requirements = [
+      [this.manifest.usdc, 35000n * 1000000n, "USDC"],
+      [this.manifest.weth, 5n * 10n ** 18n, "WETH"],
+    ];
+    const prerequisites = [];
+    for (const [token, amount, symbol] of requirements) {
+      const allowance = await this.client.readContract({
+        address: token,
+        abi: this.contracts.erc20Abi,
+        functionName: "allowance",
+        args: [plan.draft.ownerAddress, this.contracts.vaultFactory.address],
+      });
+      if (allowance < amount)
+        prerequisites.push({
+          token,
+          symbol,
+          amount: amount.toString(),
+          spender: this.contracts.vaultFactory.address,
+          transaction: this.tx(
+            { address: token, abi: this.contracts.erc20Abi },
+            "approve",
+            [this.contracts.vaultFactory.address, amount],
+          ),
+        });
+    }
+    return prerequisites;
+  }
+  planIdentity(plan) {
+    const batch = ensureBatchPlan(plan, this.manifest.chainId);
+    if (batch) return { id: batch.id, commitment: batch.commitment };
+    const commitment = hashBytes(
+      json({
+        spaceId: plan.definition.positionId,
+        operation: plan.operation ?? "ACTIVATE",
+        owner: plan.draft.ownerAddress,
+        chainId: this.manifest.chainId,
+        steps: plan.steps,
+      }),
+    );
+    return { id: hashBytes(`space-plan:${commitment}`), commitment };
+  }
+  assertPlanIdentity(plan, planId, planCommitment) {
+    const expected = this.planIdentity(plan);
+    if (planId !== undefined && !same(planId, expected.id))
+      fail("Submitted setup does not match the reviewed plan");
+    if (
+      planCommitment !== undefined &&
+      !same(planCommitment, expected.commitment)
+    )
+      fail("Submitted setup commitment does not match the reviewed plan");
+  }
   async prepare(spaceId, operation = "ACTIVATE") {
     if (operation !== "ACTIVATE")
       return this.prepareOperation(spaceId, operation);
@@ -635,7 +911,11 @@ export class ForkSpaceLifecycle {
         "This partial wallet batch requires manual repair before setup can continue",
       );
     await this.reconcile(plan);
-    if (plan.receipts.length === 10 && plan.steps.length === 10) {
+    if (
+      !plan.singleTransaction &&
+      plan.receipts.length === 10 &&
+      plan.steps.length === 10
+    ) {
       plan.steps.push(await this.capacityStep(plan));
       this.persist();
     }
@@ -644,13 +924,18 @@ export class ForkSpaceLifecycle {
       return { complete: true, space: this.service.getSpace(spaceId) };
     }
     const step = plan.steps[plan.receipts.length];
+    const identity = this.planIdentity(plan);
+    const prerequisites = await this.fundingPrerequisites(plan);
     return {
       complete: false,
       spaceId,
       ownerAddress: plan.draft.ownerAddress,
       treasury: plan.treasury,
       step: plan.receipts.length,
-      total: 11,
+      total: plan.singleTransaction ? 1 : 11,
+      ...(plan.singleTransaction
+        ? { mode: "single-transaction", prerequisites }
+        : {}),
       // EIP-5792 capable wallets can authorize the authority-preserving setup
       // calls as one atomic wallet interaction. Capacity stays separate because
       // it is derived from the confirmed post-funding snapshot.
@@ -660,6 +945,8 @@ export class ForkSpaceLifecycle {
           : undefined,
       batchPlanId: batch?.id,
       batchCommitment: batch?.commitment,
+      planId: identity.id,
+      planCommitment: identity.commitment,
       ...step,
     };
   }
@@ -687,7 +974,7 @@ export class ForkSpaceLifecycle {
             undefined,
             error.message,
           );
-        this.service.repository.saveSpaceChange({
+        this.saveSpaceChange({
           id: plan.activityId ?? hashBytes(`failed:${spaceId}:${hash}`),
           spaceId,
           eventType: "SPACE_DEPLOYMENT_FAILED",
@@ -705,10 +992,22 @@ export class ForkSpaceLifecycle {
       throw error;
     }
   }
-  async confirm(spaceId, stepIndex, hash, operation = "ACTIVATE") {
-    if (operation !== "ACTIVATE")
+  async confirmTransaction(
+    spaceId,
+    stepIndex,
+    hash,
+    operation = "ACTIVATE",
+    planId,
+    planCommitment,
+  ) {
+    if (operation !== "ACTIVATE") {
+      const plan = this.operations[`${spaceId}:${operation}`];
+      if (!plan) fail("Prepare the policy change first");
+      this.assertPlanIdentity(plan, planId, planCommitment);
       return this.confirmOperation(spaceId, operation, stepIndex, hash);
+    }
     const plan = await this.plan(spaceId);
+    this.assertPlanIdentity(plan, planId, planCommitment);
     await this.reconcile(plan);
     if (
       !Number.isInteger(stepIndex) ||
@@ -746,6 +1045,134 @@ export class ForkSpaceLifecycle {
       state: "PENDING",
     });
     return this.prepare(spaceId);
+  }
+
+  /**
+   * Re-check a submitted hash on the configured fork. This intentionally has
+   * the same strict verification and state transition as confirm(), but is a
+   * separate endpoint so a wallet/RPC that temporarily cannot return a receipt
+   * never forces the browser to broadcast a replacement.
+   */
+  async reconcileTransaction(
+    spaceId,
+    stepIndex,
+    hash,
+    operation = "ACTIVATE",
+    planId,
+    planCommitment,
+  ) {
+    return this.confirmTransaction(
+      spaceId,
+      stepIndex,
+      hash,
+      operation,
+      planId,
+      planCommitment,
+    );
+  }
+
+  /**
+   * Permit a fresh send only after the missing hash and the relevant chain
+   * state have been checked. The first setup step is the only retry that can
+   * be proven harmless with the available chain evidence: the deterministic
+   * vault must still have no code. All later missing hashes remain an explicit
+   * repair case rather than risking a duplicate funding/configuration call.
+   */
+  async recoverTransaction(
+    spaceId,
+    stepIndex,
+    hash,
+    operation = "ACTIVATE",
+    planId,
+    planCommitment,
+  ) {
+    const plan =
+      operation === "ACTIVATE"
+        ? await this.plan(spaceId)
+        : this.operations[`${spaceId}:${operation}`];
+    if (!plan) fail("Prepare the reviewed setup first");
+    this.assertPlanIdentity(plan, planId, planCommitment);
+    // First ask the normal strict path to reconcile the submitted hash. A
+    // recovery request is never allowed to turn a still-pending or successful
+    // transaction into a replacement send.
+    try {
+      return await this.confirmTransaction(
+        spaceId,
+        stepIndex,
+        hash,
+        operation,
+        planId,
+        planCommitment,
+      );
+    } catch (error) {
+      if (error?.code === "SPACE_TRANSACTION_PENDING")
+        recoveryFail(
+          "The submitted setup transaction is still pending; keep its identity and check again",
+        );
+      if (error?.code === "SPACE_RPC_UNAVAILABLE")
+        recoveryFail(
+          "The fork RPC could not determine whether the submitted setup transaction exists; keep it pending for reconciliation",
+        );
+      if (error?.code !== "SPACE_TRANSACTION_NOT_FOUND") throw error;
+    }
+    await this.reconcile(plan);
+    if (
+      !Number.isInteger(stepIndex) ||
+      stepIndex < 0 ||
+      stepIndex >= plan.steps.length
+    )
+      fail("Unknown setup step");
+    if (stepIndex !== plan.receipts.length)
+      fail("Cannot retry a setup step after later steps have been confirmed");
+    if (this.usedReceipts[String(hash).toLowerCase()])
+      fail(
+        "The submitted receipt is already used; reconcile the saved setup first",
+      );
+    if (stepIndex !== 0 || operation !== "ACTIVATE")
+      recoveryFail(
+        "The submitted hash is unavailable and this operation has effects that cannot be proven absent; inspect the fork before retrying",
+      );
+    if (typeof this.client.getCode !== "function")
+      recoveryFail(
+        "The fork RPC cannot prove that the deterministic treasury was not created; keep the submitted hash for manual reconciliation",
+      );
+    let code;
+    try {
+      code = await this.client.getCode({ address: plan.treasury });
+    } catch (error) {
+      recoveryFail(
+        `The fork RPC could not verify the deterministic treasury: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    if (typeof code !== "string")
+      recoveryFail(
+        "The fork RPC returned no deterministic treasury code; keep the submitted hash for manual reconciliation",
+      );
+    if (code !== "0x")
+      recoveryFail(
+        "The deterministic treasury already exists; recover its canonical receipt before retrying so funding is not duplicated",
+      );
+    return operation === "ACTIVATE"
+      ? this.prepare(spaceId)
+      : this.prepareOperation(spaceId, operation);
+  }
+
+  async confirm(
+    spaceId,
+    stepIndex,
+    hash,
+    operation = "ACTIVATE",
+    planId,
+    planCommitment,
+  ) {
+    return this.confirmTransaction(
+      spaceId,
+      stepIndex,
+      hash,
+      operation,
+      planId,
+      planCommitment,
+    );
   }
 
   async confirmBatch(
@@ -961,7 +1388,7 @@ export class ForkSpaceLifecycle {
       const firstBlock = await this.client.getBlock({
         blockNumber: receipts[0].blockNumber,
       });
-      this.service.repository.saveSpaceChange({
+      this.saveSpaceChange({
         id: hashBytes(`batch-reverted:${spaceId}:${walletBatchId}`),
         spaceId,
         eventType: "SPACE_DEPLOYMENT_FAILED",
@@ -1184,7 +1611,7 @@ export class ForkSpaceLifecycle {
         });
       this.operations[key] = plan;
       this.persist();
-      this.service.repository.saveSpaceChange({
+      this.saveSpaceChange({
         id: plan.activityId,
         spaceId,
         eventType:
@@ -1247,6 +1674,7 @@ export class ForkSpaceLifecycle {
       this.persist();
       return { complete: true, space: this.service.getSpace(spaceId) };
     }
+    const identity = this.planIdentity(plan);
     return {
       complete: false,
       spaceId,
@@ -1260,6 +1688,8 @@ export class ForkSpaceLifecycle {
           : undefined,
       batchPlanId: batch?.id,
       batchCommitment: batch?.commitment,
+      planId: identity.id,
+      planCommitment: identity.commitment,
       ...plan.steps[plan.receipts.length],
     };
   }
@@ -1307,7 +1737,7 @@ export class ForkSpaceLifecycle {
     const block = await this.client.getBlock({
       blockNumber: BigInt(receipt.blockNumber),
     });
-    this.service.repository.saveSpaceChange({
+    this.saveSpaceChange({
       id:
         plan.activityId ?? hashBytes(`policy-step:${spaceId}:${receipt.hash}`),
       spaceId,
@@ -1329,6 +1759,35 @@ export class ForkSpaceLifecycle {
   async activate(plan) {
     const provider = this.makeProvider(plan.definition);
     const snapshot = await provider.currentSnapshot();
+    if (plan.singleTransaction) {
+      const active = await this.client.readContract({
+        ...this.contracts.router,
+        functionName: "capacityState",
+        args: [
+          plan.definition.positionIdHash,
+          this.manifest.weth,
+          this.manifest.usdc,
+        ],
+      });
+      if (!active.capacityEpochId || same(active.capacityEpochId, ZERO_HASH))
+        fail(
+          "Single-transaction Space creation did not authorize trading capacity",
+        );
+      const epoch = {
+        ...snapshot.capacityEpoch,
+        capacityBaselineValue: active.capacityBaselineValue,
+        consumedBefore: active.consumedValue,
+      };
+      const expectedId = computeCapacityEpochId(epoch);
+      if (!same(expectedId, active.capacityEpochId))
+        fail(
+          "Capacity receipt does not match the authoritative post-funding epoch",
+        );
+      this.epochs[active.capacityEpochId] = epoch;
+      this.saveEpochs();
+      snapshot.capacityEpoch = epoch;
+      snapshot.capacityEpochId = active.capacityEpochId;
+    }
     const policy = snapshot.chainPolicy;
     const configuration = await this.client.readContract({
       ...this.contracts.policyRegistry,
@@ -1353,6 +1812,11 @@ export class ForkSpaceLifecycle {
       !same(snapshot.aquaStrategyHash, plan.definition.strategyHash)
     )
       fail("Onchain Space authority does not match setup");
+    if (
+      policy.priceMaxAgeSeconds !== 86400 ||
+      Number(policy.maximumPriceDeviationBps) !== 100
+    )
+      fail("Onchain price protection differs from the reviewed setup");
     if (!plan.complete) {
       if (
         policy.paused ||
@@ -1410,6 +1874,41 @@ export class ForkSpaceLifecycle {
       )
         fail("Trading capacity is not authorized");
     }
+    if (plan.singleTransaction) {
+      const receipt = await this.client.getTransactionReceipt({
+        hash: plan.receipts[0].hash,
+      });
+      const eventAbi = this.contracts.vaultFactory.abi.find(
+        (item) => item.type === "event" && item.name === "SpaceInitialized",
+      );
+      const initialized = receipt.logs
+        .filter((log) => same(log.address, this.contracts.vaultFactory.address))
+        .map((log) => {
+          try {
+            return decodeEventLog({
+              abi: [eventAbi],
+              data: log.data,
+              topics: log.topics,
+            });
+          } catch {
+            return undefined;
+          }
+        })
+        .find((decoded) => decoded?.eventName === "SpaceInitialized");
+      const args = initialized?.args;
+      if (
+        !args ||
+        !same(args.spaceId, plan.definition.positionIdHash) ||
+        !same(args.policyId, plan.definition.policyId) ||
+        !same(args.owner, plan.draft.ownerAddress) ||
+        !same(args.vault, plan.treasury) ||
+        args.usdcAmount !== 35000n * 1000000n ||
+        args.wethAmount !== 5n * 10n ** 18n
+      )
+        fail(
+          "Initialization receipt does not match the reviewed Space identity and funding",
+        );
+    }
     this.providers.set(plan.definition.positionId, provider);
     if (
       !this.definitions.some((d) => d.positionId === plan.definition.positionId)
@@ -1442,7 +1941,7 @@ export class ForkSpaceLifecycle {
     const block = await this.client.getBlock({
       blockNumber: BigInt(last.blockNumber),
     });
-    this.service.repository.saveSpaceChange({
+    this.saveSpaceChange({
       id: plan.activityId ?? hashBytes(`activate:${position.id}:${last.hash}`),
       spaceId: position.id,
       eventType: "SPACE_ACTIVATED",

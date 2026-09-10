@@ -1,5 +1,6 @@
 /* global console, process, setTimeout, URL, fetch, AbortSignal */
 import { Buffer } from "node:buffer";
+import { randomBytes } from "node:crypto";
 import {
   mkdirSync,
   readFileSync,
@@ -62,9 +63,10 @@ const ROOT = path.resolve(new URL("../../..", import.meta.url).pathname);
 const DIR = process.env.AURKA_FORK_DIR
   ? path.resolve(process.env.AURKA_FORK_DIR)
   : path.join(ROOT, ".fork-space");
-const RPC = "http://127.0.0.1:8545";
-const API_PORT = 8797;
-const APP_PORT = 3011;
+const RPC_PORT = Number(process.env.AURKA_FORK_RPC_PORT ?? 8545);
+const RPC = `http://127.0.0.1:${RPC_PORT}`;
+const API_PORT = Number(process.env.AURKA_FORK_API_PORT ?? 8797);
+const APP_PORT = Number(process.env.AURKA_FORK_APP_PORT ?? 3011);
 const FORK_BLOCK = 22400000;
 const USDC = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
 const WETH = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
@@ -121,7 +123,7 @@ async function stop() {
   }
 }
 async function main() {
-  for (const port of [8545, API_PORT, APP_PORT]) {
+  for (const port of [RPC_PORT, API_PORT, APP_PORT]) {
     const probe = net.createServer();
     await new Promise((resolve, reject) => {
       probe.once("error", () =>
@@ -156,7 +158,7 @@ async function main() {
   try {
     await client.getChainId();
     throw new Error(
-      "RPC port 8545 is occupied. Stop the existing process before start/reset.",
+      `RPC port ${RPC_PORT} is occupied. Stop the existing process before start/reset.`,
     );
   } catch (error) {
     if (error.message.startsWith("RPC port")) throw error;
@@ -172,7 +174,7 @@ async function main() {
       "--host",
       "127.0.0.1",
       "--port",
-      "8545",
+      String(RPC_PORT),
       "--chain-id",
       String(CHAIN_ID),
       "--fork-url",
@@ -210,7 +212,7 @@ async function main() {
   }
   if (!ready)
     throw new Error(
-      "Anvil fork startup failed. Check archive RPC availability and local port 8545.",
+      `Anvil fork startup failed. Check archive RPC availability and local port ${RPC_PORT}.`,
     );
   const currentTime = Math.floor(Date.now() / 1000);
   if (Number((await client.getBlock()).timestamp) < currentTime) {
@@ -244,6 +246,15 @@ async function main() {
       riskRegistry.address,
       aqua.address,
       swapVM.address,
+    ]);
+    const vaultFactory = await deploy(
+      wallet,
+      client,
+      "AurkaSpaceVaultFactory",
+      [policyRegistry.address, router.address, aqua.address, USDC, WETH],
+    );
+    await write(wallet, client, policyRegistry, "setInitializationFactory", [
+      vaultFactory.address,
     ]);
     console.log("AURKA fork contracts deployed; seeding fork token balances.");
     const alice = accounts[0].address;
@@ -435,6 +446,9 @@ async function main() {
       oracle: oracle.address,
       swapVM: swapVM.address,
       router: router.address,
+      vaultFactory: vaultFactory.address,
+      vaultFactoryVersion: 2,
+      spaceCreationMode: "single-transaction",
       deploymentBlock: Number((await client.getBlock()).number),
       mocks: [
         "MockAqua: unrestricted test virtual balances; not production Aqua",
@@ -450,10 +464,53 @@ async function main() {
     };
     writeFileSync(manifestFile, stringify(manifest));
   }
-  if (!manifest.vaultFactory) {
-    const factory = await deploy(wallet, client, "AurkaSpaceVaultFactory");
-    manifest.vaultFactory = factory.address;
+  if (
+    manifest.spaceCreationMode !== "single-transaction" ||
+    manifest.vaultFactoryVersion !== 2
+  ) {
+    throw new Error(
+      "This fork predates single-transaction Space creation. Stop it and run pnpm fork:reset in an isolated environment; existing fork state was not changed.",
+    );
   }
+  if (!manifest.vaultFactory) {
+    throw new Error(
+      "The configured fork is missing its atomic Space factory. Run pnpm fork:reset in an isolated environment.",
+    );
+  }
+  let configuredFactory;
+  try {
+    configuredFactory = await client.readContract({
+      address: manifest.policyRegistry,
+      abi: artifact("AurkaPolicyRegistry").abi,
+      functionName: "initializationFactory",
+    });
+  } catch {
+    throw new Error(
+      "This fork's policy registry predates single-transaction Space creation. Stop it and run pnpm fork:reset in an isolated environment; existing fork state was not changed.",
+    );
+  }
+  if (configuredFactory.toLowerCase() !== manifest.vaultFactory.toLowerCase())
+    throw new Error(
+      "The fork factory is not the registry initialization authority. Run pnpm fork:reset in an isolated environment; existing fork state was not changed.",
+    );
+  if (!manifest.forkGeneration)
+    manifest.forkGeneration = randomBytes(16).toString("hex");
+  const deploymentBlock = await client.getBlock({
+    blockNumber: BigInt(manifest.deploymentBlock),
+  });
+  if (!deploymentBlock?.hash)
+    throw new Error(
+      "Fork deployment identity cannot be read from the local RPC.",
+    );
+  if (
+    manifest.deploymentBlockHash &&
+    manifest.deploymentBlockHash.toLowerCase() !==
+      deploymentBlock.hash.toLowerCase()
+  )
+    throw new Error(
+      "Fork deployment identity changed. The configured fork was reset; use its new browser session and do not reuse pending setup hashes.",
+    );
+  manifest.deploymentBlockHash = deploymentBlock.hash;
   manifest.apiUrl = `http://127.0.0.1:${API_PORT}`;
   delete manifest.ownerUrl;
   delete manifest.traderUrl;
@@ -683,6 +740,42 @@ async function main() {
       writeFileSync(manifestFile, stringify(manifest));
     },
   });
+  const forkContext = async () => {
+    const head = await client.getBlock();
+    return {
+      chainId: manifest.chainId,
+      forkGeneration: manifest.forkGeneration,
+      forkAnchor: {
+        blockNumber: String(manifest.deploymentBlock),
+        blockHash: manifest.deploymentBlockHash,
+      },
+      observedBlock: {
+        blockNumber: head.number.toString(),
+        blockHash: head.hash,
+      },
+      deployment: {
+        policyRegistry: manifest.policyRegistry,
+        vaultFactory: manifest.vaultFactory,
+        aqua: manifest.aqua,
+        router: manifest.router,
+      },
+    };
+  };
+  const assertForkContext = (body) => {
+    if (
+      body?.forkGeneration !== undefined &&
+      body.forkGeneration !== manifest.forkGeneration
+    )
+      throw new ServiceError(
+        "FORK_CONTEXT_MISMATCH",
+        "This setup was prepared by a different local fork instance; inspect the saved hash before retrying.",
+        409,
+        {
+          expectedForkGeneration: manifest.forkGeneration,
+          receivedForkGeneration: body.forkGeneration,
+        },
+      );
+  };
   for (const plan of Object.values(lifecycle.plans)) {
     if (plan.complete) {
       try {
@@ -710,12 +803,21 @@ async function main() {
   gateway = createServer(async (request, response) => {
     try {
       const url = new URL(request.url, "http://localhost");
+      if (request.method === "GET" && url.pathname === "/fork/identity") {
+        response.writeHead(200, {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+        });
+        response.end(stringify(await forkContext()));
+        return;
+      }
       if (
         request.method === "POST" &&
         [
           "/fork/spaces/prepare",
           "/fork/spaces/confirm",
           "/fork/spaces/reconcile",
+          "/fork/spaces/recover",
         ].includes(url.pathname)
       ) {
         const chunks = [];
@@ -726,36 +828,57 @@ async function main() {
           chunks.push(chunk);
         }
         const body = JSON.parse(Buffer.concat(chunks).toString());
+        assertForkContext(body);
         const work = lifecycleQueue.then(() =>
           url.pathname.endsWith("/reconcile")
-            ? lifecycle.reconcileBatch(
-                body.spaceId,
-                body.hashes,
-                body.operation,
-                body.batchId,
-                body.batchPlanId,
-                body.batchCommitment,
-                body.atomic,
-                body.status,
-              )
-            : url.pathname.endsWith("/confirm")
-              ? body.batch
-                ? lifecycle.confirmBatch(
-                    body.spaceId,
-                    body.hashes,
-                    body.operation,
-                    body.batchId,
-                    body.batchPlanId,
-                    body.batchCommitment,
-                    body.atomic,
-                  )
-                : lifecycle.confirm(
-                    body.spaceId,
-                    body.step,
-                    body.hash,
-                    body.operation,
-                  )
-              : lifecycle.prepare(body.spaceId, body.operation),
+            ? body.batch
+              ? lifecycle.reconcileBatch(
+                  body.spaceId,
+                  body.hashes,
+                  body.operation,
+                  body.batchId,
+                  body.batchPlanId,
+                  body.batchCommitment,
+                  body.atomic,
+                  body.status,
+                )
+              : lifecycle.reconcileTransaction(
+                  body.spaceId,
+                  body.step,
+                  body.hash,
+                  body.operation,
+                  body.planId,
+                  body.planCommitment,
+                )
+            : url.pathname.endsWith("/recover")
+              ? lifecycle.recoverTransaction(
+                  body.spaceId,
+                  body.step,
+                  body.hash,
+                  body.operation,
+                  body.planId,
+                  body.planCommitment,
+                )
+              : url.pathname.endsWith("/confirm")
+                ? body.batch
+                  ? lifecycle.confirmBatch(
+                      body.spaceId,
+                      body.hashes,
+                      body.operation,
+                      body.batchId,
+                      body.batchPlanId,
+                      body.batchCommitment,
+                      body.atomic,
+                    )
+                  : lifecycle.confirm(
+                      body.spaceId,
+                      body.step,
+                      body.hash,
+                      body.operation,
+                      body.planId,
+                      body.planCommitment,
+                    )
+                : lifecycle.prepare(body.spaceId, body.operation),
         );
         lifecycleQueue = work.catch(() => {});
         const result = await work;
@@ -763,7 +886,7 @@ async function main() {
           "content-type": "application/json",
           "cache-control": "no-store",
         });
-        response.end(stringify(result));
+        response.end(stringify({ ...(await forkContext()), ...result }));
       } else if (request.method === "GET" && url.pathname === "/fork") {
         const spaceId =
           url.searchParams.get("spaceId") ?? DEFAULT_SPACE.positionId;
@@ -946,8 +1069,20 @@ async function main() {
         response.destroy();
         return;
       }
-      response.writeHead(409, { "content-type": "application/json" });
-      response.end(stringify({ error: error.shortMessage ?? error.message }));
+      const code = error.code ?? "FORK_REQUEST_FAILED";
+      const statusCode = Number.isInteger(error.statusCode)
+        ? error.statusCode
+        : 409;
+      response.writeHead(statusCode, { "content-type": "application/json" });
+      response.end(
+        stringify({
+          error: {
+            code,
+            message: error.shortMessage ?? error.message,
+            ...(error.details ? { details: error.details } : {}),
+          },
+        }),
+      );
     }
   });
   await new Promise((resolve, reject) => {
@@ -985,7 +1120,7 @@ async function main() {
     });
   }
   console.log(
-    "Fork ready: AURKA app http://127.0.0.1:3011/spaces · API http://127.0.0.1:8797 · manifest .fork-space/manifest.json. Test funds; mocked Aqua and prices.",
+    `Fork ready: AURKA app http://127.0.0.1:${APP_PORT}/spaces · API http://127.0.0.1:${API_PORT} · manifest .fork-space/manifest.json. Test funds; mocked Aqua and prices.`,
   );
 }
 process.once("SIGINT", () => void stop());

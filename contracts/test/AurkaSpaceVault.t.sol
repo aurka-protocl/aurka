@@ -26,8 +26,13 @@ contract VaultTestToken {
 }
 
 contract AurkaSpaceVaultTest is TestBase {
+    function _factory() private returns (AurkaSpaceVaultFactory) {
+        return
+            new AurkaSpaceVaultFactory(address(1), address(2), address(3), address(4), address(5));
+    }
+
     function testIndependentTreasuriesAndIdempotentDeployment() public {
-        AurkaSpaceVaultFactory factory = new AurkaSpaceVaultFactory();
+        AurkaSpaceVaultFactory factory = _factory();
         bytes32 first = keccak256("first");
         address one = factory.createVault(first);
         address two = factory.createVault(keccak256("second"));
@@ -46,7 +51,7 @@ contract AurkaSpaceVaultTest is TestBase {
     }
 
     function testOtherOwnerCannotWithdrawApproveOrClaimTreasury() public {
-        AurkaSpaceVaultFactory factory = new AurkaSpaceVaultFactory();
+        AurkaSpaceVaultFactory factory = _factory();
         bytes32 id = keccak256("space");
         address vault = factory.createVault(id);
         vm.startPrank(address(0xBAD));

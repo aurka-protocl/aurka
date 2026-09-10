@@ -68,23 +68,30 @@ The local fork gateway supplies the real wallet transaction path:
 ```text
 POST /fork/spaces/prepare  {spaceId, operation?: "ACTIVATE"|"UPDATE"|"PAUSE"|"RESUME"|"REACTIVATE"}
 POST /fork/spaces/confirm  {spaceId, operation?, step, hash}
+POST /fork/spaces/reconcile {spaceId, operation?, step, hash,
+                              planId, planCommitment}
+POST /fork/spaces/recover   {spaceId, operation?, step, hash,
+                              planId, planCommitment}
 POST /fork/spaces/confirm  {spaceId, operation?, batch: true, atomic: true,
                             batchId, batchPlanId, batchCommitment, hashes}
 POST /fork/spaces/reconcile {spaceId, operation?, batch: true,
                              status: 500|600, atomic, batchId,
                              batchPlanId, batchCommitment, hashes}
+GET  /fork/identity
 ```
 
 These fork-only endpoints return a plain JSON setup response: either
 `{complete:false, spaceId, ownerAddress, treasury, step, total, label, transaction}`
-or `{complete:true, space}`. When an EIP-5792 atomic setup is available, the
-incomplete response also contains `batch`, `batchPlanId`, and `batchCommitment`.
-The browser sends the prepared transaction or wallet call batch through the
-owner wallet. Confirmation checks the configured chain, canonical successful
-receipt, authorized caller, destination, exact calldata/value, preparation
-block, and receipt reuse. A submitted hash alone cannot activate a Space.
+or `{complete:true, space}`. New fork creation responses additionally return
+`mode:"single-transaction"` and a `prerequisites` array when exact ERC-20
+allowances to the factory are missing. The browser sends those ordinary approval
+transactions explicitly, then sends exactly one prepared factory transaction
+through the owner wallet. Confirmation checks the configured chain, canonical
+successful receipt, authorized caller, destination, exact calldata/value,
+initialization event, initialized state, preparation block, and receipt reuse. A
+submitted hash alone cannot activate a Space.
 
-Creation deploys an idempotent, owner-scoped `AurkaSpaceVault` through
+Creation deploys a deterministic, owner-scoped `AurkaSpaceVault` through
 `AurkaSpaceVaultFactory`, creates/configures its policy, transfers **35,000 USDC
 and 5 WETH** from the owner, approves MockAqua from that treasury, registers
 those virtual balances, and authorizes the supported WETH→USDC capacity. The
@@ -104,7 +111,12 @@ prefix; ambiguous or unavailable evidence stays pending for reconciliation.
 Restart discovers completed Spaces and verifies their chain evidence before
 registering snapshot/quote providers. Orphaned receipts downgrade the affected
 Space and change records; verified missing steps can be retried. RPC outages
-keep receipt history and block dependent trading.
+keep receipt history and block dependent trading. Single-transaction
+reconciliation distinguishes a known-but-unmined hash, an unavailable RPC, and a
+hash absent from the configured fork. A new wallet send is never automatic; the
+explicit recovery endpoint permits only the first deterministic treasury
+creation after the fork proves that no treasury code exists, and refuses later
+or ambiguous retries.
 
 Save the signed draft first, then prepare `UPDATE` to apply its reviewed bounds
 and limit. Rule/pause receipts produce durable Space-scoped change records.

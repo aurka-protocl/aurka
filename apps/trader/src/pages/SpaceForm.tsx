@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { ArrowLeft, ArrowRight, Check, LoaderCircle } from "lucide-react";
 import { AurkaClient } from "@aurka/sdk";
@@ -9,7 +9,7 @@ import {
   type SpaceRecord,
 } from "@aurka/shared";
 import { apiBaseUrl, appMode, supportedChainId } from "../config";
-import { activateForkSpace } from "../domain/space-setup";
+import { activateForkSpace, SetupRecoveryError } from "../domain/space-setup";
 import { spaceUrl } from "../domain/spaces";
 import { useWallet } from "../wallet";
 
@@ -61,6 +61,15 @@ type DraftAsset = AssetBound & {
   readonly minimumText: string;
   readonly maximumText: string;
 };
+
+type SetupUiState =
+  | "idle"
+  | "awaiting-signature"
+  | "submitted"
+  | "confirmation-unavailable"
+  | "fork-mismatch"
+  | "action-required"
+  | "confirmed";
 
 function newSpaceId(): string {
   const uuid =
@@ -120,6 +129,28 @@ export default function SpaceForm({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  const [setupState, setSetupState] = useState<SetupUiState>("idle");
+  const [setupDetails, setSetupDetails] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (appMode !== "fork" || !wallet.address || !saved) return;
+    const operation =
+      saved.identity.state === "ACTIVE" ||
+      saved.identity.state === "REACTIVATION_REQUIRED" ||
+      saved.identity.state === "PAUSED"
+        ? "UPDATE"
+        : "ACTIVATE";
+    const key = `aurka:space-setup:${supportedChainId}:${wallet.address.toLowerCase()}:${saved.identity.id}:${operation}`;
+    const approvalPending = supportedAssets.some((asset) =>
+      localStorage.getItem(`${key}:approval:${asset.token.toLowerCase()}`),
+    );
+    if (
+      localStorage.getItem(key) ||
+      localStorage.getItem(`${key}:batch`) ||
+      approvalPending
+    )
+      setSetupState("submitted");
+  }, [saved, wallet.address]);
 
   const assets = useMemo<DraftAsset[]>(
     () =>
@@ -208,6 +239,8 @@ export default function SpaceForm({
     setBusy(true);
     setError(null);
     setMessage(null);
+    setSetupDetails(null);
+    setSetupState("idle");
     try {
       const result = await sign(saved ? "UPDATE" : "CREATE", {
         ...draft,
@@ -232,10 +265,12 @@ export default function SpaceForm({
     }
   }
 
-  async function activate() {
+  async function activate(action: "start" | "check" | "retry" = "start") {
     setBusy(true);
     setError(null);
     setMessage(null);
+    setSetupDetails(null);
+    setSetupState(action === "check" ? "submitted" : "awaiting-signature");
     try {
       let current = saved;
       if (appMode === "fork") {
@@ -260,10 +295,18 @@ export default function SpaceForm({
           current.identity.id,
           wallet.address,
           wallet.provider,
-          setMessage,
+          (progress) => {
+            setMessage(progress);
+            if (/awaiting wallet approval/i.test(progress))
+              setSetupState("awaiting-signature");
+            else if (/submitted|waiting for confirmation/i.test(progress))
+              setSetupState("submitted");
+          },
           operation,
+          action,
         );
         setSaved(space);
+        setSetupState("confirmed");
         setMessage("Space activation verified onchain.");
         navigate(spaceUrl(space.identity.id, "settings"), { replace: true });
         return;
@@ -290,7 +333,19 @@ export default function SpaceForm({
         setMessage("Space rules updated and confirmed.");
       }
     } catch (requestError) {
-      setError(errorMessage(requestError));
+      if (requestError instanceof SetupRecoveryError) {
+        setSetupState(
+          requestError.state === "pending" ? "submitted" : requestError.state,
+        );
+        setSetupDetails(requestError.message);
+        setError(
+          requestError.state === "pending"
+            ? "Setup is submitted and still awaiting confirmation."
+            : requestError.state === "fork-mismatch"
+              ? "The wallet and setup service are using different fork instances."
+              : "Setup needs verification before another transaction can be approved.",
+        );
+      } else setError(errorMessage(requestError));
     } finally {
       setBusy(false);
     }
@@ -492,9 +547,23 @@ export default function SpaceForm({
         )}
         {step === 5 && (
           <div className="space-y-4">
-            <div className="flex items-center gap-2 text-emerald-300">
-              <Check className="h-4 w-4" aria-hidden="true" /> Ready for owner
-              signature
+            <div
+              className={`flex items-center gap-2 ${setupState === "confirmed" ? "text-emerald-300" : setupState === "submitted" || setupState === "confirmation-unavailable" ? "text-amber-300" : "text-cyan-300"}`}
+              role="status"
+              aria-live="polite"
+            >
+              <Check className="h-4 w-4" aria-hidden="true" />
+              {setupState === "idle" || setupState === "awaiting-signature"
+                ? "Ready for owner signature"
+                : setupState === "submitted"
+                  ? "Setup submitted — awaiting confirmation"
+                  : setupState === "confirmation-unavailable"
+                    ? "Confirmation unavailable"
+                    : setupState === "fork-mismatch"
+                      ? "Fork context changed"
+                      : setupState === "action-required"
+                        ? "Setup action required"
+                        : "Setup confirmed"}
             </div>
             <dl className="grid gap-3 text-sm sm:grid-cols-2">
               <div>
@@ -518,9 +587,19 @@ export default function SpaceForm({
                 </dd>
               </div>
             </dl>
+            {setupDetails && (
+              <details className="text-sm text-slate-400">
+                <summary>Setup evidence</summary>
+                <p className="mt-2 break-words">{setupDetails}</p>
+              </details>
+            )}
             <p className="text-sm leading-6 text-slate-400">
               {appMode === "fork"
-                ? "Save your draft before activation. Setup creates a dedicated treasury, transfers 35,000 USDC and 5 WETH from your wallet, approves settlement, registers these balances in MockAqua, and authorizes trading. Each step needs a wallet transaction and gas on the local fork. Retry continues verified setup; trading starts only after server verification."
+                ? setupState === "submitted"
+                  ? "Your wallet transaction is recorded locally and will not be sent again while confirmation is pending. Check again to continue verification."
+                  : setupState === "confirmation-unavailable"
+                    ? "The wallet or configured fork could not confirm the submitted hash. Check again first; retry is offered only after the server proves that the step had no effect."
+                    : "Save your draft before activation. This local fork creation uses up to two explicit token approvals (35,000 USDC and 5 WETH to the reviewed factory spender), followed by exactly one wallet transaction that creates, funds, configures, and authorizes the Space. MockAqua is a test-only fixture. Trading starts only after server verification."
                 : "Saving creates a durable draft. Activation or a rule change requires another exact signature; a rejected wallet request leaves the previous state unchanged."}
             </p>
           </div>
@@ -548,9 +627,34 @@ export default function SpaceForm({
             </button>
           ) : (
             <>
+              {appMode === "fork" &&
+                (setupState === "submitted" ||
+                  setupState === "confirmation-unavailable") && (
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => void activate("check")}
+                    className="rounded-lg border border-amber-700 px-4 py-2.5 text-sm text-amber-200 disabled:opacity-40"
+                  >
+                    Check again
+                  </button>
+                )}
+              {appMode === "fork" &&
+                setupState === "confirmation-unavailable" && (
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => void activate("retry")}
+                    className="rounded-lg border border-slate-600 px-4 py-2.5 text-sm text-slate-100 disabled:opacity-40"
+                  >
+                    Retry setup safely
+                  </button>
+                )}
               <button
                 type="button"
-                disabled={busy}
+                disabled={
+                  busy || (appMode === "fork" && setupState === "submitted")
+                }
                 onClick={() => void saveDraft()}
                 className="rounded-lg border border-slate-600 px-4 py-2.5 text-sm text-slate-100 disabled:opacity-40"
               >
@@ -563,24 +667,30 @@ export default function SpaceForm({
                   "Save draft"
                 )}
               </button>
-              <button
-                type="button"
-                disabled={busy}
-                onClick={() => void activate()}
-                className="rounded-lg bg-cyan-700 px-4 py-2.5 text-sm font-medium text-white disabled:opacity-40"
-              >
-                {appMode === "fork"
-                  ? saved?.identity.state === "ACTIVE" ||
-                    saved?.identity.state === "REACTIVATION_REQUIRED" ||
-                    saved?.identity.state === "PAUSED"
-                    ? "Apply rules onchain"
-                    : "Deploy / continue activation"
-                  : existing?.identity.state === "ACTIVE" ||
-                      existing?.identity.state === "REACTIVATION_REQUIRED" ||
-                      existing?.identity.state === "PAUSED"
-                    ? "Save changes"
-                    : "Deploy / activate"}
-              </button>
+              {!(
+                appMode === "fork" &&
+                (setupState === "submitted" ||
+                  setupState === "confirmation-unavailable")
+              ) && (
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => void activate()}
+                  className="rounded-lg bg-cyan-700 px-4 py-2.5 text-sm font-medium text-white disabled:opacity-40"
+                >
+                  {appMode === "fork"
+                    ? saved?.identity.state === "ACTIVE" ||
+                      saved?.identity.state === "REACTIVATION_REQUIRED" ||
+                      saved?.identity.state === "PAUSED"
+                      ? "Apply rules onchain"
+                      : "Create Space"
+                    : existing?.identity.state === "ACTIVE" ||
+                        existing?.identity.state === "REACTIVATION_REQUIRED" ||
+                        existing?.identity.state === "PAUSED"
+                      ? "Save changes"
+                      : "Deploy / activate"}
+                </button>
+              )}
             </>
           )}
         </div>

@@ -1,16 +1,99 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.28;
 
+import { AurkaPolicyRegistry } from "./AurkaPolicyRegistry.sol";
 import { AurkaSpaceVault } from "./AurkaSpaceVault.sol";
+import { IERC20Minimal } from "./interfaces/IERC20Minimal.sol";
+import { DirectSettlement } from "./libraries/DirectSettlement.sol";
+import { PriceProtection } from "./libraries/PriceProtection.sol";
 
-/// @notice Retries resolve to the same treasury; owners cannot claim each other's salts.
+interface ISpaceCapacityInitializer {
+    function activateCapacityEpochFromFactory(
+        bytes32 policyId,
+        DirectSettlement.CapacityEpoch calldata epoch,
+        PriceProtection.SettlementInput calldata priceInput
+    ) external returns (bytes32 capacityEpochId, uint256 capacityBaseline);
+}
+
+/// @notice Single owner entry point for the local fork Space lifecycle.
+/// @dev The Aqua seed call is deliberately an explicit test-fixture adapter;
+///      production Aqua must provide a separately audited initialization path.
 contract AurkaSpaceVaultFactory {
+    uint256 public constant INITIAL_USDC_AMOUNT = 35_000e6;
+    uint256 public constant INITIAL_WETH_AMOUNT = 5e18;
+
+    address public immutable policyRegistry;
+    address public immutable router;
+    address public immutable aqua;
+    address public immutable usdc;
+    address public immutable weth;
+    uint256 private _lock = 1;
+
+    struct SpaceInitialization {
+        bytes32 spaceId;
+        bytes32 policyId;
+        bytes32 strategyHash;
+        address owner;
+        AurkaPolicyRegistry.AssetConfig[] assets;
+        uint256 maximumTransactionValue;
+        AurkaPolicyRegistry.FeeConfig fee;
+        address priceOracle;
+        uint64 priceMaxAgeSeconds;
+        uint16 maximumPriceDeviationBps;
+        DirectSettlement.CapacityEpoch capacityEpoch;
+        PriceProtection.SettlementInput priceInput;
+    }
+
     event VaultCreated(address indexed owner, bytes32 indexed spaceId, address vault);
+    event SpaceInitialized(
+        bytes32 indexed spaceId,
+        bytes32 indexed policyId,
+        address indexed owner,
+        address vault,
+        uint256 usdcAmount,
+        uint256 wethAmount,
+        bytes32 capacityEpochId,
+        uint256 capacityBaseline
+    );
+
+    error InvalidAddress();
+    error InvalidInitialization();
+    error SpaceAlreadyInitialized(address vault);
+    error TokenTransferFailed(address token);
+    error FundingAmountMismatch(address token, uint256 expected, uint256 actual);
+    error UnauthorizedInitialization();
+    error Reentrancy();
+
+    modifier nonReentrant() {
+        if (_lock != 1) revert Reentrancy();
+        _lock = 2;
+        _;
+        _lock = 1;
+    }
+
+    constructor(
+        address policyRegistry_,
+        address router_,
+        address aqua_,
+        address usdc_,
+        address weth_
+    ) {
+        if (
+            policyRegistry_ == address(0) || router_ == address(0) || aqua_ == address(0)
+                || usdc_ == address(0) || weth_ == address(0)
+        ) revert InvalidAddress();
+        policyRegistry = policyRegistry_;
+        router = router_;
+        aqua = aqua_;
+        usdc = usdc_;
+        weth = weth_;
+    }
 
     function vaultAddress(address owner, bytes32 spaceId) public view returns (address) {
         bytes32 salt = keccak256(abi.encode(owner, spaceId));
-        bytes32 initHash =
-            keccak256(abi.encodePacked(type(AurkaSpaceVault).creationCode, abi.encode(owner)));
+        bytes32 initHash = keccak256(
+            abi.encodePacked(type(AurkaSpaceVault).creationCode, abi.encode(owner, address(this)))
+        );
         return address(
             uint160(
                 uint256(keccak256(abi.encodePacked(bytes1(0xff), address(this), salt, initHash)))
@@ -19,12 +102,132 @@ contract AurkaSpaceVaultFactory {
     }
 
     function createVault(bytes32 spaceId) external returns (address vault) {
-        vault = vaultAddress(msg.sender, spaceId);
+        vault = _createVault(msg.sender, spaceId);
+    }
+
+    /// @notice Pulls the disclosed funding, creates and configures all policy
+    /// state, seeds the local Aqua fixture, and activates capacity in one tx.
+    function createAndInitializeSpace(SpaceInitialization calldata params)
+        external
+        nonReentrant
+        returns (address vault, bytes32 capacityEpochId, uint256 capacityBaseline)
+    {
+        if (params.owner != msg.sender || params.owner == address(0)) {
+            revert UnauthorizedInitialization();
+        }
+        if (
+            params.spaceId == bytes32(0) || params.policyId == bytes32(0)
+                || params.strategyHash == bytes32(0) || params.priceOracle == address(0)
+                || params.assets.length != 2
+        ) revert InvalidInitialization();
+        if (AurkaPolicyRegistry(policyRegistry).initializationFactory() != address(this)) {
+            revert UnauthorizedInitialization();
+        }
+
+        vault = vaultAddress(params.owner, params.spaceId);
+        if (vault.code.length != 0) revert SpaceAlreadyInitialized(vault);
+        if (
+            params.assets[0].token != usdc || params.assets[0].decimals != 6
+                || params.assets[1].token != weth || params.assets[1].decimals != 18
+        ) revert InvalidInitialization();
+        if (
+            params.capacityEpoch.positionIdHash != params.spaceId
+                || params.capacityEpoch.aquaStrategyHash != params.strategyHash
+                || params.capacityEpoch.chainId != block.chainid
+                || params.capacityEpoch.verifyingContract != router
+                || params.capacityEpoch.capacityBaseline != 0
+                || params.capacityEpoch.capacityEpochId != bytes32(0)
+                || params.capacityEpoch.consumedBefore != 0
+        ) revert InvalidInitialization();
+        if (
+            params.priceInput.traderInputToken != weth
+                || params.priceInput.traderOutputToken != usdc
+                || params.capacityEpoch.traderInputTokenId != _tokenId(weth)
+                || params.capacityEpoch.traderOutputTokenId != _tokenId(usdc)
+        ) revert InvalidInitialization();
+        if (params.fee.treasuryFeeRecipient != vault) revert InvalidInitialization();
+
+        vault = _createVault(params.owner, params.spaceId);
+        _pullExact(IERC20Minimal(usdc), params.owner, vault, INITIAL_USDC_AMOUNT);
+        _pullExact(IERC20Minimal(weth), params.owner, vault, INITIAL_WETH_AMOUNT);
+
+        uint256 policyNonce = AurkaPolicyRegistry(policyRegistry).createPolicyFromFactory(
+            params.policyId,
+            vault,
+            params.owner,
+            params.assets,
+            params.maximumTransactionValue,
+            params.fee,
+            params.spaceId,
+            params.strategyHash,
+            params.priceOracle,
+            params.priceMaxAgeSeconds,
+            params.maximumPriceDeviationBps
+        );
+        if (params.capacityEpoch.policyNonce != policyNonce) revert InvalidInitialization();
+
+        AurkaSpaceVault(vault).initializeApproval(usdc, aqua, INITIAL_USDC_AMOUNT);
+        AurkaSpaceVault(vault).initializeApproval(weth, aqua, INITIAL_WETH_AMOUNT);
+        // MockAqua is the only supported local adapter. This call is kept as
+        // a narrow interface so no arbitrary target/call data is accepted.
+        (bool seededUsdc,) = aqua.call(
+            abi.encodeWithSignature(
+                "seed(address,address,bytes32,address,uint256)",
+                vault,
+                router,
+                params.strategyHash,
+                usdc,
+                INITIAL_USDC_AMOUNT
+            )
+        );
+        if (!seededUsdc) revert InvalidInitialization();
+        (bool seededWeth,) = aqua.call(
+            abi.encodeWithSignature(
+                "seed(address,address,bytes32,address,uint256)",
+                vault,
+                router,
+                params.strategyHash,
+                weth,
+                INITIAL_WETH_AMOUNT
+            )
+        );
+        if (!seededWeth) revert InvalidInitialization();
+
+        (capacityEpochId, capacityBaseline) = ISpaceCapacityInitializer(router)
+            .activateCapacityEpochFromFactory(params.policyId, params.capacityEpoch, params.priceInput);
+        AurkaSpaceVault(vault).finalizeInitialization();
+        emit SpaceInitialized(
+            params.spaceId,
+            params.policyId,
+            params.owner,
+            vault,
+            INITIAL_USDC_AMOUNT,
+            INITIAL_WETH_AMOUNT,
+            capacityEpochId,
+            capacityBaseline
+        );
+    }
+
+    function _createVault(address owner, bytes32 spaceId) private returns (address vault) {
+        vault = vaultAddress(owner, spaceId);
         if (vault.code.length == 0) {
             vault = address(
-                new AurkaSpaceVault{ salt: keccak256(abi.encode(msg.sender, spaceId)) }(msg.sender)
+                new AurkaSpaceVault{ salt: keccak256(abi.encode(owner, spaceId)) }(
+                    owner, address(this)
+                )
             );
-            emit VaultCreated(msg.sender, spaceId, vault);
+            emit VaultCreated(owner, spaceId, vault);
         }
+    }
+
+    function _pullExact(IERC20Minimal token, address from, address to, uint256 amount) private {
+        uint256 beforeBalance = token.balanceOf(to);
+        if (!token.transferFrom(from, to, amount)) revert TokenTransferFailed(address(token));
+        uint256 received = token.balanceOf(to) - beforeBalance;
+        if (received != amount) revert FundingAmountMismatch(address(token), amount, received);
+    }
+
+    function _tokenId(address token) private pure returns (bytes32) {
+        return bytes32(uint256(uint160(token)));
     }
 }

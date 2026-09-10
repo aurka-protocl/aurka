@@ -71,6 +71,29 @@ describe("fork Space receipt authority", () => {
       verifySpaceReceipt(client, 31337, owner, expected, hash),
     ).rejects.toThrow("Receipt not found");
   });
+
+  it("classifies a hash missing from the configured fork without recording failure", async () => {
+    const client = rpc();
+    client.getTransaction = async () => null;
+    client.getTransactionReceipt = async () => null;
+    await expect(
+      verifySpaceReceipt(client, 31337, owner, expected, hash),
+    ).rejects.toMatchObject({
+      code: "SPACE_TRANSACTION_NOT_FOUND",
+      details: { state: "NOT_FOUND", retryable: true },
+    });
+  });
+
+  it("classifies a known but unmined hash as pending", async () => {
+    const client = rpc();
+    client.getTransactionReceipt = async () => null;
+    await expect(
+      verifySpaceReceipt(client, 31337, owner, expected, hash),
+    ).rejects.toMatchObject({
+      code: "SPACE_TRANSACTION_PENDING",
+      details: { state: "PENDING", retryable: true },
+    });
+  });
 });
 
 describe("atomic Space batch receipt authority", () => {
@@ -755,6 +778,64 @@ describe("atomic Space batch receipt authority", () => {
 });
 
 describe("Space setup recovery", () => {
+  it("allows an explicit retry only after proving the missing first call had no effect", async () => {
+    const directory = mkdtempSync(path.join(tmpdir(), "aurka-missing-"));
+    const spaceId = "space:missing-setup";
+    const identity = {
+      id: spaceId,
+      mode: "fork",
+      state: "DRAFT",
+      ownerAddress: owner,
+    };
+    const draft = { ownerAddress: owner };
+    const client = rpc();
+    client.getTransaction = async () => null;
+    client.getTransactionReceipt = async () => null;
+    client.getCode = async () => "0x";
+    const lifecycle = new ForkSpaceLifecycle({
+      client,
+      manifest: { chainId: 31337 },
+      providers: new Map(),
+      file: path.join(directory, "setup.json"),
+      service: {
+        getSpace: () => ({ identity, draft }),
+        repository: {
+          setSpaceReceiptStatus: () => {},
+          saveSpaceIdentity: (next) => Object.assign(identity, next),
+        },
+      },
+    });
+    lifecycle.plans[spaceId] = {
+      definition: { positionId: spaceId },
+      draft,
+      treasury: target,
+      minimumBlock: "0",
+      complete: false,
+      receipts: [],
+      steps: [
+        { label: "Create treasury", transaction: expected },
+        { label: "Configure policy", transaction: expected },
+      ],
+    };
+    try {
+      const recovered = await lifecycle.recoverTransaction(spaceId, 0, hash);
+      expect(recovered).toMatchObject({
+        complete: false,
+        step: 0,
+        transaction: expected,
+      });
+      expect(lifecycle.plans[spaceId].receipts).toHaveLength(0);
+
+      client.getCode = async () => "0x6001";
+      await expect(
+        lifecycle.recoverTransaction(spaceId, 0, hash),
+      ).rejects.toThrow("already exists");
+      expect(lifecycle.plans[spaceId].receipts).toHaveLength(0);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("downgrades orphaned activation, preserves replay protection and resumes the missing step", async () => {
     const directory = mkdtempSync(path.join(tmpdir(), "aurka-receipt-"));
     const identity = { id: "space:reorg", state: "ACTIVE" };

@@ -442,6 +442,37 @@ export class ServiceRepository {
     return value;
   }
 
+  /**
+   * Complete the pending projection for a chain operation without allowing a
+   * late retry to downgrade an already terminal change.
+   */
+  updateSpaceChange(input: SpaceChange): SpaceChange {
+    const value = spaceChangeSchema.parse(input);
+    const result = this.db
+      .update(spaceChanges)
+      .set({
+        eventType: value.eventType,
+        actor: value.actor,
+        status: value.status,
+        receiptHash: value.receiptHash ?? null,
+        payloadJson: json(value.payload),
+        createdAt: value.createdAt,
+      })
+      .where(
+        and(eq(spaceChanges.id, value.id), eq(spaceChanges.status, "PENDING")),
+      )
+      .run();
+    if (result.changes === 0) {
+      const existing = this.db
+        .select({ id: spaceChanges.id })
+        .from(spaceChanges)
+        .where(eq(spaceChanges.id, value.id))
+        .get();
+      if (!existing) this.saveSpaceChange(value);
+    }
+    return value;
+  }
+
   setSpaceReceiptStatus(
     spaceId: string,
     hashes: string[],
