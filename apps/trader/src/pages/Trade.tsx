@@ -154,17 +154,27 @@ function friendlyError(error: unknown): string {
   return raw;
 }
 
-function pairFor(position: Position | undefined): SwapPair | undefined {
+function pairsFor(position: Position | undefined): SwapPair[] {
   const assets = position?.currentPortfolio?.assets ?? [];
-  const input = assets.find((asset) => asset.symbol.toUpperCase() === "WETH");
-  const output = assets.find(
-    (asset) =>
-      asset.symbol.toUpperCase() === "USDC" &&
-      asset.token.toLowerCase() !== input?.token.toLowerCase(),
-  );
-  return input && output
-    ? { key: `${input.token}:${output.token}`, input, output }
-    : undefined;
+  const weth = assets.find((asset) => asset.symbol.toUpperCase() === "WETH");
+  const usdc = assets.find((asset) => asset.symbol.toUpperCase() === "USDC");
+  if (!weth || !usdc || weth.token.toLowerCase() === usdc.token.toLowerCase())
+    return [];
+  return [
+    {
+      key: `${weth.token.toLowerCase()}:${usdc.token.toLowerCase()}`,
+      input: weth,
+      output: usdc,
+    },
+  ];
+}
+
+function pairFor(
+  position: Position | undefined,
+  key?: string,
+): SwapPair | undefined {
+  const pairs = pairsFor(position);
+  return pairs.find((pair) => pair.key === key) ?? pairs[0];
 }
 
 function sourceClock(source: TradeSource | undefined): number {
@@ -255,6 +265,15 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
   const [clock, setClock] = useState(() => Math.floor(Date.now() / 1000));
   const flowVersion = useRef(0);
   const nonce = useRef(Date.now());
+  const agentRequest = useRef(0);
+  const agentAbort = useRef<AbortController>();
+
+  function cancelAgentRequest() {
+    agentRequest.current += 1;
+    agentAbort.current?.abort();
+    agentAbort.current = undefined;
+    setAgentBusy(false);
+  }
 
   function invalidateQuote(clearConfirmation = true) {
     flowVersion.current += 1;
@@ -331,7 +350,13 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
         const next = await loadSource(selectedSpaceId);
         if (active) {
           setSource(next);
-          setPairKey(pairFor(next.position)?.key ?? "");
+          setPairKey((current) =>
+            pairsFor(next.position).some(
+              (candidate) => candidate.key === current,
+            )
+              ? current
+              : (pairFor(next.position)?.key ?? ""),
+          );
           setSourceError(null);
         }
       } catch (requestError: unknown) {
@@ -364,6 +389,7 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
   }, [selectedSpaceId]);
 
   useEffect(() => {
+    cancelAgentRequest();
     const hadPendingTrade = quoteResult !== undefined || prepared !== undefined;
     invalidateQuote();
     setError(null);
@@ -377,13 +403,22 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
   }, [wallet.revision]);
 
   useEffect(() => {
+    return () => {
+      agentRequest.current += 1;
+      agentAbort.current?.abort();
+      agentAbort.current = undefined;
+    };
+  }, []);
+
+  useEffect(() => {
     const timer = window.setInterval(() => {
       setClock(sourceClock(source));
     }, 1_000);
     return () => window.clearInterval(timer);
   }, [source]);
 
-  const pair = pairFor(source?.position);
+  const pair = pairFor(source?.position, pairKey);
+  const availablePairs = pairsFor(source?.position);
   const quoteExpired =
     quoteResult !== undefined && quoteResult.quote.expiresAt <= clock;
   const quoteStale =
@@ -393,6 +428,7 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
   );
 
   function selectSpace(id: string) {
+    cancelAgentRequest();
     invalidateQuote();
     setError(null);
     setSelectedSpaceId(id);
@@ -406,6 +442,7 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
   }
 
   function updatePair(value: string) {
+    cancelAgentRequest();
     invalidateQuote();
     setError(null);
     setPairKey(value);
@@ -425,22 +462,38 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
   async function askAgent() {
     if (appMode === "fork" && wallet.status !== "connected")
       throw new Error("Connect Bob's wallet before asking the live agent.");
+    cancelAgentRequest();
+    const requestId = agentRequest.current;
+    const controller = new AbortController();
+    agentAbort.current = controller;
     setAgentBusy(true);
     setError(null);
+    setAgentCard(undefined);
     try {
-      const result = await client.agentPropose({
-        message: agentPrompt,
-        trader: wallet.address ?? DEMO_TRADER,
-        chainId: source?.position.chainId ?? supportedChainId,
-      });
+      const result = await client.agentPropose(
+        {
+          message: agentPrompt,
+          trader: wallet.address ?? DEMO_TRADER,
+          chainId: source?.position.chainId ?? supportedChainId,
+        },
+        controller.signal,
+      );
+      if (controller.signal.aborted || requestId !== agentRequest.current)
+        return;
       setAgentCard(result);
       if (result.status === "UNAVAILABLE") setStatus("Agent unavailable");
       else if (result.status === "BLOCKED")
         setStatus("Agent found a blocking rule — no trade was signed");
       else
         setStatus("Agent proposal ready — review before using the wallet flow");
+    } catch (requestError) {
+      if (!controller.signal.aborted && requestId === agentRequest.current)
+        throw requestError;
     } finally {
-      setAgentBusy(false);
+      if (requestId === agentRequest.current) {
+        agentAbort.current = undefined;
+        setAgentBusy(false);
+      }
     }
   }
 
@@ -452,6 +505,25 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
         asset.token.toLowerCase() === card.quote.traderInputToken.toLowerCase(),
     );
     if (!input) return;
+    const output = card.quote.currentPortfolio.assets.find(
+      (asset) =>
+        asset.token.toLowerCase() ===
+        card.quote.traderOutputToken.toLowerCase(),
+    );
+    if (!output) return;
+    if (
+      input.symbol.toUpperCase() !== "WETH" ||
+      output.symbol.toUpperCase() !== "USDC"
+    ) {
+      setError(
+        `The agent proposed ${input.symbol} → ${output.symbol}, but this deployment only has WETH → USDC capacity. The amount was not copied or reinterpreted.`,
+      );
+      setStatus("Agent direction is not executable on this deployment");
+      return;
+    }
+    setPairKey(
+      `${card.quote.traderInputToken.toLowerCase()}:${card.quote.traderOutputToken.toLowerCase()}`,
+    );
     setAmount(
       formatTokenAmount(card.proposal.traderInputAmount, input.decimals),
     );
@@ -474,7 +546,7 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
       const latest = await loadSource(selectedSpaceId);
       assertVersion(version);
       setSource(latest);
-      const latestPair = pairFor(latest.position);
+      const latestPair = pairFor(latest.position, pairKey);
       if (!latestPair || latestPair.key !== pairKey)
         throw new Error(
           "The selected pair changed with the source snapshot. Choose it again.",
@@ -659,11 +731,18 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
         throw new Error("Connect the counterparty wallet before signing.");
       let provider = await validateWallet(latest.fork, expected);
       const input = BigInt(quoteResult.solved.proposal.traderInputAmount);
+      const inputAsset = latest.position.currentPortfolio?.assets.find(
+        (asset) =>
+          asset.token.toLowerCase() ===
+          quoteResult.intent.traderInputToken.toLowerCase(),
+      );
+      if (!inputAsset)
+        throw new Error("The reviewed input token is not in the latest Space.");
       const balance = await provider.request({
         method: "eth_call",
         params: [
           {
-            to: latest.fork.weth,
+            to: inputAsset.token,
             data: `${ERC20_BALANCE_OF}${wordAddress(expected)}`,
           },
           "latest",
@@ -671,13 +750,13 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
       });
       if (typeof balance !== "string" || BigInt(balance) < input)
         throw new Error(
-          "The wallet does not have enough WETH for this executable fill.",
+          `The wallet does not have enough ${inputAsset.symbol} for this executable fill.`,
         );
       const allowance = await provider.request({
         method: "eth_call",
         params: [
           {
-            to: latest.fork.weth,
+            to: inputAsset.token,
             data: `${ERC20_ALLOWANCE}${wordAddress(expected)}${wordAddress(latest.fork.router)}`,
           },
           "latest",
@@ -686,17 +765,19 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
       if (typeof allowance !== "string")
         throw new Error("The wallet allowance could not be read.");
       if (BigInt(allowance) < input) {
-        setStatus("WETH allowance required for the reviewed fill");
+        setStatus(
+          `${inputAsset.symbol} allowance required for the reviewed fill`,
+        );
         await sendForkTransaction(
           latest.fork,
           {
             chainId: latest.fork.chainId,
-            to: latest.fork.weth,
+            to: inputAsset.token,
             data: `${ERC20_APPROVE}${wordAddress(latest.fork.router)}${wordAmount(input)}`,
             value: "0",
           },
           expected,
-          "WETH allowance",
+          `${inputAsset.symbol} allowance`,
         );
         assertVersion(version, walletRevision);
         provider = await validateWallet(latest.fork, expected);
@@ -973,6 +1054,7 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
         now={clock}
         onPrompt={setAgentPrompt}
         onAsk={() => run(askAgent)}
+        onCancel={cancelAgentRequest}
         onUse={useAgentProposal}
       />
 
@@ -991,7 +1073,7 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
             No supported pair is available
           </h2>
           <p className="mt-2 text-sm leading-6">
-            This Space needs the configured WETH → USDC assets and a fresh
+            This Space needs the configured USDC and WETH assets and a fresh
             source snapshot before it can be traded.
           </p>
         </section>
@@ -1022,10 +1104,18 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
                 onChange={(event) => updatePair(event.target.value)}
                 className="mt-1 block w-full rounded-lg border border-slate-700 bg-slate-800 p-2.5 text-slate-100"
               >
-                <option value={pair.key}>
-                  {pair.input.symbol} → {pair.output.symbol}
-                </option>
+                {availablePairs.map((candidate) => (
+                  <option key={candidate.key} value={candidate.key}>
+                    {candidate.input.symbol} → {candidate.output.symbol}
+                  </option>
+                ))}
               </select>
+              <span className="mt-1 block text-xs leading-5 text-slate-500">
+                This deployment has one initialized directional capacity: WETH →
+                USDC. A USDC → WETH request is kept in its original direction
+                and rejected by the deterministic capacity check; it is never
+                silently converted.
+              </span>
             </label>
             <label className="block text-sm">
               <span className="font-medium text-slate-200">Amount to pay</span>
@@ -1159,6 +1249,7 @@ function AgentAssistant({
   now,
   onPrompt,
   onAsk,
+  onCancel,
   onUse,
 }: {
   readonly prompt: string;
@@ -1167,6 +1258,7 @@ function AgentAssistant({
   readonly now: number;
   readonly onPrompt: (value: string) => void;
   readonly onAsk: () => void;
+  readonly onCancel: () => void;
   readonly onUse: (
     card: Extract<AgentProposalResponse, { status: "READY" }>,
   ) => void;
@@ -1197,11 +1289,11 @@ function AgentAssistant({
         />
         <button
           type="button"
-          disabled={busy || !prompt.trim()}
-          onClick={onAsk}
-          className="min-h-11 rounded-lg bg-violet-700 px-4 py-2.5 text-sm font-medium text-white hover:bg-violet-600 disabled:opacity-50"
+          disabled={!busy && !prompt.trim()}
+          onClick={busy ? onCancel : onAsk}
+          className={`min-h-11 rounded-lg px-4 py-2.5 text-sm font-medium text-white disabled:opacity-50 ${busy ? "bg-slate-700 hover:bg-slate-600" : "bg-violet-700 hover:bg-violet-600"}`}
         >
-          {busy ? "Asking…" : "Ask agent"}
+          {busy ? "Cancel request" : "Ask agent"}
         </button>
       </div>
       {card?.status === "UNAVAILABLE" && (

@@ -105,15 +105,19 @@ export class AurkaClient {
     path: string,
     body: unknown,
     schema: z.ZodType<T>,
+    requestSignal?: AbortSignal,
   ): Promise<T> {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), this.timeout);
+    const signal = requestSignal
+      ? AbortSignal.any([requestSignal, controller.signal])
+      : controller.signal;
     try {
       const response = await fetch(`${this.baseUrl}${path}`, {
         method,
         headers: this.defaultHeaders,
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-        signal: controller.signal,
+        signal,
       });
       const raw: unknown = await response.json();
       if (!response.ok) {
@@ -149,7 +153,7 @@ export class AurkaClient {
     } catch (error) {
       if (error instanceof AurkaError) throw error;
       throw new AurkaError(
-        controller.signal.aborted
+        signal.aborted
           ? "TIMEOUT"
           : error instanceof SyntaxError
             ? "INVALID_RESPONSE"
@@ -204,12 +208,14 @@ export class AurkaClient {
 
   async agentPropose(
     input: AgentProposalRequest,
+    requestSignal?: AbortSignal,
   ): Promise<AgentProposalResponse> {
     return this.request(
       "POST",
       "/v1/agent/propose",
       agentProposalRequestSchema.parse(input),
       agentProposalResponseSchema,
+      requestSignal,
     );
   }
 

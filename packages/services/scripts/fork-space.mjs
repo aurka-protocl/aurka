@@ -70,6 +70,11 @@ const RPC = `http://127.0.0.1:${RPC_PORT}`;
 const FORK_BIND_HOST = process.env.AURKA_FORK_BIND_HOST ?? "127.0.0.1";
 const API_PORT = Number(process.env.AURKA_FORK_API_PORT ?? 8797);
 const APP_PORT = Number(process.env.AURKA_FORK_APP_PORT ?? 3011);
+const FORK_REQUEST_TIMEOUT_MS = Math.max(
+  30_000,
+  Number(process.env.OPENROUTER_TIMEOUT_MS ?? 15_000) + 5_000,
+  Number(process.env.AURKA_FORK_REQUEST_TIMEOUT_MS ?? 30_000),
+);
 const GRAPH_ENDPOINT = process.env.AURKA_GRAPH_ENDPOINT;
 const GRAPH_ENDPOINT_FILE = process.env.AURKA_GRAPH_ENDPOINT_FILE;
 const INTEGRATION_MODE = process.env.AURKA_FORK_INTEGRATION ?? "real";
@@ -1563,7 +1568,7 @@ async function main() {
             method: request.method,
             headers: { "content-type": "application/json" },
             ...(chunks.length ? { body: Buffer.concat(chunks) } : {}),
-            signal: AbortSignal.timeout(15000),
+            signal: AbortSignal.timeout(FORK_REQUEST_TIMEOUT_MS),
           },
         );
         response.writeHead(result.status, {

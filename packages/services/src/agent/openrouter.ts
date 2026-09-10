@@ -19,6 +19,7 @@ const DEFAULT_BASE_URL = "https://openrouter.ai/api/v1";
 const DEFAULT_MODEL = "openrouter/free";
 const DEFAULT_TIMEOUT_MS = 15_000;
 const DEFAULT_MAX_TOOL_CALLS = 4;
+const DEFAULT_MAX_CONCURRENT_PROPOSALS = 2;
 const MAX_MODEL_TEXT = 1_000;
 const simulationShape = z
   .object({
@@ -34,6 +35,7 @@ export interface OpenRouterAgentOptions {
   readonly baseUrl?: string;
   readonly timeoutMs?: number;
   readonly maxToolCalls?: number;
+  readonly maxConcurrentProposals?: number;
   readonly fetchImpl?: typeof fetch;
 }
 
@@ -161,10 +163,60 @@ function unavailable(
   });
 }
 
+function blocked(
+  model: string,
+  reason: string,
+  toolTrace: AgentProposalResponse["toolTrace"] = [
+    { tool: "agent_request_limit", status: "FAILED" },
+  ],
+): AgentProposalResponse {
+  return agentProposalResponseSchema.parse({
+    status: "BLOCKED",
+    provider: "openrouter",
+    model,
+    reason: reason.slice(0, 500),
+    toolTrace,
+  });
+}
+
 function errorText(error: unknown): string {
   return error instanceof Error && error.message.trim()
     ? error.message.slice(0, 500)
     : "The deterministic tool could not complete.";
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw new Error("OpenRouter request was cancelled.");
+}
+
+function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted)
+    return Promise.reject(new Error("OpenRouter request was cancelled."));
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => signal.removeEventListener("abort", onAbort);
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new Error("OpenRouter request was cancelled."));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(value);
+      },
+      (error: unknown) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(error);
+      },
+    );
+  });
 }
 
 function activeSpace(
@@ -234,6 +286,10 @@ export function openRouterAgentOptionsFromEnv(
     maxToolCalls: Number(
       environment.OPENROUTER_MAX_TOOL_CALLS ?? DEFAULT_MAX_TOOL_CALLS,
     ),
+    maxConcurrentProposals: Number(
+      environment.OPENROUTER_MAX_CONCURRENT_PROPOSALS ??
+        DEFAULT_MAX_CONCURRENT_PROPOSALS,
+    ),
   };
 }
 
@@ -243,7 +299,9 @@ export class OpenRouterAgent {
   private readonly baseUrl: string;
   private readonly timeoutMs: number;
   private readonly maxToolCalls: number;
+  private readonly maxConcurrentProposals: number;
   private readonly fetchImpl: typeof fetch;
+  private activeProposals = 0;
 
   constructor(
     private readonly service: AurkaService,
@@ -262,6 +320,15 @@ export class OpenRouterAgent {
     this.maxToolCalls = Math.min(
       Math.max(Number(options.maxToolCalls ?? DEFAULT_MAX_TOOL_CALLS), 1),
       8,
+    );
+    this.maxConcurrentProposals = Math.min(
+      Math.max(
+        Number(
+          options.maxConcurrentProposals ?? DEFAULT_MAX_CONCURRENT_PROPOSALS,
+        ),
+        1,
+      ),
+      4,
     );
     this.fetchImpl = options.fetchImpl ?? fetch;
   }
@@ -283,6 +350,28 @@ export class OpenRouterAgent {
     if (!this.apiKey) return unavailable(this.model);
     if (value.chainId !== this.service.runtime.chainId)
       return unavailable(this.model);
+    if (this.activeProposals >= this.maxConcurrentProposals)
+      return blocked(
+        this.model,
+        "The agent request limit is reached. Try again shortly.",
+      );
+
+    this.activeProposals += 1;
+    try {
+      return await this.proposeWithinLimit(value, requestSignal);
+    } finally {
+      this.activeProposals -= 1;
+    }
+  }
+
+  private async proposeWithinLimit(
+    value: AgentProposalRequest,
+    requestSignal?: AbortSignal,
+  ): Promise<AgentProposalResponse> {
+    const proposalDeadline = AbortSignal.timeout(this.timeoutMs);
+    const signal = requestSignal
+      ? AbortSignal.any([requestSignal, proposalDeadline])
+      : proposalDeadline;
 
     const trace: Array<{ tool: string; status: "SUCCEEDED" | "FAILED" }> = [];
     const messages: ChatMessage[] = [
@@ -300,12 +389,16 @@ export class OpenRouterAgent {
 
     try {
       while (toolCalls < this.maxToolCalls) {
-        const response = await this.chat(
-          messages,
-          requestSignal,
-          forcedDiscovery
-            ? { type: "function", function: { name: "discover_spaces" } }
-            : undefined,
+        throwIfAborted(signal);
+        const response = await abortable(
+          this.chat(
+            messages,
+            signal,
+            forcedDiscovery
+              ? { type: "function", function: { name: "discover_spaces" } }
+              : undefined,
+          ),
+          signal,
         );
         forcedDiscovery = false;
         const message = response.choices[0].message;
@@ -330,10 +423,14 @@ export class OpenRouterAgent {
         for (const call of calls) {
           if (toolCalls >= this.maxToolCalls) break;
           toolCalls += 1;
-          const outcome = await this.runTool(
-            call.function.name,
-            call.function.arguments,
-            value,
+          const outcome = await abortable(
+            this.runTool(
+              call.function.name,
+              call.function.arguments,
+              value,
+              signal,
+            ),
+            signal,
           );
           trace.push({
             tool: call.function.name,
@@ -369,14 +466,7 @@ export class OpenRouterAgent {
         item.tool === "simulate_proposal" && item.status === "SUCCEEDED",
     );
     if (!latestSimulation || !hasQuote || !hasSimulation) {
-      if (lastToolError && (hasQuote || hasSimulation))
-        return agentProposalResponseSchema.parse({
-          status: "BLOCKED",
-          provider: "openrouter",
-          model: this.model,
-          reason: lastToolError,
-          toolTrace: trace,
-        });
+      if (lastToolError) return blocked(this.model, lastToolError, trace);
       return unavailable(this.model, trace);
     }
 
@@ -434,8 +524,10 @@ export class OpenRouterAgent {
     name: string,
     rawArguments: string,
     request: AgentProposalRequest,
+    requestSignal?: AbortSignal,
   ): Promise<ToolOutcome> {
     try {
+      throwIfAborted(requestSignal);
       let argumentsValue: unknown;
       try {
         argumentsValue = JSON.parse(rawArguments) as unknown;
@@ -445,6 +537,7 @@ export class OpenRouterAgent {
       if (name === "discover_spaces") {
         emptyInputSchema.parse(argumentsValue);
         await this.service.refreshSpaces();
+        throwIfAborted(requestSignal);
         const spaces = this.service
           .listSpaces(100)
           .items.filter(
@@ -456,6 +549,7 @@ export class OpenRouterAgent {
       if (name === "read_space_conditions") {
         const parsed = conditionsInputSchema.parse(argumentsValue);
         const space = await activeSpace(this.service, parsed.spaceId);
+        throwIfAborted(requestSignal);
         return { ok: true, value: conditions(space) };
       }
       if (
@@ -465,6 +559,7 @@ export class OpenRouterAgent {
         throw new Error("The requested tool is not available.");
       const parsed = tradeInputSchema.parse(argumentsValue);
       const space = await activeSpace(this.service, parsed.spaceId);
+      throwIfAborted(requestSignal);
       if (space.identity.chainId !== request.chainId)
         throw new Error("The selected Space is on a different chain.");
       const position = space.position!;
@@ -512,6 +607,7 @@ export class OpenRouterAgent {
       // worker can re-read and revalidate it after a restart.
       await this.service.submitIntent(intent);
       const quote = await this.service.quote(intent);
+      throwIfAborted(requestSignal);
       if (name === "request_deterministic_quote")
         return {
           ok: true,
@@ -524,6 +620,7 @@ export class OpenRouterAgent {
           },
         };
       const solved = await this.service.solve(intent);
+      throwIfAborted(requestSignal);
       return {
         ok: true,
         value: {
@@ -536,6 +633,7 @@ export class OpenRouterAgent {
         simulation: { space, requestedAmount, quote, solved },
       };
     } catch (error) {
+      if (requestSignal?.aborted) throw error;
       return { ok: false, error: errorText(error) };
     }
   }
@@ -551,6 +649,7 @@ export class OpenRouterAgent {
       : timeout;
     let response: Response;
     try {
+      throwIfAborted(signal);
       response = await this.fetchImpl(`${this.baseUrl}/chat/completions`, {
         method: "POST",
         headers: {
@@ -569,6 +668,7 @@ export class OpenRouterAgent {
         }),
         signal,
       });
+      throwIfAborted(signal);
     } catch (error) {
       throw new Error(
         `OpenRouter request failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -581,7 +681,9 @@ export class OpenRouterAgent {
       );
     let body: unknown;
     try {
+      throwIfAborted(signal);
       body = await response.json();
+      throwIfAborted(signal);
     } catch {
       throw new Error("OpenRouter returned malformed JSON.");
     }

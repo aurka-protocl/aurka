@@ -73,6 +73,7 @@ OPENROUTER_MODEL=openrouter/free
 OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
 OPENROUTER_TIMEOUT_MS=15000
 OPENROUTER_MAX_TOOL_CALLS=4
+OPENROUTER_MAX_CONCURRENT_PROPOSALS=2
 ```
 
 The app exposes only `GET /v1/agent/status` configuration state and
@@ -88,9 +89,9 @@ The card displays the selected Space, pay/receive amounts, fees, deterministic
 minimum received, expiry, rule binding, current and expected portfolio, gas
 simulation state, explanation, and a sanitized tool trace. It is labeled
 “AI-assisted, wallet-approved.” Choosing “Use values in wallet review” copies
-only the verified amount and Space into the existing manual flow; Bob must
-request a fresh quote, review current state, sign the EIP-712 intent, and
-approve the wallet transaction. Account, chain, policy, capacity, price, or
+the verified amount, token direction, and Space into the existing manual flow;
+Bob must request a fresh quote, review current state, sign the EIP-712 intent,
+and approve the wallet transaction. Account, chain, policy, capacity, price, or
 expiry changes invalidate the review. Missing credentials, timeout, malformed
 provider output, cancellation, or upstream failure renders “Agent unavailable”
 and leaves manual trading available.
@@ -160,8 +161,10 @@ and manual-evidence checklist, not a production-funds claim.
    transaction. Wait for the app’s canonical receipt verification before
    trading.
 3. Bob opens the Trade route, connects account index 1, asks the assistant for a
-   small supported trade, and inspects the before/after allocation and every
-   fee. Use the card only after a fresh manual quote and wallet review.
+   small WETH → USDC trade, and inspects the before/after allocation and every
+   fee. The current deployment exposes only this initialized directional
+   capacity; a USDC → WETH request remains explicit and blocked. Use the card
+   only after a fresh manual quote and wallet review.
 4. Bob signs and submits the reviewed trade. Distinguish “submitted,”
    “confirmed,” and “awaiting indexing”; an indexed Activity item is not
    fabricated when Graph is unavailable or lagging.

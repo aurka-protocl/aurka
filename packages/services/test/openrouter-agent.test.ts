@@ -128,4 +128,115 @@ describe("OpenRouter trade agent", () => {
       service.close();
     }
   });
+
+  it("returns the deterministic capacity reason for an unsupported direction", async () => {
+    const responses = [
+      [toolCall("1", "discover_spaces", {})],
+      [
+        toolCall("2", "read_space_conditions", {
+          spaceId: FIXTURE_POSITION_ID,
+        }),
+      ],
+      [
+        toolCall("3", "request_deterministic_quote", {
+          spaceId: FIXTURE_POSITION_ID,
+          traderInputToken: FIXTURE_ADDRESSES.usdc,
+          traderOutputToken: FIXTURE_ADDRESSES.weth,
+          amount: "1",
+        }),
+      ],
+      [],
+    ];
+    const service = new AurkaService();
+    const agent = new OpenRouterAgent(service, {
+      apiKey: "test-key",
+      model: "test-model",
+      fetchImpl: vi.fn(async () => completion(responses.shift() ?? [])),
+    });
+
+    try {
+      await expect(agent.propose(request)).resolves.toMatchObject({
+        status: "BLOCKED",
+        reason: "Unsupported fixture direction",
+        toolTrace: [
+          { tool: "discover_spaces", status: "SUCCEEDED" },
+          { tool: "read_space_conditions", status: "SUCCEEDED" },
+          { tool: "request_deterministic_quote", status: "FAILED" },
+        ],
+      });
+    } finally {
+      service.close();
+    }
+  });
+
+  it("enforces the concurrent proposal limit", async () => {
+    const service = new AurkaService();
+    let release!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const agent = new OpenRouterAgent(service, {
+      apiKey: "test-key",
+      model: "test-model",
+      maxConcurrentProposals: 1,
+      fetchImpl: vi.fn(async () => {
+        await waiting;
+        return completion([]);
+      }),
+    });
+
+    try {
+      const first = agent.propose(request);
+      await new Promise((resolve) => setImmediate(resolve));
+      await expect(agent.propose(request)).resolves.toMatchObject({
+        status: "BLOCKED",
+        reason: "The agent request limit is reached. Try again shortly.",
+      });
+      release();
+      await expect(first).resolves.toMatchObject({
+        status: "UNAVAILABLE",
+        reason: "Agent unavailable",
+      });
+    } finally {
+      release();
+      service.close();
+    }
+  });
+
+  it("propagates cancellation to the provider request and returns no stale card", async () => {
+    const service = new AurkaService();
+    const controller = new AbortController();
+    let providerSignal: AbortSignal | undefined;
+    const agent = new OpenRouterAgent(service, {
+      apiKey: "test-key",
+      model: "test-model",
+      fetchImpl: vi.fn(async (_input, init) => {
+        providerSignal = init?.signal;
+        await new Promise<never>((_resolve, reject) => {
+          if (providerSignal?.aborted) {
+            reject(new Error("aborted"));
+            return;
+          }
+          providerSignal?.addEventListener(
+            "abort",
+            () => reject(new Error("aborted")),
+            { once: true },
+          );
+        });
+        throw new Error("unreachable");
+      }),
+    });
+
+    try {
+      const result = agent.propose(request, controller.signal);
+      controller.abort();
+      await expect(result).resolves.toMatchObject({
+        status: "UNAVAILABLE",
+        reason: "Agent unavailable",
+      });
+      expect(providerSignal?.aborted).toBe(true);
+    } finally {
+      service.close();
+    }
+  });
 });

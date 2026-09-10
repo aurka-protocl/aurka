@@ -31,6 +31,10 @@ const accounts = [0, 1].map((addressIndex) =>
   ),
 );
 const transactions = [];
+const customFunding = {
+  one: { usdc: "24000", weth: "4" },
+  two: { usdc: "46000", weth: "6" },
+};
 const browser = await chromium.launch({ headless: true });
 const origin = new URL(manifest.appUrl).origin;
 async function pageFor(index, width) {
@@ -111,9 +115,14 @@ async function api(route) {
   assert(response.ok, JSON.stringify(body));
   return body.data ?? body;
 }
-async function nextToReview(page) {
-  for (let i = 0; i < 4; i++)
+async function nextToReview(page, funding) {
+  for (let i = 0; i < 3; i++)
     await page.getByRole("button", { name: "Next", exact: true }).click();
+  if (funding) {
+    await page.getByLabel("USDC amount", { exact: false }).fill(funding.usdc);
+    await page.getByLabel("WETH amount", { exact: false }).fill(funding.weth);
+  }
+  await page.getByRole("button", { name: "Next", exact: true }).click();
 }
 async function waitFor(page, predicate, label, attempts = 120) {
   for (let i = 0; i < attempts; i++) {
@@ -131,10 +140,11 @@ try {
   const trader = await pageFor(1, 390);
   const ids = process.env.AURKA_SPACE_IDS?.split(",") ?? [];
   for (const suffix of ids.length ? [] : ["one", "two"]) {
+    const funding = customFunding[suffix];
     console.log(`Creating ${suffix}`);
     await owner.goto(`${origin}/spaces/new`);
     await owner.getByLabel("Space name").fill(`MVP-002 ${suffix}`);
-    await nextToReview(owner);
+    await nextToReview(owner, funding);
     await owner
       .getByRole("button", { name: "Save draft", exact: true })
       .click();
@@ -147,7 +157,7 @@ try {
     ids.push(id);
     assert.equal(created.identity.state, "DRAFT");
     await owner.reload();
-    await nextToReview(owner);
+    await nextToReview(owner, funding);
     if (suffix === "one") {
       await owner.evaluate(() =>
         window.ethereum.request({ method: "test_rejectNext" }),
@@ -167,7 +177,7 @@ try {
         "DRAFT",
       );
       await owner.reload();
-      await nextToReview(owner);
+      await nextToReview(owner, funding);
     }
     const creationStart = transactions.length;
     await owner
@@ -188,7 +198,7 @@ try {
         )
       ) {
         await owner.reload();
-        await nextToReview(owner);
+        await nextToReview(owner, funding);
         await owner
           .getByRole("button", { name: "Create Space", exact: true })
           .click();
@@ -240,11 +250,31 @@ try {
     spaces[1].identity.treasuryAddress,
   );
   assert.notEqual(spaces[0].identity.strategyId, spaces[1].identity.strategyId);
-  if (!process.env.AURKA_SPACE_IDS)
-    assert.equal(
-      spaces[0].position.currentPortfolio.assets[0].balance,
-      spaces[1].position.currentPortfolio.assets[0].balance,
+  if (!process.env.AURKA_SPACE_IDS) {
+    for (const [index, suffix] of ["one", "two"].entries()) {
+      const expected = customFunding[suffix];
+      const assets = spaces[index].position.currentPortfolio.assets;
+      const usdc = assets.find((asset) => asset.symbol === "USDC");
+      const weth = assets.find((asset) => asset.symbol === "WETH");
+      assert.equal(
+        usdc?.balance,
+        (BigInt(expected.usdc) * 1000000n).toString(),
+      );
+      assert.equal(
+        weth?.balance,
+        (BigInt(expected.weth) * 10n ** 18n).toString(),
+      );
+    }
+    assert.notEqual(
+      spaces[0].position.currentPortfolio.assets
+        .map((asset) => asset.balance)
+        .join(","),
+      spaces[1].position.currentPortfolio.assets
+        .map((asset) => asset.balance)
+        .join(","),
+      "Custom funding must differ between the two Spaces",
     );
+  }
   const setupTransactions = transactions.filter(
     (transaction) =>
       transaction.to.toLowerCase() === manifest.vaultFactory.toLowerCase(),
@@ -407,7 +437,7 @@ try {
   console.log("Receipt-backed pause, resume, rule update and reload passed");
   writeFileSync(
     path.join(output, "mvp002-wallet.json"),
-    JSON.stringify({ ids, spaces, transactions }, null, 2),
+    JSON.stringify({ ids, customFunding, spaces, transactions }, null, 2),
   );
   console.log("MVP-002 two-Space wallet flow passed");
 } catch (error) {
