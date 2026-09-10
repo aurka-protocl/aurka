@@ -57,6 +57,63 @@ documentation:
   `@privy-io/server-auth` package is not used. App secrets and any signing
   material are runtime-only.
 
+## Delegated Privy execution decision (TASK99-008)
+
+The installed `@privy-io/node@0.34.0` surface supports the route selected for
+the bounded agent pilot: a dedicated Ethereum wallet has an owner key quorum and
+a separate additional signer with one restrictive policy override. The owner
+remains the only authority for wallet/policy/signer administration and export;
+the additional signer can transact only within its policy. Bob's browser address
+is not the Privy owner and is not the agent wallet. Bob's browser EIP-712
+signature is AURKA's session consent, binding Bob, the agent address, chain,
+Space allowlist, token direction, integer caps, nonce, and expiry.
+
+The operator command is read-only by default:
+
+```sh
+pnpm privy:delegated                 # sanitized check; never creates a wallet
+pnpm privy:delegated template         # print the candidate policy shape only
+PRIVY_DELEGATED_PROVISION=true pnpm privy:delegated provision
+```
+
+Provisioning requires pre-created, reviewed Privy owner/signer/policy IDs and
+the explicit opt-in. It is idempotent, refuses to mutate an existing wallet
+whose owner, additional signer, policy override, or chain type does not match,
+and prints only wallet/policy IDs, address, signer attachment, and rule
+metadata. It never prints `PRIVY_APP_SECRET`, authorization contexts, or keys.
+
+The configured `PRIVY_DELEGATED_POLICY_MODULE` must also expose
+`recoverDelegatedFunds`. That operator-owned function receives only the session
+ID, Bob's already-authenticated destination, and the reviewed input / output
+token amounts. It must use the Privy owner/recovery authorization path and exact
+token transfers; it must not call the delegated additional signer, accept
+arbitrary recipients/tokens, or expose a private key to AURKA. The UI signs the
+recovery intent in the browser after Stop, and the service blocks recovery while
+any submitted or ambiguous trade lacks a receipt.
+
+The new delegated adapter is a distinct execution boundary. Privy is asked only
+to sign the exact settlement intent and broadcast one exact
+`eth_sendTransaction` to the configured router; the remote policy is limited to
+the reviewed Ethereum chain, typed-data domain, router, and zero native value.
+AURKA enforces the session Space/pair/direction, integer per-trade and
+cumulative budgets, count, expiry, delegated identity, exact ABI re-encoding,
+token balance, router allowance, refreshed nonce, chain RPC, and target
+`eth_call` before every send. The settlement contracts remain authoritative for
+intent/proposal signatures, policy/risk/price/balance commitments, and
+accounting. Privy policy enforcement is not claimed to provide AURKA's
+cumulative budget or nested settlement semantics.
+
+The implementation deliberately does not claim a live proof in this checkout.
+The TASK99-006 runner uses loopback Anvil chain `31337`, while Privy's hosted
+broadcast path has not been proven to reach that local RPC or its generated
+contracts. A supported Privy custom-network setup, real wallet/policy readback,
+funded test wallet, remote denial check, and confirmed receipt are required
+before this gate can be marked complete. No local signer or private key is
+substituted for that evidence. Stop disables local signing first and then
+invokes the operator-owned revoke callback; already-broadcast transactions are
+reconciled rather than duplicated. Test-fund recovery remains an owner/operator
+action and is not exposed through the delegated signer.
+
 Graph finality is not inferred from a subgraph response alone. The adapter
 compares `_meta.block` and every observation block against an injected canonical
 chain reader, configured lag/finality limits, and block hashes. The documented

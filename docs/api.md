@@ -31,6 +31,26 @@ in this milestone. The execution remains `PENDING` until a separately authorized
 broadcaster reports a real hash. `Idempotency-Key` is supported on all mutating
 routes.
 
+The opt-in delegated pilot is exposed separately from browser-wallet execution:
+
+```text
+GET  /v1/delegated/status
+POST /v1/delegated/sessions/authorize
+GET  /v1/delegated/sessions/:id
+POST /v1/delegated/sessions/:id/start
+POST /v1/delegated/sessions/:id/stop
+POST /v1/delegated/sessions/:id/reconcile
+POST /v1/delegated/sessions/:id/recover
+```
+
+`authorize` requires Bob's EIP-712 signature over the reviewed wallet, Space,
+pair, integer-unit caps, count, slippage, nonce, and expiry. `start` performs
+one bounded worker tick. `recover` is available only after Stop, expiry, or
+exhaustion, requires a fresh owner signature whose destination is Bob, and calls
+a separate owner/operator recovery module; the delegated additional signer
+cannot use this route. Pending or ambiguous trades must reconcile before
+recovery.
+
 Read-only activity is available at `GET /v1/activity`, with cursor pagination
 and optional Space (`spaceId`, with legacy `positionId`), type (`SWAP`,
 `RULE_CHANGE`, or `TRADING_STATUS`), chain, lifecycle-status, and time filters.
@@ -92,16 +112,17 @@ initialization event, initialized state, preparation block, and receipt reuse. A
 submitted hash alone cannot activate a Space.
 
 Creation deploys a deterministic, owner-scoped `AurkaSpaceVault` through
-`AurkaSpaceVaultFactory`, creates/configures its policy, transfers **35,000 USDC
-and 5 WETH** from the owner, calls the configured Aqua `ship(...)` entrypoint
-from that treasury with the exact strategy bytes, registers those virtual
-balances, and authorizes the supported WETH→USDC capacity. The supported fork
-assets are mainnet USDC (6 decimals) and WETH (18 decimals). Initial bounds must
-include that disclosed funding allocation. The vault owner may withdraw funds or
-revoke allowances; it does not give another Space access to this inventory. Real
-fork mode reads Chainlink V3 rounds through the `ChainlinkPriceOracle` adapter;
-fixture mode explicitly uses MockAqua and fixed reference prices as local test
-infrastructure.
+`AurkaSpaceVaultFactory`, creates/configures its policy, transfers the owner’s
+selected positive USDC/WETH allocation, calls the configured Aqua `ship(...)`
+entrypoint from that treasury with the exact strategy bytes, registers those
+virtual balances, and authorizes the supported WETH→USDC capacity. The supported
+fork assets are mainnet USDC (6 decimals) and WETH (18 decimals). The allocation
+is parsed into exact token units and checked against the price-snapshot bounds
+before the owner signs the single factory transaction. The vault owner may
+withdraw funds or revoke allowances; it does not give another Space access to
+this inventory. Real fork mode reads Chainlink V3 rounds through the
+`ChainlinkPriceOracle` adapter; fixture mode explicitly uses MockAqua and fixed
+reference prices as local test infrastructure.
 
 The server persists setup steps, verified receipts, and receipt reuse protection
 atomically in `space-setup.json` beside the fork database. The browser persists

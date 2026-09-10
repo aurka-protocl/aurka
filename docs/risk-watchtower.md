@@ -1,5 +1,11 @@
 # AURKA risk watchtower operations
 
+TASK99-008 does not provision or broaden the risk watchtower. Its delegated
+agent wallet is a separate execution capability, signer, policy, and lifecycle
+from the risk certificate worker described below. The risk gate remains at its
+previous status: no live Privy risk wallet, policy readback, protected smoke, or
+production certificate receipt is claimed.
+
 Task 7 is fixture-only by default. The watchtower is a pure function over a
 canonical observation set and versioned governance configuration. It has four
 ordered modes: `NORMAL`, `CAUTIOUS`, `SHOCK`, and `PAUSED`. A valid decision can

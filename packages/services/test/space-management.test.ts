@@ -23,6 +23,7 @@ const ATTACKER = privateKeyToAccount(
 
 function draft(ownerAddress: string, id = "space:independent"): SpaceDraft {
   return {
+    draftVersion: 2,
     id,
     name: "Independent allocation",
     ownerAddress,
@@ -44,6 +45,7 @@ function draft(ownerAddress: string, id = "space:independent"): SpaceDraft {
       },
     ],
     maximumTransactionValue: "5000",
+    funding: { usdc: "35000", weth: "5" },
   };
 }
 
@@ -114,6 +116,58 @@ describe("MVP-002 Space management", () => {
       expect(refreshed.currentPortfolio?.snapshotHash).toBe(
         before.currentPortfolio?.snapshotHash,
       );
+    } finally {
+      service.close();
+    }
+  });
+
+  it("binds exact configurable funding to the owner preparation and rejects unsafe decimals", () => {
+    const service = new AurkaService({
+      seedFixture: false,
+      spaceAssets: [
+        {
+          token: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+          decimals: 6,
+        },
+        {
+          token: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+          decimals: 18,
+        },
+      ],
+    });
+    const value = forkDraft(OWNER.address, "space:funding-validation");
+    try {
+      const prepared = service.prepareSpaceMutation({
+        operation: "CREATE",
+        spaceId: value.id,
+        ownerAddress: OWNER.address,
+        draft: { ...value, funding: { usdc: "12345.123456", weth: "2.25" } },
+      });
+      const changed = service.prepareSpaceMutation({
+        operation: "CREATE",
+        spaceId: value.id,
+        ownerAddress: OWNER.address,
+        draft: { ...value, funding: { usdc: "12345.123457", weth: "2.25" } },
+      });
+      expect(prepared.authorization.payloadHash).not.toBe(
+        changed.authorization.payloadHash,
+      );
+      expect(() =>
+        service.prepareSpaceMutation({
+          operation: "CREATE",
+          spaceId: value.id,
+          ownerAddress: OWNER.address,
+          draft: { ...value, funding: { usdc: "1.0000001", weth: "2.25" } },
+        }),
+      ).toThrow(/USDC funding is invalid/);
+      expect(() =>
+        service.prepareSpaceMutation({
+          operation: "CREATE",
+          spaceId: value.id,
+          ownerAddress: OWNER.address,
+          draft: { ...value, funding: { usdc: "0", weth: "2.25" } },
+        }),
+      ).toThrow(/USDC funding must be greater than zero/);
     } finally {
       service.close();
     }

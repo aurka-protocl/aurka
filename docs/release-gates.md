@@ -3,6 +3,13 @@
 Status: **local real-fork verification complete; public and independent gates
 remain blocked**
 
+TASK99-008 adds a bounded delegated-execution implementation and an explicit
+Privy provisioning/check command, but does not change the release decision. The
+live Privy wallet, policy, funded test balance, remote denial, custom network
+compatibility, and confirmed receipt gates remain **BLOCKED** until independent
+live evidence is recorded. The ordinary browser-wallet route and the separate
+risk-watchtower gate remain available/unchanged.
+
 Date: 2026-09-09 (America/Mexico_City)
 
 Task: AURKA-015 Tested checkout: `HEAD b1c52ca` plus the uncommitted

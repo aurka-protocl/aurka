@@ -2,10 +2,12 @@ import { existsSync, readFileSync, writeFileSync, renameSync } from "node:fs";
 import { decodeEventLog, encodeFunctionData, stringToHex } from "viem";
 import { hashBytes, ServiceError } from "../dist/index.js";
 import {
+  calculateAssetValue,
   calculateDirectSettlement,
   computeCapacityEpochId,
   computePortfolioPriceSnapshotHash,
   computeSettlementPriceSnapshotHash,
+  parseTokenAmount,
 } from "@aurka/shared";
 import {
   contractEpoch,
@@ -51,6 +53,26 @@ function valueToRaw(value, asset) {
     value * 10n ** BigInt(asset.decimals) * 10n ** BigInt(asset.priceDecimals),
     asset.price,
   );
+}
+
+function fundingUnits(draft) {
+  if (!draft?.funding)
+    fail(
+      "This saved draft predates configurable funding. Recreate it with explicit positive USDC and WETH amounts; the old signed funding was not reused.",
+    );
+  let usdcAmount;
+  let wethAmount;
+  try {
+    usdcAmount = parseTokenAmount(draft.funding.usdc, 6);
+    wethAmount = parseTokenAmount(draft.funding.weth, 18);
+  } catch (error) {
+    fail(
+      `Funding amounts are invalid: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  if (usdcAmount === 0n || wethAmount === 0n)
+    fail("Both USDC and WETH funding amounts must be greater than zero.");
+  return { usdcAmount, wethAmount };
 }
 
 /** A hash is only evidence after its transaction and canonical successful receipt match the server plan. */
@@ -476,18 +498,7 @@ export class ForkSpaceLifecycle {
       fail(
         "This fork supports atomic creation only for the disclosed USDC/WETH configuration; unsupported asset configurations are unavailable.",
       );
-    // The local creation flow funds a fixed, disclosed 35,000 USDC + 5 WETH portfolio.
-    // Reject incompatible ranges before asking the wallet to move funds.
-    for (const asset of draft.assets) {
-      const value = same(asset.token, this.manifest.usdc) ? 35000n : 16000n;
-      if (
-        value * 10000n < 51000n * BigInt(asset.minimumWeightBps) ||
-        value * 10000n > 51000n * BigInt(asset.maximumWeightBps)
-      )
-        fail(
-          "These bounds exclude the initial 35,000 USDC / 5 WETH funding allocation. Adjust the draft before deployment.",
-        );
-    }
+    const { usdcAmount, wethAmount } = fundingUnits(draft);
     const definition = {
       positionId: spaceId,
       name: draft.name,
@@ -548,6 +559,38 @@ export class ForkSpaceLifecycle {
         price: outputPrice.price,
         priceDecimals: outputPrice.priceDecimals,
       };
+      const initialBalances = [usdcAmount, wethAmount];
+      const initialValues = [
+        calculateAssetValue(
+          {
+            balance: usdcAmount,
+            decimals: outputAsset.decimals,
+            price: outputAsset.price,
+            priceDecimals: outputAsset.priceDecimals,
+          },
+          0,
+        ),
+        calculateAssetValue(
+          {
+            balance: wethAmount,
+            decimals: inputAsset.decimals,
+            price: inputAsset.price,
+            priceDecimals: inputAsset.priceDecimals,
+          },
+          0,
+        ),
+      ];
+      const initialNav = initialValues[0] + initialValues[1];
+      for (const [index, asset] of draft.assets.entries()) {
+        const value = initialValues[index];
+        if (
+          value * 10000n < initialNav * BigInt(asset.minimumWeightBps) ||
+          value * 10000n > initialNav * BigInt(asset.maximumWeightBps)
+        )
+          fail(
+            `The current price snapshot puts ${asset.symbol} outside its starting allocation bounds: ${value}/${initialNav} value units, allowed ${asset.minimumWeightBps}-${asset.maximumWeightBps} bps. Adjust funding or bounds before deployment.`,
+          );
+      }
       const priceCommitment = {
         traderInputToken: weth,
         traderOutputToken: usdc,
@@ -566,7 +609,6 @@ export class ForkSpaceLifecycle {
         maximumPriceAgeSeconds: 86400,
         maximumPriceDeviationBps: 100,
       };
-      const initialBalances = [35000n * 1000000n, 5n * 10n ** 18n];
       const epoch = {
         positionIdHash: definition.positionIdHash,
         traderInputTokenId: bytes32Address(weth),
@@ -608,6 +650,8 @@ export class ForkSpaceLifecycle {
             strategyHash: definition.strategyHash,
             strategy: definition.strategy,
             owner: draft.ownerAddress,
+            usdcAmount,
+            wethAmount,
             assets: draft.assets.map(
               ({ token, decimals, minimumWeightBps, maximumWeightBps }) => ({
                 token,
@@ -694,11 +738,11 @@ export class ForkSpaceLifecycle {
       [definition.policyId, 86400n, 100],
     );
     for (const [token, amount, symbol] of [
-      [usdc, 35000n * 1000000n, "USDC"],
-      [weth, 5n * 10n ** 18n, "WETH"],
+      [usdc, usdcAmount, "USDC"],
+      [weth, wethAmount, "WETH"],
     ]) {
       add(
-        `Fund treasury with ${symbol === "USDC" ? "35,000 USDC" : "5 WETH"}`,
+        `Fund treasury with the reviewed ${symbol} amount`,
         { address: token, abi: erc20Abi },
         "transfer",
         [treasury, amount],
@@ -854,12 +898,23 @@ export class ForkSpaceLifecycle {
   }
   async fundingPrerequisites(plan) {
     if (!plan.singleTransaction) return [];
+    const { usdcAmount, wethAmount } = fundingUnits(plan.draft);
     const requirements = [
-      [this.manifest.usdc, 35000n * 1000000n, "USDC"],
-      [this.manifest.weth, 5n * 10n ** 18n, "WETH"],
+      [this.manifest.usdc, usdcAmount, "USDC"],
+      [this.manifest.weth, wethAmount, "WETH"],
     ];
     const prerequisites = [];
     for (const [token, amount, symbol] of requirements) {
+      const balance = await this.client.readContract({
+        address: token,
+        abi: this.contracts.erc20Abi,
+        functionName: "balanceOf",
+        args: [plan.draft.ownerAddress],
+      });
+      if (balance < amount)
+        fail(
+          `Insufficient ${symbol} funding: wallet has ${balance.toString()} raw units but the reviewed Space requires ${amount.toString()} raw units.`,
+        );
       const allowance = await this.client.readContract({
         address: token,
         abi: this.contracts.erc20Abi,
@@ -1839,9 +1894,10 @@ export class ForkSpaceLifecycle {
           Number(actual.maximumWeightBps) !== asset.maximumWeightBps
         )
           fail("Onchain asset bounds differ from the draft");
+        const amounts = fundingUnits(plan.draft);
         const amount = same(asset.token, this.manifest.usdc)
-          ? 35000n * 1000000n
-          : 5n * 10n ** 18n;
+          ? amounts.usdcAmount
+          : amounts.wethAmount;
         const token = { address: asset.token, abi: this.contracts.erc20Abi };
         const balance = await this.client.readContract({
           ...token,
@@ -1906,8 +1962,8 @@ export class ForkSpaceLifecycle {
         !same(args.policyId, plan.definition.policyId) ||
         !same(args.owner, plan.draft.ownerAddress) ||
         !same(args.vault, plan.treasury) ||
-        args.usdcAmount !== 35000n * 1000000n ||
-        args.wethAmount !== 5n * 10n ** 18n
+        args.usdcAmount !== fundingUnits(plan.draft).usdcAmount ||
+        args.wethAmount !== fundingUnits(plan.draft).wethAmount
       )
         fail(
           "Initialization receipt does not match the reviewed Space identity and funding",

@@ -800,6 +800,9 @@ async function main() {
       )
         throw new Error("WETH funding failed");
     }
+    // These are runner-only seed presets for the two pre-created demo Spaces.
+    // User-created Spaces take their funding from the signed draft and the
+    // lifecycle planner; these values are not runtime requirements.
     const strategies = [
       [
         stringToHex("strategy:local-settlement-e2e"),
@@ -1464,6 +1467,8 @@ async function main() {
             "setMaximumTransactionValue",
             [definition.policyId, value],
           );
+          // Legacy control for the runner's pre-seeded Team inventory, not the
+          // configurable owner-created Space path.
         } else if (action === "allowance" || action === "revoke")
           transaction = tx({ address: USDC, abi: erc20Abi }, "approve", [
             manifest.aqua,

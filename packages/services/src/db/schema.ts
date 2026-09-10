@@ -375,6 +375,55 @@ export const agentIdentities = sqliteTable(
   (table) => [uniqueIndex("agent_identities_address_idx").on(table.address)],
 );
 
+export const delegatedSessions = sqliteTable(
+  "delegated_sessions",
+  {
+    id: text("id").primaryKey(),
+    ownerAddress: text("owner_address").notNull(),
+    agentAddress: text("agent_address").notNull(),
+    state: text("state").notNull(),
+    planJson: text("plan_json").notNull(),
+    walletJson: text("wallet_json").notNull(),
+    authorizedAt: createdAt("authorized_at"),
+    consumedInputAmount: text("consumed_input_amount").notNull(),
+    tradeCount: integer("trade_count").notNull(),
+    lastProposalHash: text("last_proposal_hash"),
+    lastTransactionHash: text("last_transaction_hash"),
+    lastRecoveryTransactionHash: text("last_recovery_transaction_hash"),
+    lastResult: text("last_result"),
+    updatedAt: createdAt("updated_at"),
+  },
+  (table) => [
+    index("delegated_sessions_owner_idx").on(
+      table.ownerAddress,
+      table.updatedAt,
+    ),
+    index("delegated_sessions_state_idx").on(table.state, table.updatedAt),
+  ],
+);
+
+export const delegatedTrades = sqliteTable(
+  "delegated_trades",
+  {
+    id: text("id").primaryKey(),
+    sessionId: text("session_id").notNull(),
+    intentHash: text("intent_hash").notNull(),
+    proposalHash: text("proposal_hash").notNull(),
+    inputAmount: text("input_amount").notNull(),
+    status: text("status").notNull(),
+    idempotencyKey: text("idempotency_key").notNull(),
+    transactionHash: text("transaction_hash"),
+    error: text("error"),
+    createdAt: createdAt(),
+    updatedAt: createdAt("updated_at"),
+  },
+  (table) => [
+    uniqueIndex("delegated_trades_idempotency_idx").on(table.idempotencyKey),
+    index("delegated_trades_session_idx").on(table.sessionId, table.createdAt),
+    index("delegated_trades_status_idx").on(table.status, table.updatedAt),
+  ],
+);
+
 export const indexingCheckpoints = sqliteTable(
   "indexing_checkpoints",
   {
@@ -492,6 +541,8 @@ export const schema = {
   settlementRecords,
   capacityEpochs,
   agentIdentities,
+  delegatedSessions,
+  delegatedTrades,
   indexingCheckpoints,
   indexingHeaders,
   chainEvents,

@@ -30,6 +30,7 @@ import {
   type SpaceRecord,
   type SpaceMutationTypedData,
   snapshotFreshness,
+  parseTokenAmount,
 } from "@aurka/shared";
 
 import { ServiceDatabase } from "./db/database.js";
@@ -992,6 +993,34 @@ export class AurkaService {
         "This Space must use the configured settlement chain",
         409,
       );
+    const [usdc, weth] = this.spaceAssets;
+    if (!usdc || !weth)
+      throw new ServiceError(
+        "FUNDING_CONFIGURATION_UNAVAILABLE",
+        "The environment has no two-asset funding configuration",
+        503,
+      );
+    for (const [symbol, amount, decimals] of [
+      ["USDC", draft.funding.usdc, usdc.decimals],
+      ["WETH", draft.funding.weth, weth.decimals],
+    ] as const) {
+      let raw: bigint;
+      try {
+        raw = parseTokenAmount(amount, decimals);
+      } catch (error) {
+        throw new ServiceError(
+          "INVALID_FUNDING_AMOUNT",
+          `${symbol} funding is invalid: ${error instanceof Error ? error.message : String(error)}`,
+          400,
+        );
+      }
+      if (raw === 0n)
+        throw new ServiceError(
+          "INVALID_FUNDING_AMOUNT",
+          `${symbol} funding must be greater than zero; both USDC and WETH are required for this MVP`,
+          400,
+        );
+    }
     const maximum = BigInt(draft.maximumTransactionValue);
     const minimum = this.spaceMode === "fork" ? 1n : 1_000n;
     if (maximum < minimum || maximum > 1_000_000_000n)
@@ -1218,6 +1247,8 @@ export class AurkaService {
             chainId: position.chainId,
             assets: position.policy.assets,
             maximumTransactionValue: position.policy.maximumTransactionValue,
+            draftVersion: 2,
+            funding: { usdc: "1", weth: "1" },
           },
           position.policy.nonce,
         );

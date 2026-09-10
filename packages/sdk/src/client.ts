@@ -62,6 +62,22 @@ import {
   type SpaceMutationPrepareResponse,
   type SpaceMutationResponse,
   type SpaceChange,
+  agentProposalRequestSchema,
+  agentProposalResponseSchema,
+  agentStatusSchema,
+  type AgentProposalRequest,
+  type AgentProposalResponse,
+  type AgentStatus,
+  delegatedAuthorizationSchema,
+  delegatedRecoveryRequestSchema,
+  delegatedSessionResponseSchema,
+  delegatedStartRequestSchema,
+  delegatedStatusSchema,
+  type DelegatedSession,
+  type DelegatedSessionAuthorization,
+  type DelegatedRecoveryRequest,
+  type DelegatedStartRequest,
+  type DelegatedStatus,
 } from "@aurka/shared";
 
 export interface AurkaClientOptions {
@@ -175,6 +191,97 @@ export class AurkaClient {
 
   async readiness(): Promise<ReadinessResponse> {
     return this.request("GET", "/ready", undefined, readinessResponseSchema);
+  }
+
+  async agentStatus(): Promise<AgentStatus> {
+    return this.request(
+      "GET",
+      "/v1/agent/status",
+      undefined,
+      agentStatusSchema,
+    );
+  }
+
+  async agentPropose(
+    input: AgentProposalRequest,
+  ): Promise<AgentProposalResponse> {
+    return this.request(
+      "POST",
+      "/v1/agent/propose",
+      agentProposalRequestSchema.parse(input),
+      agentProposalResponseSchema,
+    );
+  }
+
+  async delegatedStatus(): Promise<DelegatedStatus> {
+    return this.request(
+      "GET",
+      "/v1/delegated/status",
+      undefined,
+      delegatedStatusSchema,
+    );
+  }
+
+  async authorizeDelegatedSession(
+    input: DelegatedSessionAuthorization,
+  ): Promise<DelegatedSession> {
+    return this.request(
+      "POST",
+      "/v1/delegated/sessions/authorize",
+      delegatedAuthorizationSchema.parse(input),
+      delegatedSessionResponseSchema,
+    );
+  }
+
+  async delegatedSession(id: string): Promise<DelegatedSession> {
+    return this.request(
+      "GET",
+      `/v1/delegated/sessions/${encodeURIComponent(id)}`,
+      undefined,
+      delegatedSessionResponseSchema,
+    );
+  }
+
+  async startDelegatedSession(
+    id: string,
+    input: DelegatedStartRequest,
+  ): Promise<DelegatedSession> {
+    return this.request(
+      "POST",
+      `/v1/delegated/sessions/${encodeURIComponent(id)}/start`,
+      delegatedStartRequestSchema.parse(input),
+      delegatedSessionResponseSchema,
+    );
+  }
+
+  async stopDelegatedSession(id: string): Promise<DelegatedSession> {
+    return this.request(
+      "POST",
+      `/v1/delegated/sessions/${encodeURIComponent(id)}/stop`,
+      {},
+      delegatedSessionResponseSchema,
+    );
+  }
+
+  async reconcileDelegatedSession(id: string): Promise<DelegatedSession> {
+    return this.request(
+      "POST",
+      `/v1/delegated/sessions/${encodeURIComponent(id)}/reconcile`,
+      {},
+      delegatedSessionResponseSchema,
+    );
+  }
+
+  async recoverDelegatedSession(
+    id: string,
+    input: DelegatedRecoveryRequest,
+  ): Promise<DelegatedSession> {
+    return this.request(
+      "POST",
+      `/v1/delegated/sessions/${encodeURIComponent(id)}/recover`,
+      delegatedRecoveryRequestSchema.parse(input),
+      delegatedSessionResponseSchema,
+    );
   }
 
   async listPositions(

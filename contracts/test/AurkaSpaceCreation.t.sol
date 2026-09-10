@@ -73,6 +73,8 @@ contract AurkaSpaceCreationTest is TestBase {
         p.strategyHash = strategyHash;
         p.strategy = strategy;
         p.owner = address(this);
+        p.usdcAmount = 35_000e6;
+        p.wethAmount = 5e18;
         p.assets = assets;
         p.maximumTransactionValue = 5_000;
         p.fee = AurkaPolicyRegistry.FeeConfig({
@@ -193,6 +195,44 @@ contract AurkaSpaceCreationTest is TestBase {
         factory.createAndInitializeSpace(params);
     }
 
+    function testOwnerCanChooseDifferentPositiveFundingAmounts() public {
+        bytes32 differentSpace = keccak256("space:chosen-funding");
+        params = _buildParams();
+        params.spaceId = differentSpace;
+        params.policyId = keccak256("policy:chosen-funding");
+        params.strategy = abi.encode(differentSpace, address(usdc), address(weth));
+        params.strategyHash = keccak256(params.strategy);
+        params.capacityEpoch.positionIdHash = differentSpace;
+        params.capacityEpoch.aquaStrategyHash = params.strategyHash;
+        params.capacityEpoch.priceSnapshot = router.priceSnapshotHash(params.priceInput);
+        params.fee.treasuryFeeRecipient = factory.vaultAddress(address(this), differentSpace);
+        params.usdcAmount = 12_345e6;
+        params.wethAmount = 2e18;
+        usdc.mint(address(this), params.usdcAmount);
+        weth.mint(address(this), params.wethAmount);
+        usdc.approve(address(factory), type(uint256).max);
+        weth.approve(address(factory), type(uint256).max);
+
+        // The committed balance snapshot binds the chosen amounts to the setup call.
+        address[] memory tokens = new address[](2);
+        tokens[0] = address(usdc);
+        tokens[1] = address(weth);
+        uint256[] memory balances = new uint256[](2);
+        balances[0] = params.usdcAmount;
+        balances[1] = params.wethAmount;
+        params.capacityEpoch.balanceSnapshot = keccak256(abi.encode(tokens, balances));
+
+        (address vault,,) = factory.createAndInitializeSpace(params);
+        assertEq(usdc.balanceOf(vault), params.usdcAmount);
+        assertEq(weth.balanceOf(vault), params.wethAmount);
+    }
+
+    function testZeroFundingIsRejected() public {
+        params.usdcAmount = 0;
+        vm.expectRevert(AurkaSpaceVaultFactory.InvalidInitialization.selector);
+        factory.createAndInitializeSpace(params);
+    }
+
     function testAnyFundingFailureRollsBackVaultAndPolicy() public {
         weth.setTransferFromReturnsFalse(true);
         vm.expectRevert(
@@ -215,6 +255,16 @@ contract AurkaSpaceCreationTest is TestBase {
         factory.createAndInitializeSpace(params);
         assertEq(factory.vaultAddress(address(this), SPACE_ID).code.length, 0);
         assertEq(usdc.balanceOf(address(this)), 35_000e6);
+
+        params = _buildParams();
+        // Changing a funding amount without changing the committed post-funding
+        // balance snapshot must fail after the exact transfer, atomically.
+        params.wethAmount -= 1;
+        vm.expectRevert();
+        factory.createAndInitializeSpace(params);
+        assertEq(factory.vaultAddress(address(this), SPACE_ID).code.length, 0);
+        assertEq(usdc.balanceOf(address(this)), 35_000e6);
+        assertEq(weth.balanceOf(address(this)), 5e18);
 
         params = _buildParams();
         params.capacityEpoch.balanceSnapshot = bytes32(uint256(1));

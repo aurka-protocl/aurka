@@ -82,5 +82,6 @@ restart conflict exposed by the two-Space flow.
 
 New Spaces use isolated vaults. The pre-existing seeded demo fixtures retain
 their documented MockAqua allocation model. Real-mode new Spaces use the actual
-Aqua registry and a fixed initial funding allocation of 35,000 USDC + 5 WETH per
-Space; fixture mode is explicitly labelled and is not release evidence.
+Aqua registry and the owner-selected positive USDC/WETH allocation, with exact
+token-unit and price-snapshot validation; fixture mode is explicitly labelled
+and is not release evidence.

@@ -11,6 +11,12 @@ import {
   formatTokenAmount,
   formatValueAmount,
   parseTokenAmount,
+  delegatedAuthorizationTypedData,
+  delegatedRecoveryTypedData,
+  type DelegatedSession,
+  type DelegatedSessionPlan,
+  type DelegatedStatus,
+  type AgentProposalResponse,
   type AssetSnapshot,
   type AtomicSettlementIntent,
   type PortfolioSnapshot,
@@ -19,7 +25,7 @@ import {
   type SpaceRecord,
 } from "@aurka/shared";
 import { CircleHelp, ShieldCheck } from "lucide-react";
-import { apiBaseUrl, appMode } from "../config";
+import { apiBaseUrl, appMode, supportedChainId } from "../config";
 import { spaceAdapter } from "../domain/spaces";
 import { useWallet, WalletStateMessage } from "../wallet";
 
@@ -241,6 +247,11 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
   const [status, setStatus] = useState("Choose a Space and request a quote");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [agentPrompt, setAgentPrompt] = useState(
+    "I want to exchange 1 WETH for USDC. Which available Space can accept it within its rules?",
+  );
+  const [agentCard, setAgentCard] = useState<AgentProposalResponse>();
+  const [agentBusy, setAgentBusy] = useState(false);
   const [clock, setClock] = useState(() => Math.floor(Date.now() / 1000));
   const flowVersion = useRef(0);
   const nonce = useRef(Date.now());
@@ -409,6 +420,45 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
       throw new Error(
         "Account or network changed. Review and request a new quote.",
       );
+  }
+
+  async function askAgent() {
+    if (appMode === "fork" && wallet.status !== "connected")
+      throw new Error("Connect Bob's wallet before asking the live agent.");
+    setAgentBusy(true);
+    setError(null);
+    try {
+      const result = await client.agentPropose({
+        message: agentPrompt,
+        trader: wallet.address ?? DEMO_TRADER,
+        chainId: source?.position.chainId ?? supportedChainId,
+      });
+      setAgentCard(result);
+      if (result.status === "UNAVAILABLE") setStatus("Agent unavailable");
+      else if (result.status === "BLOCKED")
+        setStatus("Agent found a blocking rule — no trade was signed");
+      else
+        setStatus("Agent proposal ready — review before using the wallet flow");
+    } finally {
+      setAgentBusy(false);
+    }
+  }
+
+  function useAgentProposal(
+    card: Extract<AgentProposalResponse, { status: "READY" }>,
+  ) {
+    const input = card.quote.currentPortfolio.assets.find(
+      (asset) =>
+        asset.token.toLowerCase() === card.quote.traderInputToken.toLowerCase(),
+    );
+    if (!input) return;
+    setAmount(
+      formatTokenAmount(card.proposal.traderInputAmount, input.decimals),
+    );
+    selectSpace(card.selectedSpace.id);
+    setStatus(
+      "Agent values copied — request a fresh quote before wallet approval",
+    );
   }
 
   async function requestQuote() {
@@ -916,6 +966,25 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
 
       {appMode === "fork" && <WalletStateMessage />}
 
+      <AgentAssistant
+        prompt={agentPrompt}
+        card={agentCard}
+        busy={agentBusy}
+        now={clock}
+        onPrompt={setAgentPrompt}
+        onAsk={() => run(askAgent)}
+        onUse={useAgentProposal}
+      />
+
+      <DelegatedAgentPanel
+        selectedSpaceId={selectedSpaceId}
+        pair={pair}
+        chainId={source?.position.chainId ?? supportedChainId}
+        now={clock}
+        wallet={wallet}
+        fork={source?.fork}
+      />
+
       {!source || !pair ? (
         <section className="rounded-2xl border border-amber-800/70 bg-amber-950/30 p-5 text-amber-200">
           <h2 className="font-semibold text-white">
@@ -1079,6 +1148,687 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
             : "Local demo mode calculates a quote only. Wallet execution is unavailable here; no funds, signature, or submitted trade is claimed."}
         </p>
       </details>
+    </section>
+  );
+}
+
+function AgentAssistant({
+  prompt,
+  card,
+  busy,
+  now,
+  onPrompt,
+  onAsk,
+  onUse,
+}: {
+  readonly prompt: string;
+  readonly card: AgentProposalResponse | undefined;
+  readonly busy: boolean;
+  readonly now: number;
+  readonly onPrompt: (value: string) => void;
+  readonly onAsk: () => void;
+  readonly onUse: (
+    card: Extract<AgentProposalResponse, { status: "READY" }>,
+  ) => void;
+}) {
+  return (
+    <section className="space-y-3 rounded-2xl border border-violet-900/70 bg-violet-950/20 p-5 sm:p-6">
+      <div>
+        <p className="text-sm font-semibold uppercase tracking-[0.18em] text-violet-300">
+          Live assistant
+        </p>
+        <h2 className="mt-1 text-xl font-semibold text-white">
+          Find a feasible Space
+        </h2>
+        <p className="mt-1 text-sm leading-6 text-slate-400">
+          OpenRouter reads Spaces, asks the deterministic quote/solver tools,
+          and prepares a review. It cannot sign or submit. Missing credentials
+          or upstream failure stays visibly unavailable.
+        </p>
+      </div>
+      <div className="flex flex-col gap-2 sm:flex-row">
+        <textarea
+          aria-label="Ask the live trade assistant"
+          value={prompt}
+          onChange={(event) => onPrompt(event.target.value)}
+          rows={2}
+          maxLength={1_000}
+          className="min-h-11 min-w-0 flex-1 rounded-lg border border-violet-800 bg-slate-950 p-3 text-sm text-slate-100 outline-none focus:border-violet-500"
+        />
+        <button
+          type="button"
+          disabled={busy || !prompt.trim()}
+          onClick={onAsk}
+          className="min-h-11 rounded-lg bg-violet-700 px-4 py-2.5 text-sm font-medium text-white hover:bg-violet-600 disabled:opacity-50"
+        >
+          {busy ? "Asking…" : "Ask agent"}
+        </button>
+      </div>
+      {card?.status === "UNAVAILABLE" && (
+        <p className="rounded-lg border border-amber-800/70 bg-amber-950/30 p-3 text-sm text-amber-200">
+          Agent unavailable. Manual quote and wallet trading remain available.
+        </p>
+      )}
+      {card?.status === "BLOCKED" && (
+        <div className="rounded-lg border border-red-800/70 bg-red-950/30 p-3 text-sm text-red-200">
+          <strong>Blocked by the current deterministic checks:</strong>{" "}
+          {card.reason}
+        </div>
+      )}
+      {card?.status === "READY" && (
+        <section
+          className="space-y-4 rounded-xl border border-violet-800/70 bg-slate-950/60 p-4"
+          aria-label="AI proposal card"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <p className="font-semibold text-violet-100">
+                {card.selectedSpace.name}
+              </p>
+              <p className="text-xs text-slate-500">
+                AI-assisted, wallet-approved · model {card.model}
+              </p>
+            </div>
+            <span
+              className={`rounded-full px-2.5 py-1 text-xs ${card.simulation.status === "SUCCEEDED" ? "bg-emerald-950 text-emerald-200" : "bg-red-950 text-red-200"}`}
+            >
+              {card.simulation.status}
+            </span>
+          </div>
+          <dl className="grid gap-2 text-sm sm:grid-cols-2">
+            <Summary
+              label="Pay"
+              value={`${formatTokenAmount(card.proposal.traderInputAmount, card.quote.currentPortfolio.assets.find((asset) => asset.token.toLowerCase() === card.quote.traderInputToken.toLowerCase())?.decimals ?? 0)} ${card.quote.currentPortfolio.assets.find((asset) => asset.token.toLowerCase() === card.quote.traderInputToken.toLowerCase())?.symbol ?? "token"}`}
+            />
+            <Summary
+              label="Receive after fees"
+              value={`${formatTokenAmount(card.proposal.traderOutputAmount, card.quote.currentPortfolio.assets.find((asset) => asset.token.toLowerCase() === card.quote.traderOutputToken.toLowerCase())?.decimals ?? 0)} ${card.quote.currentPortfolio.assets.find((asset) => asset.token.toLowerCase() === card.quote.traderOutputToken.toLowerCase())?.symbol ?? "token"}`}
+            />
+            <Summary
+              label="Fees"
+              value={`${formatValueAmount(card.quote.fees.totalFeeAmount, card.quote.currentPortfolio.valueDecimals)} value units · ${card.quote.fees.feeToken}`}
+            />
+            <Summary
+              label="Reference price"
+              value={`${formatPrice(card.quote.referencePrice, card.quote.referencePriceDecimals)} quote units per whole output token`}
+            />
+            <Summary
+              label="Minimum received"
+              value={`${formatValueAmount(card.minimumReceivedValue, card.quote.currentPortfolio.valueDecimals)} value units`}
+            />
+            <Summary
+              label="Rule check"
+              value={
+                card.quote.bindingConstraint === "NONE"
+                  ? "Pass · within current rules"
+                  : card.quote.bindingConstraint
+              }
+            />
+            <Summary
+              label="Expiry"
+              value={`${Math.max(0, card.quote.expiresAt - now)}s remaining`}
+            />
+            <Summary
+              label="Gas simulation"
+              value={`${card.simulation.gasEstimate} gas units · ${card.simulation.status}`}
+            />
+          </dl>
+          <p className="text-sm leading-6 text-slate-300">{card.explanation}</p>
+          <PortfolioPreview
+            before={card.quote.currentPortfolio}
+            after={card.quote.expectedPostTradePortfolio}
+          />
+          <div className="flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              onClick={() => onUse(card)}
+              className="rounded-lg bg-violet-700 px-4 py-2.5 text-sm font-medium text-white hover:bg-violet-600"
+            >
+              Use values in wallet review
+            </button>
+            <span className="text-xs text-slate-500">
+              Tools: {card.toolTrace.map((item) => item.tool).join(" → ")}
+            </span>
+          </div>
+        </section>
+      )}
+    </section>
+  );
+}
+
+function DelegatedAgentPanel({
+  selectedSpaceId,
+  pair,
+  chainId,
+  now,
+  wallet,
+  fork,
+}: {
+  readonly selectedSpaceId: string;
+  readonly pair: SwapPair | undefined;
+  readonly chainId: number;
+  readonly now: number;
+  readonly wallet: ReturnType<typeof useWallet>;
+  readonly fork: ForkState | undefined;
+}) {
+  const [status, setStatus] = useState<DelegatedStatus>();
+  const [session, setSession] = useState<DelegatedSession>();
+  const [perTrade, setPerTrade] = useState("1");
+  const [budget, setBudget] = useState("2");
+  const [tradeCount, setTradeCount] = useState("1");
+  const [slippage, setSlippage] = useState("50");
+  const [message, setMessage] = useState(
+    "Exchange one allowed input token amount within the reviewed session limits.",
+  );
+  const [recoveryInput, setRecoveryInput] = useState("");
+  const [recoveryOutput, setRecoveryOutput] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [browserBalances, setBrowserBalances] = useState<{
+    readonly native: string;
+    readonly inputToken: string;
+    readonly outputToken: string;
+    readonly inputAllowance: string;
+  }>();
+
+  useEffect(() => {
+    let active = true;
+    client
+      .delegatedStatus()
+      .then((value) => {
+        if (active) setStatus(value);
+      })
+      .catch(() => {
+        if (active) setStatus(undefined);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    if (!fork || !pair || !wallet.address || !wallet.provider) {
+      setBrowserBalances(undefined);
+      return () => {
+        active = false;
+      };
+    }
+    const provider = wallet.provider;
+    const address = wallet.address;
+    const balanceData = `${ERC20_BALANCE_OF}${wordAddress(address)}`;
+    const allowanceData = `${ERC20_ALLOWANCE}${wordAddress(address)}${wordAddress(fork.router)}`;
+    const quantity = (value: unknown): string => {
+      if (typeof value !== "string")
+        throw new Error("Wallet balance was malformed");
+      return BigInt(value).toString();
+    };
+    void Promise.all([
+      provider.request({
+        method: "eth_getBalance",
+        params: [address, "latest"],
+      }),
+      provider.request({
+        method: "eth_call",
+        params: [{ to: pair.input.token, data: balanceData }, "latest"],
+      }),
+      provider.request({
+        method: "eth_call",
+        params: [{ to: pair.output.token, data: balanceData }, "latest"],
+      }),
+      provider.request({
+        method: "eth_call",
+        params: [{ to: pair.input.token, data: allowanceData }, "latest"],
+      }),
+    ])
+      .then(([native, inputToken, outputToken, inputAllowance]) => {
+        if (active)
+          setBrowserBalances({
+            native: quantity(native),
+            inputToken: quantity(inputToken),
+            outputToken: quantity(outputToken),
+            inputAllowance: quantity(inputAllowance),
+          });
+      })
+      .catch(() => {
+        if (active) setBrowserBalances(undefined);
+      });
+    return () => {
+      active = false;
+    };
+  }, [fork, pair?.key, wallet.address, wallet.provider, wallet.revision]);
+
+  function nonce(): string {
+    const bytes = new Uint8Array(32);
+    crypto.getRandomValues(bytes);
+    return `0x${Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("")}`;
+  }
+
+  async function authorize(): Promise<DelegatedSession> {
+    if (!status?.wallet.configured || !status.wallet.address)
+      throw new Error("A live dedicated Privy wallet is not configured.");
+    if (!pair || !selectedSpaceId)
+      throw new Error("Choose an eligible Space and pair first.");
+    if (!wallet.address || wallet.status !== "connected")
+      throw new Error(
+        "Connect Bob's browser wallet to authorize this session.",
+      );
+    const inputAmount = parseTokenAmount(perTrade.trim(), pair.input.decimals);
+    const cumulativeAmount = parseTokenAmount(
+      budget.trim(),
+      pair.input.decimals,
+    );
+    const plan: DelegatedSessionPlan = {
+      ownerAddress: wallet.address,
+      chainId,
+      allowedSpaceIds: [selectedSpaceId],
+      traderInputToken: pair.input.token,
+      traderOutputToken: pair.output.token,
+      perTradeInputAmount: inputAmount.toString(),
+      cumulativeInputBudget: cumulativeAmount.toString(),
+      maxTradeCount: Number(tradeCount),
+      slippageBps: Number(slippage),
+      expiresAt: now + 15 * 60,
+      sessionNonce: nonce(),
+    };
+    const typedData = delegatedAuthorizationTypedData(
+      plan,
+      status.wallet.address,
+    );
+    if (!wallet.provider)
+      throw new Error("Connect Bob's browser wallet before authorizing.");
+    const signature = await wallet.provider.request({
+      method: "eth_signTypedData_v4",
+      params: [wallet.address, JSON.stringify(typedData)],
+    });
+    if (typeof signature !== "string")
+      throw new Error("Bob's wallet returned no authorization signature.");
+    return client.authorizeDelegatedSession({
+      plan,
+      agentWallet: status.wallet.address,
+      signature,
+    });
+  }
+
+  async function runAction(action: () => Promise<DelegatedSession>) {
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await action();
+      setSession(result);
+      if (result.state === "STOPPED" || result.state === "REVOKE_PENDING") {
+        await client
+          .delegatedStatus()
+          .then(setStatus)
+          .catch(() => undefined);
+      }
+    } catch (requestError) {
+      setError(friendlyError(requestError));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function recover(): Promise<DelegatedSession> {
+    if (!session || !pair || !wallet.address || !wallet.provider)
+      throw new Error("Connect Bob's browser wallet before recovering funds.");
+    if (!status?.wallet.address)
+      throw new Error("The delegated wallet identity is unavailable.");
+    const assets = [
+      recoveryInput.trim()
+        ? {
+            token: pair.input.token,
+            amount: parseTokenAmount(
+              recoveryInput.trim(),
+              pair.input.decimals,
+            ).toString(),
+          }
+        : undefined,
+      recoveryOutput.trim()
+        ? {
+            token: pair.output.token,
+            amount: parseTokenAmount(
+              recoveryOutput.trim(),
+              pair.output.decimals,
+            ).toString(),
+          }
+        : undefined,
+    ].filter(
+      (asset): asset is { token: string; amount: string } =>
+        asset !== undefined,
+    );
+    if (assets.length === 0)
+      throw new Error("Enter at least one positive test-fund recovery amount.");
+    const recoveryNonce = nonce();
+    const typedData = delegatedRecoveryTypedData(
+      session.plan,
+      session.id,
+      status.wallet.address,
+      wallet.address,
+      assets,
+      recoveryNonce,
+    );
+    const signature = await wallet.provider.request({
+      method: "eth_signTypedData_v4",
+      params: [wallet.address, JSON.stringify(typedData)],
+    });
+    if (typeof signature !== "string")
+      throw new Error(
+        "Bob's wallet returned no recovery authorization signature.",
+      );
+    return client.recoverDelegatedSession(session.id, {
+      destination: wallet.address,
+      assets,
+      recoveryNonce,
+      signature,
+      idempotencyKey: `recovery:${session.id.slice(2, 18)}:${recoveryNonce.slice(2, 18)}`,
+    });
+  }
+
+  const walletAddress = status?.wallet.address;
+  return (
+    <section className="space-y-4 rounded-2xl border border-amber-900/70 bg-amber-950/20 p-5 sm:p-6">
+      <div>
+        <p className="text-sm font-semibold uppercase tracking-[0.18em] text-amber-300">
+          Delegated agent wallet
+        </p>
+        <h2 className="mt-1 text-xl font-semibold text-white">
+          Explicit bounded custody
+        </h2>
+        <p className="mt-1 text-sm leading-6 text-slate-400">
+          Bob authorizes a separate Privy wallet for a short session. It is
+          funded independently and cannot spend Bob&apos;s browser-wallet
+          balance or administer Alice&apos;s Space. The agent may only submit
+          the reviewed pair through the reviewed settlement router.
+        </p>
+      </div>
+      {!status?.wallet.configured ? (
+        <p className="rounded-lg border border-slate-700 bg-slate-900/60 p-3 text-sm text-slate-400">
+          Delegated custody is unavailable until the operator provisions and
+          reads back the dedicated Privy wallet, signer, and policy. Browser
+          wallet trading remains available.
+        </p>
+      ) : (
+        <>
+          <dl className="grid gap-2 text-sm sm:grid-cols-2">
+            <Summary
+              label="Agent address"
+              value={walletAddress ?? "Unavailable"}
+            />
+            <Summary
+              label="Policy"
+              value={status.wallet.policyFingerprint ?? "Unavailable"}
+            />
+            <Summary
+              label="Bob browser wallet"
+              value={wallet.address ?? "Not connected"}
+            />
+            <Summary
+              label="Custody status"
+              value={status.wallet.enabled ? "Enabled" : "Revoked or expired"}
+            />
+            <Summary
+              label={`Agent ${pair?.input.symbol ?? "input"} balance`}
+              value={
+                status.wallet.balances && pair
+                  ? formatTokenAmount(
+                      status.wallet.balances.inputToken,
+                      pair.input.decimals,
+                    )
+                  : "Not read"
+              }
+            />
+            <Summary
+              label={`Bob ${pair?.input.symbol ?? "input"} balance`}
+              value={
+                browserBalances && pair
+                  ? formatTokenAmount(
+                      browserBalances.inputToken,
+                      pair.input.decimals,
+                    )
+                  : "Not read"
+              }
+            />
+            <Summary
+              label={`Agent ${pair?.output.symbol ?? "output"} balance`}
+              value={
+                status.wallet.balances && pair
+                  ? formatTokenAmount(
+                      status.wallet.balances.outputToken,
+                      pair.output.decimals,
+                    )
+                  : "Not read"
+              }
+            />
+            <Summary
+              label={`Bob ${pair?.output.symbol ?? "output"} balance`}
+              value={
+                browserBalances && pair
+                  ? formatTokenAmount(
+                      browserBalances.outputToken,
+                      pair.output.decimals,
+                    )
+                  : "Not read"
+              }
+            />
+            <Summary
+              label="Agent gas balance"
+              value={
+                status.wallet.balances
+                  ? formatTokenAmount(status.wallet.balances.native, 18)
+                  : "Not read"
+              }
+            />
+            <Summary
+              label="Bob gas balance"
+              value={
+                browserBalances
+                  ? formatTokenAmount(browserBalances.native, 18)
+                  : "Not read"
+              }
+            />
+            <Summary
+              label={`Agent ${pair?.input.symbol ?? "input"} router allowance`}
+              value={
+                status.wallet.balances && pair
+                  ? formatTokenAmount(
+                      status.wallet.balances.inputAllowance,
+                      pair.input.decimals,
+                    )
+                  : "Not read"
+              }
+            />
+            <Summary
+              label={`Bob ${pair?.input.symbol ?? "input"} router allowance`}
+              value={
+                browserBalances && pair
+                  ? formatTokenAmount(
+                      browserBalances.inputAllowance,
+                      pair.input.decimals,
+                    )
+                  : "Not read"
+              }
+            />
+          </dl>
+          {!session ? (
+            <div className="grid gap-3 sm:grid-cols-2">
+              <label className="text-sm text-slate-300">
+                Per-trade input cap
+                <input
+                  value={perTrade}
+                  onChange={(event) => setPerTrade(event.target.value)}
+                  className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-900 p-2.5 text-slate-100"
+                />
+              </label>
+              <label className="text-sm text-slate-300">
+                Cumulative input budget
+                <input
+                  value={budget}
+                  onChange={(event) => setBudget(event.target.value)}
+                  className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-900 p-2.5 text-slate-100"
+                />
+              </label>
+              <label className="text-sm text-slate-300">
+                Maximum trade count
+                <input
+                  value={tradeCount}
+                  onChange={(event) => setTradeCount(event.target.value)}
+                  inputMode="numeric"
+                  className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-900 p-2.5 text-slate-100"
+                />
+              </label>
+              <label className="text-sm text-slate-300">
+                Slippage limit (bps)
+                <input
+                  value={slippage}
+                  onChange={(event) => setSlippage(event.target.value)}
+                  inputMode="numeric"
+                  className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-900 p-2.5 text-slate-100"
+                />
+              </label>
+              <p className="text-xs leading-5 text-amber-100/70 sm:col-span-2">
+                Fund the displayed agent address with only this test budget and
+                approve only the exact missing allowance to the settlement
+                router. Recovery after stopping is owner/operator-controlled;
+                the agent has no transfer or withdrawal permission.
+              </p>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => void runAction(authorize)}
+                className="min-h-11 rounded-lg bg-amber-700 px-4 py-2.5 text-sm font-medium text-white hover:bg-amber-600 disabled:opacity-50 sm:col-span-2"
+              >
+                {busy ? "Authorizing…" : "Review and authorize session"}
+              </button>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <dl className="grid gap-2 text-sm sm:grid-cols-2">
+                <Summary label="Session" value={session.state} />
+                <Summary
+                  label="Budget remaining"
+                  value={`${formatTokenAmount(session.remainingInputBudget, pair?.input.decimals ?? 0)} ${pair?.input.symbol ?? "token"}`}
+                />
+                <Summary
+                  label="Expiry"
+                  value={`${Math.max(0, session.plan.expiresAt - now)}s remaining`}
+                />
+                <Summary
+                  label="Trades"
+                  value={`${session.tradeCount}/${session.plan.maxTradeCount}`}
+                />
+                <Summary
+                  label="Last proposal"
+                  value={session.lastProposalHash ?? "None"}
+                />
+                <Summary
+                  label="Last recovery"
+                  value={session.lastRecoveryTransactionHash ?? "None"}
+                />
+                <Summary
+                  label="Last result"
+                  value={session.lastResult ?? "No worker tick yet"}
+                />
+              </dl>
+              <textarea
+                value={message}
+                onChange={(event) => setMessage(event.target.value)}
+                rows={2}
+                maxLength={1_000}
+                className="w-full rounded-lg border border-slate-700 bg-slate-900 p-3 text-sm text-slate-100"
+                aria-label="Delegated worker request"
+              />
+              <div className="flex flex-wrap gap-3">
+                <button
+                  type="button"
+                  disabled={
+                    busy ||
+                    (session.state !== "AUTHORIZED" &&
+                      session.state !== "ACTIVE")
+                  }
+                  onClick={() =>
+                    void runAction(() =>
+                      client.startDelegatedSession(session.id, { message }),
+                    )
+                  }
+                  className="rounded-lg bg-amber-700 px-4 py-2.5 text-sm font-medium text-white hover:bg-amber-600 disabled:opacity-50"
+                >
+                  {busy
+                    ? "Running bounded tick…"
+                    : "Start one bounded worker tick"}
+                </button>
+                <button
+                  type="button"
+                  disabled={busy || session.state === "STOPPED"}
+                  onClick={() =>
+                    void runAction(() =>
+                      client.stopDelegatedSession(session.id),
+                    )
+                  }
+                  className="rounded-lg border border-red-800 px-4 py-2.5 text-sm font-medium text-red-200 hover:bg-red-950/50 disabled:opacity-50"
+                >
+                  Stop and revoke
+                </button>
+              </div>
+              {(session.state === "STOPPED" ||
+                session.state === "REVOKE_PENDING" ||
+                session.state === "EXPIRED" ||
+                session.state === "EXHAUSTED") && (
+                <div className="space-y-3 rounded-xl border border-cyan-900/70 bg-cyan-950/20 p-4">
+                  <p className="text-sm leading-6 text-cyan-100/80">
+                    Owner recovery stays available after Stop. Enter exact token
+                    units to return to Bob; this uses a separate owner/operator
+                    path and never grants the delegated signer withdrawal
+                    access.
+                  </p>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <label className="text-sm text-slate-300">
+                      Recover {pair?.input.symbol ?? "input"}
+                      <input
+                        value={recoveryInput}
+                        onChange={(event) =>
+                          setRecoveryInput(event.target.value)
+                        }
+                        placeholder="0"
+                        className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-900 p-2.5 text-slate-100"
+                      />
+                    </label>
+                    <label className="text-sm text-slate-300">
+                      Recover {pair?.output.symbol ?? "output"}
+                      <input
+                        value={recoveryOutput}
+                        onChange={(event) =>
+                          setRecoveryOutput(event.target.value)
+                        }
+                        placeholder="0"
+                        className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-900 p-2.5 text-slate-100"
+                      />
+                    </label>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={busy || !wallet.address}
+                    onClick={() => void runAction(recover)}
+                    className="rounded-lg border border-cyan-800 px-4 py-2.5 text-sm font-medium text-cyan-100 hover:bg-cyan-950/50 disabled:opacity-50"
+                  >
+                    {busy
+                      ? "Recovering…"
+                      : "Recover reviewed test funds to Bob"}
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+        </>
+      )}
+      {error && (
+        <p
+          role="alert"
+          className="rounded-lg border border-red-900/70 bg-red-950/40 p-3 text-sm text-red-200"
+        >
+          {error}
+        </p>
+      )}
     </section>
   );
 }

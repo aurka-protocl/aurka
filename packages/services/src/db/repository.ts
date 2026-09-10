@@ -41,6 +41,10 @@ import {
   type SpaceDraft,
   type SpaceIdentity,
   type SpaceRecord,
+  delegatedSessionSchema,
+  delegatedTradeSchema,
+  type DelegatedSession,
+  type DelegatedTrade,
 } from "@aurka/shared";
 
 import {
@@ -48,6 +52,8 @@ import {
   chainEvents,
   executions,
   agentIdentities,
+  delegatedSessions,
+  delegatedTrades,
   idempotencyKeys,
   indexingCheckpoints,
   indexingHeaders,
@@ -366,11 +372,24 @@ export class ServiceRepository {
       mode: row.mode,
       state: row.state,
     });
+    let draft: SpaceDraft | undefined;
+    let draftMigrationReason: string | undefined;
+    if (row.draftJson) {
+      const parsed = spaceDraftSchema.safeParse(parse<unknown>(row.draftJson));
+      if (parsed.success) draft = parsed.data;
+      else
+        draftMigrationReason =
+          "This saved draft predates configurable funding. Recreate it with explicit USDC and WETH amounts; its old signed funding was not reinterpreted.";
+    }
     return spaceRecordSchema.parse({
       identity,
       ...(position ? { position } : {}),
-      ...(row.draftJson ? { draft: parse<SpaceDraft>(row.draftJson) } : {}),
-      ...(row.failureReason ? { failureReason: row.failureReason } : {}),
+      ...(draft ? { draft } : {}),
+      ...(row.failureReason
+        ? { failureReason: row.failureReason }
+        : draftMigrationReason
+          ? { failureReason: draftMigrationReason }
+          : {}),
     }) as SpaceRecord;
   }
 
@@ -980,6 +999,357 @@ export class ServiceRepository {
       }));
   }
 
+  saveDelegatedSession(value: DelegatedSession): void {
+    const session = delegatedSessionSchema.parse(value);
+    this.db
+      .insert(delegatedSessions)
+      .values({
+        id: session.id,
+        ownerAddress: session.plan.ownerAddress,
+        agentAddress: session.wallet.address!,
+        state: session.state,
+        planJson: json(session.plan),
+        walletJson: json(session.wallet),
+        authorizedAt: session.authorizedAt,
+        consumedInputAmount: session.consumedInputAmount,
+        tradeCount: session.tradeCount,
+        lastProposalHash: session.lastProposalHash ?? null,
+        lastTransactionHash: session.lastTransactionHash ?? null,
+        lastRecoveryTransactionHash:
+          session.lastRecoveryTransactionHash ?? null,
+        lastResult: session.lastResult ?? null,
+        updatedAt: session.updatedAt,
+      })
+      .onConflictDoUpdate({
+        target: delegatedSessions.id,
+        set: {
+          ownerAddress: session.plan.ownerAddress,
+          agentAddress: session.wallet.address!,
+          state: session.state,
+          planJson: json(session.plan),
+          walletJson: json(session.wallet),
+          authorizedAt: session.authorizedAt,
+          consumedInputAmount: session.consumedInputAmount,
+          tradeCount: session.tradeCount,
+          lastProposalHash: session.lastProposalHash ?? null,
+          lastTransactionHash: session.lastTransactionHash ?? null,
+          lastRecoveryTransactionHash:
+            session.lastRecoveryTransactionHash ?? null,
+          lastResult: session.lastResult ?? null,
+          updatedAt: session.updatedAt,
+        },
+      })
+      .run();
+  }
+
+  private delegatedSessionFromRow(
+    row: typeof delegatedSessions.$inferSelect,
+  ): DelegatedSession {
+    const trades = this.db
+      .select()
+      .from(delegatedTrades)
+      .where(eq(delegatedTrades.sessionId, row.id))
+      .orderBy(desc(delegatedTrades.createdAt), desc(delegatedTrades.id))
+      .all()
+      .map((trade) =>
+        delegatedTradeSchema.parse({
+          id: trade.id,
+          sessionId: trade.sessionId,
+          intentHash: trade.intentHash,
+          proposalHash: trade.proposalHash,
+          inputAmount: trade.inputAmount,
+          status: trade.status,
+          idempotencyKey: trade.idempotencyKey,
+          ...(trade.transactionHash
+            ? { transactionHash: trade.transactionHash }
+            : {}),
+          ...(trade.error ? { error: trade.error } : {}),
+          createdAt: trade.createdAt,
+          updatedAt: trade.updatedAt,
+        }),
+      );
+    return delegatedSessionSchema.parse({
+      id: row.id,
+      plan: parse(row.planJson),
+      wallet: parse(row.walletJson),
+      state: row.state,
+      authorizedAt: row.authorizedAt,
+      consumedInputAmount: row.consumedInputAmount,
+      tradeCount: row.tradeCount,
+      remainingInputBudget: (
+        BigInt(
+          parse<{ cumulativeInputBudget: string }>(row.planJson)
+            .cumulativeInputBudget,
+        ) - BigInt(row.consumedInputAmount)
+      ).toString(),
+      ...(row.lastProposalHash
+        ? { lastProposalHash: row.lastProposalHash }
+        : {}),
+      ...(row.lastTransactionHash
+        ? { lastTransactionHash: row.lastTransactionHash }
+        : {}),
+      ...(row.lastRecoveryTransactionHash
+        ? { lastRecoveryTransactionHash: row.lastRecoveryTransactionHash }
+        : {}),
+      ...(row.lastResult ? { lastResult: row.lastResult } : {}),
+      updatedAt: row.updatedAt,
+      trades,
+    });
+  }
+
+  getDelegatedSession(id: string): DelegatedSession | undefined {
+    const row = this.db
+      .select()
+      .from(delegatedSessions)
+      .where(eq(delegatedSessions.id, id))
+      .get();
+    return row ? this.delegatedSessionFromRow(row) : undefined;
+  }
+
+  listDelegatedSessions(ownerAddress?: string): DelegatedSession[] {
+    const rows = this.db
+      .select()
+      .from(delegatedSessions)
+      .where(
+        ownerAddress === undefined
+          ? undefined
+          : eq(delegatedSessions.ownerAddress, ownerAddress),
+      )
+      .orderBy(desc(delegatedSessions.updatedAt), desc(delegatedSessions.id))
+      .all();
+    return rows.map((row) => this.delegatedSessionFromRow(row));
+  }
+
+  activeDelegatedSessionCount(): number {
+    return this.db
+      .select({ id: delegatedSessions.id })
+      .from(delegatedSessions)
+      .where(
+        or(
+          eq(delegatedSessions.state, "AUTHORIZED"),
+          eq(delegatedSessions.state, "ACTIVE"),
+        ),
+      )
+      .all().length;
+  }
+
+  reserveDelegatedTrade(input: {
+    readonly id: string;
+    readonly sessionId: string;
+    readonly intentHash: string;
+    readonly proposalHash: string;
+    readonly inputAmount: string;
+    readonly idempotencyKey: string;
+  }): DelegatedTrade {
+    return this.db.transaction((tx) => {
+      const existing = tx
+        .select()
+        .from(delegatedTrades)
+        .where(
+          or(
+            eq(delegatedTrades.id, input.id),
+            eq(delegatedTrades.idempotencyKey, input.idempotencyKey),
+          ),
+        )
+        .get();
+      if (existing)
+        return delegatedTradeSchema.parse({
+          id: existing.id,
+          sessionId: existing.sessionId,
+          intentHash: existing.intentHash,
+          proposalHash: existing.proposalHash,
+          inputAmount: existing.inputAmount,
+          status: existing.status,
+          idempotencyKey: existing.idempotencyKey,
+          ...(existing.transactionHash
+            ? { transactionHash: existing.transactionHash }
+            : {}),
+          ...(existing.error ? { error: existing.error } : {}),
+          createdAt: existing.createdAt,
+          updatedAt: existing.updatedAt,
+        });
+      const session = tx
+        .select()
+        .from(delegatedSessions)
+        .where(eq(delegatedSessions.id, input.sessionId))
+        .get();
+      if (!session) throw new Error("Delegated session was not found");
+      const plan = parse<{
+        cumulativeInputBudget: string;
+        maxTradeCount: number;
+      }>(session.planJson);
+      const amount = BigInt(input.inputAmount);
+      const consumed = BigInt(session.consumedInputAmount);
+      if (session.state !== "ACTIVE")
+        throw new Error("Delegated session is not active");
+      if (
+        now() >=
+        Number(parse<{ expiresAt: number }>(session.planJson).expiresAt)
+      )
+        throw new Error("Delegated session is expired");
+      if (session.tradeCount >= plan.maxTradeCount)
+        throw new Error("Delegated trade count exhausted");
+      if (consumed + amount > BigInt(plan.cumulativeInputBudget))
+        throw new Error("Delegated cumulative budget exhausted");
+      const timestamp = now();
+      tx.insert(delegatedTrades)
+        .values({
+          id: input.id,
+          sessionId: input.sessionId,
+          intentHash: input.intentHash,
+          proposalHash: input.proposalHash,
+          inputAmount: input.inputAmount,
+          status: "RESERVED",
+          idempotencyKey: input.idempotencyKey,
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        })
+        .run();
+      tx.update(delegatedSessions)
+        .set({
+          consumedInputAmount: (consumed + amount).toString(),
+          tradeCount: session.tradeCount + 1,
+          updatedAt: timestamp,
+        })
+        .where(eq(delegatedSessions.id, input.sessionId))
+        .run();
+      return delegatedTradeSchema.parse({
+        ...input,
+        status: "RESERVED",
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      });
+    });
+  }
+
+  claimDelegatedTradeForSigning(id: string): boolean {
+    const result = this.db
+      .update(delegatedTrades)
+      .set({ status: "SIGNING", updatedAt: now() })
+      .where(
+        and(eq(delegatedTrades.id, id), eq(delegatedTrades.status, "RESERVED")),
+      )
+      .run();
+    return result.changes === 1;
+  }
+
+  releaseDelegatedTrade(id: string, error?: string): void {
+    this.db.transaction((tx) => {
+      const trade = tx
+        .select()
+        .from(delegatedTrades)
+        .where(eq(delegatedTrades.id, id))
+        .get();
+      if (!trade || (trade.status !== "RESERVED" && trade.status !== "SIGNING"))
+        return;
+      const session = tx
+        .select()
+        .from(delegatedSessions)
+        .where(eq(delegatedSessions.id, trade.sessionId))
+        .get();
+      if (!session) return;
+      const timestamp = now();
+      const consumed = BigInt(session.consumedInputAmount);
+      const amount = BigInt(trade.inputAmount);
+      tx.update(delegatedTrades)
+        .set({
+          status: "RELEASED",
+          error: error ?? null,
+          updatedAt: timestamp,
+        })
+        .where(eq(delegatedTrades.id, id))
+        .run();
+      tx.update(delegatedSessions)
+        .set({
+          consumedInputAmount: (consumed >= amount
+            ? consumed - amount
+            : 0n
+          ).toString(),
+          tradeCount: Math.max(0, session.tradeCount - 1),
+          updatedAt: timestamp,
+        })
+        .where(eq(delegatedSessions.id, trade.sessionId))
+        .run();
+    });
+  }
+
+  updateDelegatedTrade(
+    id: string,
+    update: {
+      readonly status: DelegatedTrade["status"];
+      readonly transactionHash?: string;
+      readonly error?: string;
+    },
+  ): DelegatedTrade {
+    const timestamp = now();
+    this.db
+      .update(delegatedTrades)
+      .set({
+        status: update.status,
+        transactionHash: update.transactionHash ?? null,
+        error: update.error ?? null,
+        updatedAt: timestamp,
+      })
+      .where(eq(delegatedTrades.id, id))
+      .run();
+    const row = this.db
+      .select()
+      .from(delegatedTrades)
+      .where(eq(delegatedTrades.id, id))
+      .get();
+    if (!row) throw new Error("Delegated trade was not found");
+    return delegatedTradeSchema.parse({
+      id: row.id,
+      sessionId: row.sessionId,
+      intentHash: row.intentHash,
+      proposalHash: row.proposalHash,
+      inputAmount: row.inputAmount,
+      status: row.status,
+      idempotencyKey: row.idempotencyKey,
+      ...(row.transactionHash ? { transactionHash: row.transactionHash } : {}),
+      ...(row.error ? { error: row.error } : {}),
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+    });
+  }
+
+  updateDelegatedSession(
+    id: string,
+    update: Partial<
+      Pick<
+        DelegatedSession,
+        | "state"
+        | "lastProposalHash"
+        | "lastTransactionHash"
+        | "lastRecoveryTransactionHash"
+        | "lastResult"
+      >
+    >,
+  ): void {
+    this.db
+      .update(delegatedSessions)
+      .set({
+        ...(update.state === undefined ? {} : { state: update.state }),
+        ...(update.lastProposalHash === undefined
+          ? {}
+          : { lastProposalHash: update.lastProposalHash }),
+        ...(update.lastTransactionHash === undefined
+          ? {}
+          : { lastTransactionHash: update.lastTransactionHash }),
+        ...(update.lastRecoveryTransactionHash === undefined
+          ? {}
+          : {
+              lastRecoveryTransactionHash: update.lastRecoveryTransactionHash,
+            }),
+        ...(update.lastResult === undefined
+          ? {}
+          : { lastResult: update.lastResult }),
+        updatedAt: now(),
+      })
+      .where(eq(delegatedSessions.id, id))
+      .run();
+  }
+
   saveIntent(
     intent: AtomicSettlementIntent,
     intentHash: string,
@@ -1146,6 +1516,39 @@ export class ServiceRepository {
       .where(eq(executions.transactionHash, hash))
       .get();
     return row ? executionSchema.parse(parse(row.executionJson)) : undefined;
+  }
+
+  /** Promote a prepared execution to the real hash returned by a broadcaster. */
+  promoteExecution(
+    intentHash: string,
+    proposalHash: string,
+    transactionHash: string,
+  ): void {
+    const row = this.db
+      .select()
+      .from(executions)
+      .where(
+        and(
+          eq(executions.intentHash, intentHash),
+          eq(executions.proposalHash, proposalHash),
+        ),
+      )
+      .get();
+    if (!row) return;
+    const execution = executionSchema.parse(parse(row.executionJson));
+    this.db
+      .update(executions)
+      .set({
+        transactionHash,
+        executionJson: json({
+          ...execution,
+          transactionHash,
+          submissionState: "SUBMITTED",
+        }),
+        updatedAt: now(),
+      })
+      .where(eq(executions.transactionHash, row.transactionHash))
+      .run();
   }
 
   listActivity(query: ActivityQuery): Page<ActivityItem> {

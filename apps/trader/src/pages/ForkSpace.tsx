@@ -281,12 +281,13 @@ export default function ForkSpace({
       const provider = await validateWallet(account);
       if (action === "limit") {
         const space = await client.getSpace(spaceId!);
+        if (!space.draft)
+          throw new Error(
+            "This Space predates configurable funding. Recreate and sign a new explicit USDC/WETH draft before changing its limit.",
+          );
         const draft = {
-          id: space.identity.id,
-          name: space.identity.name,
+          ...space.draft,
           ownerAddress: account,
-          chainId: space.identity.chainId,
-          assets: space.position!.policy.assets,
           maximumTransactionValue: limit,
         };
         const prepared = await client.prepareSpaceMutation({

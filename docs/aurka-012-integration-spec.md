@@ -7,6 +7,13 @@ selected, approved, or verified. TASK99-006 separately verifies an isolated
 Ethereum-mainnet fork release candidate; that local selection is reconciled
 below and is not a public deployment decision.
 
+TASK99-008 records a separate delegated-wallet implementation decision, not a
+new public deployment selection. Its Privy owner/additional-signer arrangement
+and policy template are operator inputs pending real read-back. The local Anvil
+chain `31337` is not reported as reachable by Privy's hosted broadcaster;
+custom-network compatibility, remote policy denial, funding, and receipt proof
+remain open.
+
 This document is the handoff artifact for AURKA-014 and AURKA-015. It records
 what can be proposed from primary evidence and what still requires an explicit
 operator or governance decision. The fixture configuration is intentionally

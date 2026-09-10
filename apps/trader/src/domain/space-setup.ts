@@ -18,6 +18,7 @@ type Setup = {
   label: string;
   transaction: { to: string; data: string; value: string };
   mode?: "single-transaction";
+  gasEstimate?: string;
   prerequisites?: readonly {
     token: string;
     symbol: string;
@@ -572,6 +573,8 @@ export async function activateForkSpace(
   const key = `aurka:space-setup:${supportedChainId}:${owner.toLowerCase()}:${spaceId}:${operation}`;
   let setup = await request("prepare", { spaceId, operation });
   while (!setup.complete) {
+    if (setup.gasEstimate)
+      progress(`Required gas estimate: ${setup.gasEstimate} gas units.`);
     if (setup.ownerAddress.toLowerCase() !== owner.toLowerCase())
       throw new Error("Connect the recorded Space owner.");
     await assertWalletForkContext(provider, owner, setup);
@@ -654,7 +657,7 @@ export async function activateForkSpace(
         if (!offeredBatch?.length)
           throw new Error("Server did not return the saved batch plan.");
         progress(
-          `Fund/configure: review ${offeredBatch.length} atomic calls (35,000 USDC + 5 WETH; maximum trade value is shown in the Space review).`,
+          `Fund/configure: review ${offeredBatch.length} atomic calls; the exact reviewed funding amounts are shown in the Space review.`,
         );
         const currentChain = await provider.request({ method: "eth_chainId" });
         const accounts = (await provider.request({

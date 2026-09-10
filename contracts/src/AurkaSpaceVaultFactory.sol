@@ -19,9 +19,6 @@ interface ISpaceCapacityInitializer {
 /// @dev Funding and Aqua registration are performed through the isolated vault
 ///      so Aqua records the vault as maker rather than the factory.
 contract AurkaSpaceVaultFactory {
-    uint256 public constant INITIAL_USDC_AMOUNT = 35_000e6;
-    uint256 public constant INITIAL_WETH_AMOUNT = 5e18;
-
     address public immutable policyRegistry;
     address public immutable router;
     address public immutable aqua;
@@ -35,6 +32,8 @@ contract AurkaSpaceVaultFactory {
         bytes32 strategyHash;
         bytes strategy;
         address owner;
+        uint256 usdcAmount;
+        uint256 wethAmount;
         AurkaPolicyRegistry.AssetConfig[] assets;
         uint256 maximumTransactionValue;
         AurkaPolicyRegistry.FeeConfig fee;
@@ -120,7 +119,7 @@ contract AurkaSpaceVaultFactory {
             params.spaceId == bytes32(0) || params.policyId == bytes32(0)
                 || params.strategyHash == bytes32(0) || params.strategy.length == 0
                 || keccak256(params.strategy) != params.strategyHash || params.priceOracle == address(0)
-                || params.assets.length != 2
+                || params.assets.length != 2 || params.usdcAmount == 0 || params.wethAmount == 0
         ) revert InvalidInitialization();
         if (AurkaPolicyRegistry(policyRegistry).initializationFactory() != address(this)) {
             revert UnauthorizedInitialization();
@@ -150,8 +149,8 @@ contract AurkaSpaceVaultFactory {
         if (params.fee.treasuryFeeRecipient != vault) revert InvalidInitialization();
 
         vault = _createVault(params.owner, params.spaceId);
-        _pullExact(IERC20Minimal(usdc), params.owner, vault, INITIAL_USDC_AMOUNT);
-        _pullExact(IERC20Minimal(weth), params.owner, vault, INITIAL_WETH_AMOUNT);
+        _pullExact(IERC20Minimal(usdc), params.owner, vault, params.usdcAmount);
+        _pullExact(IERC20Minimal(weth), params.owner, vault, params.wethAmount);
 
         uint256 policyNonce = AurkaPolicyRegistry(policyRegistry).createPolicyFromFactory(
             params.policyId,
@@ -168,14 +167,14 @@ contract AurkaSpaceVaultFactory {
         );
         if (params.capacityEpoch.policyNonce != policyNonce) revert InvalidInitialization();
 
-        AurkaSpaceVault(vault).initializeApproval(usdc, aqua, INITIAL_USDC_AMOUNT);
-        AurkaSpaceVault(vault).initializeApproval(weth, aqua, INITIAL_WETH_AMOUNT);
+        AurkaSpaceVault(vault).initializeApproval(usdc, aqua, params.usdcAmount);
+        AurkaSpaceVault(vault).initializeApproval(weth, aqua, params.wethAmount);
         address[] memory tokens = new address[](2);
         tokens[0] = usdc;
         tokens[1] = weth;
         uint256[] memory amounts = new uint256[](2);
-        amounts[0] = INITIAL_USDC_AMOUNT;
-        amounts[1] = INITIAL_WETH_AMOUNT;
+        amounts[0] = params.usdcAmount;
+        amounts[1] = params.wethAmount;
         bytes32 shippedStrategyHash = AurkaSpaceVault(vault).initializeAquaStrategy(
             aqua, router, params.strategy, tokens, amounts
         );
@@ -189,8 +188,8 @@ contract AurkaSpaceVaultFactory {
             params.policyId,
             params.owner,
             vault,
-            INITIAL_USDC_AMOUNT,
-            INITIAL_WETH_AMOUNT,
+            params.usdcAmount,
+            params.wethAmount,
             capacityEpochId,
             capacityBaseline
         );

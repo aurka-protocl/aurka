@@ -1,4 +1,5 @@
 export * from "./api.js";
+export * from "./delegation.js";
 export * from "./activity.js";
 export * from "./events.js";
 export * from "./epoch.js";

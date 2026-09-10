@@ -3,6 +3,8 @@ import { Link, useNavigate } from "react-router-dom";
 import { ArrowLeft, ArrowRight, Check, LoaderCircle } from "lucide-react";
 import { AurkaClient } from "@aurka/sdk";
 import {
+  formatTokenAmount,
+  parseTokenAmount,
   type AssetBound,
   type SpaceDraft,
   type SpaceMutationOperation,
@@ -15,6 +17,7 @@ import { useWallet } from "../wallet";
 
 const client = new AurkaClient({ baseUrl: apiBaseUrl });
 const ZERO = "0x0000000000000000000000000000000000000000";
+const ERC20_BALANCE_OF = "0x70a08231";
 const supportedAssets: readonly AssetBound[] =
   appMode === "fork"
     ? [
@@ -86,21 +89,25 @@ function initialDraft(
   if (existing?.draft) return existing.draft;
   if (existing?.position) {
     return {
+      draftVersion: 2,
       id: existing.identity.id,
       name: existing.identity.name,
       ownerAddress: existing.identity.ownerAddress,
       chainId: existing.identity.chainId,
       assets: existing.position.policy.assets,
       maximumTransactionValue: existing.position.policy.maximumTransactionValue,
+      funding: existing.draft?.funding ?? { usdc: "35000", weth: "5" },
     };
   }
   return {
+    draftVersion: 2,
     id: newSpaceId(),
     name: "New Aurka Space",
     ownerAddress: walletAddress,
     chainId: supportedChainId,
     assets: supportedAssets.slice(0, 2),
     maximumTransactionValue: "5000",
+    funding: { usdc: "35000", weth: "5" },
   };
 }
 
@@ -131,6 +138,58 @@ export default function SpaceForm({
   const [message, setMessage] = useState<string | null>(null);
   const [setupState, setSetupState] = useState<SetupUiState>("idle");
   const [setupDetails, setSetupDetails] = useState<string | null>(null);
+  const [walletBalances, setWalletBalances] = useState<{
+    readonly native: bigint;
+    readonly usdc: bigint;
+    readonly weth: bigint;
+  }>();
+
+  useEffect(() => {
+    if (appMode !== "fork" || !wallet.provider || !wallet.address) {
+      setWalletBalances(undefined);
+      return;
+    }
+    let active = true;
+    const read = async () => {
+      try {
+        const [native, usdc, weth] = await Promise.all([
+          wallet.provider!.request({
+            method: "eth_getBalance",
+            params: [wallet.address, "latest"],
+          }),
+          ...supportedAssets.slice(0, 2).map((asset) =>
+            wallet.provider!.request({
+              method: "eth_call",
+              params: [
+                {
+                  to: asset.token,
+                  data: `${ERC20_BALANCE_OF}${wallet.address!.slice(2).padStart(64, "0")}`,
+                },
+                "latest",
+              ],
+            }),
+          ),
+        ]);
+        if (
+          active &&
+          typeof native === "string" &&
+          typeof usdc === "string" &&
+          typeof weth === "string"
+        )
+          setWalletBalances({
+            native: BigInt(native),
+            usdc: BigInt(usdc),
+            weth: BigInt(weth),
+          });
+      } catch {
+        if (active) setWalletBalances(undefined);
+      }
+    };
+    void read();
+    return () => {
+      active = false;
+    };
+  }, [wallet.address, wallet.provider, wallet.revision]);
 
   useEffect(() => {
     if (appMode !== "fork" || !wallet.address || !saved) return;
@@ -380,7 +439,7 @@ export default function SpaceForm({
           "Name",
           "Assets",
           "Allocation ranges",
-          "Transaction limit",
+          "Funding & limit",
           "Review",
         ].map((label, index) => {
           const active = step === index + 1;
@@ -412,6 +471,20 @@ export default function SpaceForm({
           {message}
         </p>
       )}
+      {existing &&
+        !existing.draft &&
+        existing.failureReason
+          ?.toLowerCase()
+          .includes("configurable funding") && (
+          <p
+            role="alert"
+            className="rounded-lg border border-amber-800 bg-amber-950/30 p-4 text-amber-200"
+          >
+            This saved Space predates configurable funding. Review and sign a
+            new draft with explicit USDC and WETH amounts; its old funding is
+            not being reused.
+          </p>
+        )}
 
       <div className="rounded-2xl border border-slate-700 bg-slate-900 p-5 sm:p-6">
         {step === 1 && (
@@ -527,23 +600,79 @@ export default function SpaceForm({
           </div>
         )}
         {step === 4 && (
-          <label className="block text-sm text-slate-300">
-            Maximum transaction value (value units)
-            <input
-              className={fieldClass()}
-              inputMode="numeric"
-              value={draft.maximumTransactionValue}
-              onChange={(event) =>
-                updateDraft({ maximumTransactionValue: event.target.value })
-              }
-            />
-            <span className="mt-2 block text-xs text-slate-500">
-              {appMode === "fork"
-                ? "This fork accepts 1–1000000000"
-                : "This local demo accepts 1000–1000000000"}{" "}
-              value units. A deployed chain policy remains the final authority.
-            </span>
-          </label>
+          <div className="space-y-4">
+            <div>
+              <p className="text-sm font-medium text-slate-200">
+                Starting funding
+              </p>
+              <p className="mt-1 text-xs leading-5 text-slate-500">
+                Both supported assets must be funded with positive amounts.
+                Decimal input is converted to exact token units; excess
+                precision, unavailable balances and bounds that cannot hold this
+                allocation are rejected before signing.
+              </p>
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2">
+              {(["usdc", "weth"] as const).map((token) => {
+                const decimals = token === "usdc" ? 6 : 18;
+                const balance = walletBalances?.[token];
+                let requested = 0n;
+                try {
+                  requested = parseTokenAmount(draft.funding[token], decimals);
+                } catch {
+                  /* The server returns the precise validation error on review. */
+                }
+                return (
+                  <label key={token} className="text-sm text-slate-300">
+                    {token.toUpperCase()} amount
+                    <input
+                      className={fieldClass()}
+                      inputMode="decimal"
+                      value={draft.funding[token]}
+                      onChange={(event) =>
+                        updateDraft({
+                          funding: {
+                            ...draft.funding,
+                            [token]: event.target.value,
+                          },
+                        })
+                      }
+                    />
+                    <span className="mt-1 block text-xs text-slate-500">
+                      {walletBalances
+                        ? `Wallet balance: ${formatTokenAmount(balance ?? 0n, decimals)} ${token.toUpperCase()}${balance !== undefined && balance < requested ? " · insufficient" : ""}`
+                        : "Connect the owner wallet to read balance"}
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+            <p className="text-xs text-slate-500">
+              Wallet gas balance:{" "}
+              {walletBalances
+                ? `${formatTokenAmount(walletBalances.native, 18)} ETH`
+                : "connect the owner wallet to read ETH"}
+            </p>
+            <label className="block text-sm text-slate-300">
+              Maximum transaction value (value units)
+              <input
+                className={fieldClass()}
+                inputMode="numeric"
+                value={draft.maximumTransactionValue}
+                onChange={(event) =>
+                  updateDraft({ maximumTransactionValue: event.target.value })
+                }
+              />
+              <span className="mt-2 block text-xs text-slate-500">
+                {appMode === "fork"
+                  ? "This fork accepts 1–1000000000"
+                  : "This local demo accepts 1000–1000000000"}{" "}
+                value units. Required gas is paid by the owner wallet; after
+                approvals the service shows the current exact estimate before
+                the final setup approval.
+              </span>
+            </label>
+          </div>
         )}
         {step === 5 && (
           <div className="space-y-4">
@@ -586,6 +715,12 @@ export default function SpaceForm({
                   {draft.maximumTransactionValue} value units
                 </dd>
               </div>
+              <div>
+                <dt className="text-slate-500">Starting allocation</dt>
+                <dd className="mt-1 text-white">
+                  {draft.funding.usdc} USDC + {draft.funding.weth} WETH
+                </dd>
+              </div>
             </dl>
             {setupDetails && (
               <details className="text-sm text-slate-400">
@@ -599,7 +734,7 @@ export default function SpaceForm({
                   ? "Your wallet transaction is recorded locally and will not be sent again while confirmation is pending. Check again to continue verification."
                   : setupState === "confirmation-unavailable"
                     ? "The wallet or configured fork could not confirm the submitted hash. Check again first; retry is offered only after the server proves that the step had no effect."
-                    : "Save your draft before activation. This local fork creation uses up to two explicit token approvals (35,000 USDC and 5 WETH to the reviewed factory spender), followed by exactly one wallet transaction that creates, funds, configures, and authorizes the Space through the configured Aqua integration. Trading starts only after server verification."
+                    : "Save your draft before activation. This local fork creation uses up to two exact token approvals for the amounts above to the reviewed factory spender, followed by exactly one wallet transaction that creates, funds, configures, and authorizes the Space through the configured Aqua integration. Trading starts only after server verification."
                 : "Saving creates a durable draft. Activation or a rule change requires another exact signature; a rejected wallet request leaves the previous state unchanged."}
             </p>
           </div>

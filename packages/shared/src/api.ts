@@ -17,6 +17,7 @@ import {
 } from "./primitives.js";
 import { positionSchema } from "./portfolio.js";
 import { executionSchema } from "./execution.js";
+import { quoteSchema } from "./quote.js";
 import {
   atomicSettlementIntentSchema,
   atomicSettlementProposalSchema,
@@ -262,6 +263,86 @@ export const solveResponseSchema = z
       .strict(),
   })
   .strict();
+
+export const agentProposalRequestSchema = z
+  .object({
+    message: z.string().trim().min(1).max(1_000),
+    trader: addressSchema,
+    chainId: chainIdSchema,
+  })
+  .strict();
+
+export const agentStatusSchema = z
+  .object({
+    provider: z.literal("openrouter"),
+    configured: z.boolean(),
+    model: z.string().min(1).max(128),
+    custody: z.literal("wallet-approved"),
+  })
+  .strict();
+
+const agentToolTraceSchema = z
+  .object({
+    tool: z.string().min(1).max(64),
+    status: z.enum(["SUCCEEDED", "FAILED"]),
+  })
+  .strict();
+
+const agentSimulationSchema = z
+  .object({
+    status: z.enum(["SUCCEEDED", "REVERTED", "STALE", "AUTHORIZATION_PENDING"]),
+    gasEstimate: uint256StringSchema,
+    reason: z.string().max(500).optional(),
+  })
+  .strict();
+
+const agentSelectedSpaceSchema = z
+  .object({
+    id: identifierSchema,
+    name: z.string().min(1).max(100),
+    owner: addressSchema,
+  })
+  .strict();
+
+export const agentProposalResponseSchema = z.discriminatedUnion("status", [
+  z
+    .object({
+      status: z.literal("READY"),
+      provider: z.literal("openrouter"),
+      model: z.string().min(1).max(128),
+      selectedSpace: agentSelectedSpaceSchema,
+      quote: quoteSchema,
+      proposal: atomicSettlementProposalSchema,
+      proposalHash: bytes32Schema,
+      simulation: agentSimulationSchema,
+      minimumReceivedValue: uint256StringSchema,
+      explanation: z.string().min(1).max(1_000),
+      toolTrace: z.array(agentToolTraceSchema).min(2).max(16),
+    })
+    .strict(),
+  z
+    .object({
+      status: z.literal("BLOCKED"),
+      provider: z.literal("openrouter"),
+      model: z.string().min(1).max(128),
+      reason: z.string().min(1).max(500),
+      toolTrace: z.array(agentToolTraceSchema).min(1).max(16),
+    })
+    .strict(),
+  z
+    .object({
+      status: z.literal("UNAVAILABLE"),
+      provider: z.literal("openrouter"),
+      model: z.string().min(1).max(128),
+      reason: z.literal("Agent unavailable"),
+      toolTrace: z.array(agentToolTraceSchema).max(16),
+    })
+    .strict(),
+]);
+
+export type AgentProposalRequest = z.infer<typeof agentProposalRequestSchema>;
+export type AgentStatus = z.infer<typeof agentStatusSchema>;
+export type AgentProposalResponse = z.infer<typeof agentProposalResponseSchema>;
 
 export const executeResponseSchema = z
   .object({

@@ -668,3 +668,5 @@ export async function createPrivyNodeClientFromEnv(): Promise<PrivyNodeClient> {
   const { PrivyClient } = await import("@privy-io/node");
   return new PrivyClient({ appId, appSecret });
 }
+
+export * from "./delegated.js";

@@ -37,6 +37,15 @@ import {
   submitIntentResponseSchema,
   unsignedTransactionRequestSchema,
   atomicSettlementIntentSchema,
+  agentProposalRequestSchema,
+  agentProposalResponseSchema,
+  agentStatusSchema,
+  delegatedAuthorizationSchema,
+  delegatedRecoveryRequestSchema,
+  delegatedSessionIdRequestSchema,
+  delegatedSessionResponseSchema,
+  delegatedStartRequestSchema,
+  delegatedStatusSchema,
   spaceChangesResponseSchema,
   spaceListQuerySchema,
   spaceMutationConfirmRequestSchema,
@@ -54,6 +63,14 @@ import { IdempotencyConflictError } from "../db/repository.js";
 import { hashCanonical } from "../solver/hash.js";
 import { StructuredLogger } from "../observability.js";
 import {
+  OpenRouterAgent,
+  openRouterAgentOptionsFromEnv,
+} from "../agent/openrouter.js";
+import {
+  DelegatedSessionService,
+  UnavailableDelegatedWallet,
+} from "../agent/delegated.js";
+import {
   riskCertificateRequestSchema,
   riskCertificateResponseSchema,
   riskEvaluateRequestSchema,
@@ -64,6 +81,8 @@ import {
 const MAX_BODY_BYTES = 1_048_576;
 export interface ApiServerOptions {
   readonly service?: AurkaService;
+  readonly agent?: OpenRouterAgent;
+  readonly delegated?: DelegatedSessionService;
   readonly requestBodyLimitBytes?: number;
   readonly logger?: StructuredLogger;
 }
@@ -71,6 +90,7 @@ export interface ApiServerOptions {
 export interface ApiServerHandle {
   readonly server: Server;
   readonly service: AurkaService;
+  readonly delegated: DelegatedSessionService;
 }
 
 function requestId(request: IncomingMessage): string {
@@ -289,6 +309,50 @@ export function openApi(): Record<string, unknown> {
       riskCertificateResponseSchema,
     ],
     ["/v1/risk/{positionId}", "get", undefined, riskPositionResponseSchema],
+    ["/v1/agent/status", "get", undefined, agentStatusSchema],
+    [
+      "/v1/agent/propose",
+      "post",
+      agentProposalRequestSchema,
+      agentProposalResponseSchema,
+    ],
+    ["/v1/delegated/status", "get", undefined, delegatedStatusSchema],
+    [
+      "/v1/delegated/sessions/authorize",
+      "post",
+      delegatedAuthorizationSchema,
+      delegatedSessionResponseSchema,
+    ],
+    [
+      "/v1/delegated/sessions/{id}",
+      "get",
+      undefined,
+      delegatedSessionResponseSchema,
+    ],
+    [
+      "/v1/delegated/sessions/{id}/start",
+      "post",
+      delegatedStartRequestSchema,
+      delegatedSessionResponseSchema,
+    ],
+    [
+      "/v1/delegated/sessions/{id}/stop",
+      "post",
+      delegatedSessionIdRequestSchema,
+      delegatedSessionResponseSchema,
+    ],
+    [
+      "/v1/delegated/sessions/{id}/reconcile",
+      "post",
+      delegatedSessionIdRequestSchema,
+      delegatedSessionResponseSchema,
+    ],
+    [
+      "/v1/delegated/sessions/{id}/recover",
+      "post",
+      delegatedRecoveryRequestSchema,
+      delegatedSessionResponseSchema,
+    ],
   ];
   const content = (schema: z.ZodType) => ({
     "application/json": {
@@ -405,6 +469,8 @@ async function handle(
   request: IncomingMessage,
   response: ServerResponse,
   service: AurkaService,
+  agent: OpenRouterAgent,
+  delegated: DelegatedSessionService,
   limit: number,
 ): Promise<void> {
   const url = new URL(request.url ?? "/", "http://localhost");
@@ -436,6 +502,36 @@ async function handle(
         "content-type": "application/json; charset=utf-8",
       });
       response.end(JSON.stringify(openApi()));
+      return;
+    }
+
+    if (method === "GET" && path === "/v1/agent/status") {
+      sendSuccess(response, 200, agent.status(), request, agentStatusSchema);
+      return;
+    }
+
+    if (method === "GET" && path === "/v1/delegated/status") {
+      sendSuccess(
+        response,
+        200,
+        await delegated.status(),
+        request,
+        delegatedStatusSchema,
+      );
+      return;
+    }
+
+    const delegatedSessionMatch = path.match(
+      /^\/v1\/delegated\/sessions\/([^/]+)$/,
+    );
+    if (method === "GET" && delegatedSessionMatch) {
+      sendSuccess(
+        response,
+        200,
+        delegated.get(decodeURIComponent(delegatedSessionMatch[1]!)),
+        request,
+        delegatedSessionResponseSchema,
+      );
       return;
     }
 
@@ -559,6 +655,127 @@ async function handle(
     }
 
     const payload = method === "POST" ? await body(request, limit) : undefined;
+    if (method === "POST" && path === "/v1/agent/propose") {
+      const input = agentProposalRequestSchema.parse(payload);
+      const controller = new AbortController();
+      const abort = () => controller.abort();
+      request.once("aborted", abort);
+      response.once("close", abort);
+      try {
+        const result = await agent.propose(input, controller.signal);
+        if (controller.signal.aborted || response.writableEnded) return;
+        sendSuccess(
+          response,
+          200,
+          result,
+          request,
+          agentProposalResponseSchema,
+        );
+      } finally {
+        request.off("aborted", abort);
+        response.off("close", abort);
+      }
+      return;
+    }
+    if (method === "POST" && path === "/v1/delegated/sessions/authorize") {
+      const input = delegatedAuthorizationSchema.parse(payload);
+      const result = await withIdempotency(
+        service,
+        request,
+        path,
+        payload,
+        async () => ({
+          statusCode: 201,
+          data: await delegated.authorize(input),
+        }),
+      );
+      sendSuccess(
+        response,
+        result.statusCode,
+        result.data,
+        request,
+        delegatedSessionResponseSchema,
+      );
+      return;
+    }
+    const delegatedStartMatch = path.match(
+      /^\/v1\/delegated\/sessions\/([^/]+)\/start$/,
+    );
+    if (method === "POST" && delegatedStartMatch) {
+      const input = delegatedStartRequestSchema.parse(payload);
+      const sessionId = decodeURIComponent(delegatedStartMatch[1]!);
+      const result = await withIdempotency(
+        service,
+        request,
+        path,
+        payload,
+        async () => ({
+          statusCode: 200,
+          data: await delegated.start(sessionId, input.message),
+        }),
+      );
+      sendSuccess(
+        response,
+        result.statusCode,
+        result.data,
+        request,
+        delegatedSessionResponseSchema,
+      );
+      return;
+    }
+    const delegatedStopMatch = path.match(
+      /^\/v1\/delegated\/sessions\/([^/]+)\/(stop|reconcile)$/,
+    );
+    if (method === "POST" && delegatedStopMatch) {
+      const sessionId = decodeURIComponent(delegatedStopMatch[1]!);
+      const operation = delegatedStopMatch[2];
+      const result = await withIdempotency(
+        service,
+        request,
+        path,
+        payload,
+        async () => ({
+          statusCode: 200,
+          data:
+            operation === "stop"
+              ? await delegated.stop(sessionId)
+              : await delegated.reconcile(sessionId),
+        }),
+      );
+      sendSuccess(
+        response,
+        result.statusCode,
+        result.data,
+        request,
+        delegatedSessionResponseSchema,
+      );
+      return;
+    }
+    const delegatedRecoveryMatch = path.match(
+      /^\/v1\/delegated\/sessions\/([^/]+)\/recover$/,
+    );
+    if (method === "POST" && delegatedRecoveryMatch) {
+      const input = delegatedRecoveryRequestSchema.parse(payload);
+      const sessionId = decodeURIComponent(delegatedRecoveryMatch[1]!);
+      const result = await withIdempotency(
+        service,
+        request,
+        path,
+        payload,
+        async () => ({
+          statusCode: 200,
+          data: await delegated.recover(sessionId, input),
+        }),
+      );
+      sendSuccess(
+        response,
+        result.statusCode,
+        result.data,
+        request,
+        delegatedSessionResponseSchema,
+      );
+      return;
+    }
     if (method === "POST" && path === "/v1/spaces/prepare") {
       const input = spaceMutationPrepareRequestSchema.parse(payload);
       sendSuccess(
@@ -823,6 +1040,16 @@ export function createApiServer(
   options: ApiServerOptions = {},
 ): ApiServerHandle {
   const service = options.service ?? new AurkaService();
+  const agent =
+    options.agent ??
+    new OpenRouterAgent(service, openRouterAgentOptionsFromEnv());
+  const delegated =
+    options.delegated ??
+    new DelegatedSessionService(
+      service,
+      agent,
+      new UnavailableDelegatedWallet(),
+    );
   const limit = options.requestBodyLimitBytes ?? MAX_BODY_BYTES;
   const logger = options.logger ?? new StructuredLogger();
   const server = createServer((request, response) => {
@@ -832,16 +1059,18 @@ export function createApiServer(
       method: request.method ?? "GET",
       path: request.url ?? "/",
     });
-    void handle(request, response, service, limit).finally(() => {
-      logger.info("api.response", {
-        requestId: id,
-        method: request.method ?? "GET",
-        path: request.url ?? "/",
-        statusCode: response.statusCode,
-      });
-    });
+    void handle(request, response, service, agent, delegated, limit).finally(
+      () => {
+        logger.info("api.response", {
+          requestId: id,
+          method: request.method ?? "GET",
+          path: request.url ?? "/",
+          statusCode: response.statusCode,
+        });
+      },
+    );
   });
-  return { server, service };
+  return { server, service, delegated };
 }
 
 export async function listenApiServer(

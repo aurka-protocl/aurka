@@ -64,6 +64,13 @@
       "when": 1788902400000,
       "tag": "0008_spaces",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1788998400000,
+      "tag": "0009_delegated_agent",
+      "breakpoints": true
     }
   ]
 }

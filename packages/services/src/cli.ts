@@ -10,6 +10,11 @@ import { createApiServer, listenApiServer } from "./api/server.js";
 import { AurkaService } from "./service.js";
 import { JsonRpcHttpTransport } from "./solver/rpc.js";
 import type { ReadinessProbeSet } from "./readiness.js";
+import { createDelegatedSessionServiceFromEnv } from "./agent/delegated.js";
+import {
+  OpenRouterAgent,
+  openRouterAgentOptionsFromEnv,
+} from "./agent/openrouter.js";
 
 const config = loadConfig();
 const command = process.argv[2] ?? "serve";
@@ -43,27 +48,28 @@ if (command === "migrate" || command === "check") {
       "SETTLEMENT_CONTRACT is required when RPC_URL is configured",
     );
   }
-  const handle = createApiServer({
-    service: new AurkaService({
-      database,
-      chainId: config.CHAIN_ID,
-      indexConfirmations: config.INDEX_CONFIRMATIONS,
-      maxIndexerLagBlocks: config.INDEXER_MAX_LAG_BLOCKS,
-      rpcFinalityMaxAgeSeconds: config.RPC_FINALITY_MAX_AGE_SECONDS,
-      readiness: {
-        probeTimeoutMs: config.READINESS_PROBE_TIMEOUT_MS,
-        cacheTtlSeconds: config.READINESS_CACHE_TTL_SECONDS,
-      },
-      ...(!config.RPC_URL ? { provider: new LocalDemoProvider() } : {}),
-      spaceMode: config.RPC_URL ? "fork" : "demo",
-      ...(config.SETTLEMENT_CONTRACT
-        ? { settlementContract: config.SETTLEMENT_CONTRACT }
-        : {}),
-      ...(config.RPC_URL
-        ? { rpcTransport: new JsonRpcHttpTransport(config.RPC_URL) }
-        : {}),
-    }),
+  const service = new AurkaService({
+    database,
+    chainId: config.CHAIN_ID,
+    indexConfirmations: config.INDEX_CONFIRMATIONS,
+    maxIndexerLagBlocks: config.INDEXER_MAX_LAG_BLOCKS,
+    rpcFinalityMaxAgeSeconds: config.RPC_FINALITY_MAX_AGE_SECONDS,
+    readiness: {
+      probeTimeoutMs: config.READINESS_PROBE_TIMEOUT_MS,
+      cacheTtlSeconds: config.READINESS_CACHE_TTL_SECONDS,
+    },
+    ...(!config.RPC_URL ? { provider: new LocalDemoProvider() } : {}),
+    spaceMode: config.RPC_URL ? "fork" : "demo",
+    ...(config.SETTLEMENT_CONTRACT
+      ? { settlementContract: config.SETTLEMENT_CONTRACT }
+      : {}),
+    ...(config.RPC_URL
+      ? { rpcTransport: new JsonRpcHttpTransport(config.RPC_URL) }
+      : {}),
   });
+  const agent = new OpenRouterAgent(service, openRouterAgentOptionsFromEnv());
+  const delegated = await createDelegatedSessionServiceFromEnv(service, agent);
+  const handle = createApiServer({ service, agent, delegated });
   let stopRiskWorker: (() => Promise<void>) | undefined;
   if (config.RISK_RUNTIME_MODULE) {
     const runtime = (await import(

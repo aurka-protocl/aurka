@@ -24,6 +24,7 @@
     "fork:start": "pnpm build && forge build && node --env-file=.env packages/services/scripts/fork-space.mjs",
     "fork:reset": "pnpm build && forge build && node --env-file=.env packages/services/scripts/fork-space.mjs --reset",
     "integration:fork-wallet": "node packages/services/scripts/fork-wallet-e2e.mjs",
+    "privy:delegated": "node packages/wallet/scripts/privy-delegated-wallet.mjs",
     "app:dev": "pnpm --filter @aurka/trader-app dev --host 127.0.0.1 --strictPort",
     "app:preview": "pnpm --filter @aurka/trader-app preview --host 127.0.0.1 --strictPort"
   },

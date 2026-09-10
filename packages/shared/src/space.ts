@@ -10,6 +10,24 @@ import {
 import { assetBoundSchema } from "./policy.js";
 
 export const spaceEnvironmentSchema = z.enum(["demo", "fork"]);
+/** Drafts are signed payloads. Bumping this value prevents old fixed-funding
+ * drafts from being silently interpreted as a new owner-selected allocation. */
+export const SPACE_DRAFT_VERSION = 2 as const;
+const decimalAmountSchema = z
+  .string()
+  .regex(
+    /^(0|[1-9][0-9]*)(?:\.[0-9]+)?$/,
+    "Expected a plain decimal amount without signs, exponents or grouping",
+  );
+
+export const spaceFundingSchema = z
+  .object({
+    usdc: decimalAmountSchema,
+    weth: decimalAmountSchema,
+  })
+  .strict();
+
+export type SpaceFunding = z.infer<typeof spaceFundingSchema>;
 export const spaceStateSchema = z.enum([
   "DRAFT",
   "PENDING",
@@ -76,12 +94,15 @@ export const spaceChangeEventTypeSchema = z.enum([
  * signed payload before accepting it. */
 export const spaceDraftSchema = z
   .object({
+    draftVersion: z.literal(SPACE_DRAFT_VERSION),
     id: identifierSchema,
     name: z.string().trim().min(1).max(100),
     ownerAddress: addressSchema,
     chainId: z.number().int().positive().safe(),
     assets: z.array(assetBoundSchema).min(2).max(32),
     maximumTransactionValue: uint256StringSchema,
+    /** Human decimal amounts; chain adapters convert these to raw units. */
+    funding: spaceFundingSchema,
   })
   .strict();
 

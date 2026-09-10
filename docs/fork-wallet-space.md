@@ -63,12 +63,12 @@ known accounts.
 
 New fork Spaces use an ordinary `eth_sendTransaction` to
 `AurkaSpaceVaultFactory.createAndInitializeSpace`. The reviewed call deploys the
-deterministic owner vault, pulls exactly **35,000 USDC + 5 WETH**, configures
-the policy and price protection, calls the real Aqua `ship(...)` registration
-with the exact strategy bytes, derives capacity from the post-funding onchain
-state, and activates trading. There is no normal `wallet_getCapabilities` probe,
-`wallet_sendCalls` batch, separate capacity transaction, or eleven-transaction
-fallback.
+deterministic owner vault, pulls exactly the owner-selected USDC and WETH
+amounts shown in the signed draft, configures the policy and price protection,
+calls the real Aqua `ship(...)` registration with the exact strategy bytes,
+derives capacity from the post-funding onchain state, and activates trading.
+There is no normal `wallet_getCapabilities` probe, `wallet_sendCalls` batch,
+separate capacity transaction, or eleven-transaction fallback.
 
 If the owner has insufficient allowance, the review shows one exact approval for
 each required token to the factory spender. Those approvals are separate
@@ -93,11 +93,12 @@ obtained through the real WETH deposit function. No token code is replaced.
 1. Open the canonical app, open the Space's Settings route, choose Alice in the
    wallet, and connect on chain 31337. Inspect holdings, controlling account,
    40% maximum WETH allocation, and the 5,000 reference-unit transaction limit.
-2. Choose **Create Space**. Review the exact funding, bounds, limit, and any
-   token approval spender shown by the app. Approve only the disclosed USDC/WETH
-   prerequisites if requested, then approve the one factory setup transaction.
-   The Space is ready only after its canonical receipt and initialized state are
-   verified; no Grant allowance or Authorize capacity step follows.
+2. Choose **Create Space**. Enter and review the exact owner-selected USDC/WETH
+   funding, bounds, limit, and any token approval spender shown by the app.
+   Approve only the disclosed USDC/WETH prerequisites if requested, then approve
+   the one factory setup transaction. The Space is ready only after its
+   canonical receipt and initialized state are verified; no Grant allowance or
+   Authorize capacity step follows.
 3. Open the same app in another profile at the Space's `/trade/:spaceId` route
    with Bob selected. Connect, request the supported WETH amount, and inspect
    the quote. The screen identifies the real Chainlink source, its normalized
@@ -193,6 +194,8 @@ forge test --match-contract 'AurkaPolicyRegistryTest|AurkaSwapVMRouterTest|Direc
   labelled unsigned demo. Fork mode uses the same canonical routes and shell;
   its wallet state is shared by the header, Space settings, and trade flow.
 
+The runner’s pre-seeded fixture Spaces retain their documented preset balances;
+new real-mode Spaces use the exact owner-selected funding in each signed draft.
 Fixture mode uses a seeded WETH reference price of 3200 so whole reference-unit
 fills map exactly to 18-decimal WETH. Real mode uses the pinned Chainlink round
 and explicitly records whole-settlement-unit normalization; it does not silently
