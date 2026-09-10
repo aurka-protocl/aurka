@@ -712,7 +712,11 @@ async function main() {
       const url = new URL(request.url, "http://localhost");
       if (
         request.method === "POST" &&
-        ["/fork/spaces/prepare", "/fork/spaces/confirm"].includes(url.pathname)
+        [
+          "/fork/spaces/prepare",
+          "/fork/spaces/confirm",
+          "/fork/spaces/reconcile",
+        ].includes(url.pathname)
       ) {
         const chunks = [];
         let size = 0;
@@ -723,20 +727,35 @@ async function main() {
         }
         const body = JSON.parse(Buffer.concat(chunks).toString());
         const work = lifecycleQueue.then(() =>
-          url.pathname.endsWith("/confirm")
-            ? body.batch
-              ? lifecycle.confirmBatch(
-                  body.spaceId,
-                  body.hashes,
-                  body.operation,
-                )
-              : lifecycle.confirm(
-                  body.spaceId,
-                  body.step,
-                  body.hash,
-                  body.operation,
-                )
-            : lifecycle.prepare(body.spaceId, body.operation),
+          url.pathname.endsWith("/reconcile")
+            ? lifecycle.reconcileBatch(
+                body.spaceId,
+                body.hashes,
+                body.operation,
+                body.batchId,
+                body.batchPlanId,
+                body.batchCommitment,
+                body.atomic,
+                body.status,
+              )
+            : url.pathname.endsWith("/confirm")
+              ? body.batch
+                ? lifecycle.confirmBatch(
+                    body.spaceId,
+                    body.hashes,
+                    body.operation,
+                    body.batchId,
+                    body.batchPlanId,
+                    body.batchCommitment,
+                    body.atomic,
+                  )
+                : lifecycle.confirm(
+                    body.spaceId,
+                    body.step,
+                    body.hash,
+                    body.operation,
+                  )
+              : lifecycle.prepare(body.spaceId, body.operation),
         );
         lifecycleQueue = work.catch(() => {});
         const result = await work;

@@ -56,6 +56,29 @@ known accounts.
 - Protocol fee recipient: account index 2; the manifest also identifies the
   public test solver fee recipient.
 
+### Space creation batching
+
+The reduced-prompt creation path requires an EIP-5792 wallet that reports
+`atomic.status` as `supported` or `ready` for chain 31337 through
+`wallet_getCapabilities`, and returns the standard `{ id }` object from
+`wallet_sendCalls`. The app submits the reviewed owner-scoped deployment,
+configuration, funding, allowance, and MockAqua setup calls with
+`atomicRequired: true`. It accepts only a status-200 result with `atomic: true`;
+the server verifies the owner execution trace against the immutable reviewed
+call plan before advancing the Space.
+
+On that supported path, the intended owner interactions are: one draft
+signature, one atomic setup batch, and one capacity-authorization transaction
+(three total). This is a capability target, not evidence of compatibility with
+every browser wallet. Wallets without EIP-5792 atomic support use the labelled
+fallback of eleven separate setup transactions, plus the draft signature; the
+fallback is never presented as meeting the three-interaction target. A status
+400 is safe to retry. Status 500/600 outcomes remain in local storage until the
+server verifies the canonical receipt(s): a verified atomic full revert releases
+the old identity for a fresh batch, while a verified successful direct prefix
+continues from the next frozen call. Ambiguous outcomes or RPC outages retain
+the batch and never silently resubmit funding.
+
 Actual fork tokens:
 
 | Token | Ethereum address                             | Decimals |

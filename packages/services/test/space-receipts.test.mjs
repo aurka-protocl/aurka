@@ -76,6 +76,12 @@ describe("fork Space receipt authority", () => {
 describe("atomic Space batch receipt authority", () => {
   const second = { to: owner, data: "0xabcd", value: "0x0" };
 
+  function atomicClient(trace) {
+    const client = rpc();
+    client.request = async () => trace;
+    return client;
+  }
+
   it("accepts one canonical receipt only when its owner calls exactly match the plan", async () => {
     const client = rpc();
     client.request = async () => ({
@@ -149,6 +155,95 @@ describe("atomic Space batch receipt authority", () => {
     ).rejects.toThrow("exactly the reviewed");
   });
 
+  it.each([
+    {
+      name: "a planned inner call",
+      trace: {
+        type: "CALL",
+        from: owner,
+        calls: [
+          {
+            type: "CALL",
+            from: owner,
+            to: target,
+            input: expected.data,
+            value: "0x0",
+            error: "execution reverted",
+          },
+          {
+            type: "CALL",
+            from: owner,
+            to: owner,
+            input: second.data,
+            value: "0x0",
+          },
+        ],
+      },
+    },
+    {
+      name: "a reverted ancestor",
+      trace: {
+        type: "CALL",
+        from: owner,
+        error: "execution reverted",
+        calls: [
+          {
+            type: "CALL",
+            from: owner,
+            to: target,
+            input: expected.data,
+            value: "0x0",
+          },
+          {
+            type: "CALL",
+            from: owner,
+            to: owner,
+            input: second.data,
+            value: "0x0",
+          },
+        ],
+      },
+    },
+    {
+      name: "an outer-success inner failure envelope",
+      trace: {
+        type: "CALL",
+        from: owner,
+        calls: [
+          {
+            type: "CALL",
+            from: owner,
+            to: target,
+            input: expected.data,
+            value: "0x0",
+            error: "execution reverted",
+          },
+          {
+            type: "CALL",
+            from: owner,
+            to: owner,
+            input: second.data,
+            value: "0x0",
+          },
+        ],
+      },
+    },
+  ])(
+    "rejects $name even when the outer receipt succeeds",
+    async ({ trace }) => {
+      await expect(
+        verifySpaceBatchReceipts(
+          atomicClient(trace),
+          31337,
+          owner,
+          [expected, second],
+          [hash],
+          "0",
+        ),
+      ).rejects.toThrow("reverted call or execution ancestor");
+    },
+  );
+
   it("accepts one direct canonical receipt for each reviewed call", async () => {
     const nextHash = `0x${"55".repeat(32)}`;
     const client = rpc();
@@ -178,6 +273,484 @@ describe("atomic Space batch receipt authority", () => {
         "0",
       ),
     ).resolves.toHaveLength(2);
+  });
+
+  it("keeps an activation batch valid after capacity is appended and a response is retried", async () => {
+    const directory = mkdtempSync(path.join(tmpdir(), "aurka-batch-retry-"));
+    const spaceId = "space:batch-retry";
+    const nextHash = `0x${"66".repeat(32)}`;
+    const steps = Array.from({ length: 10 }, (_, index) => ({
+      label: `step-${index}`,
+      transaction: {
+        to: target,
+        data: `0x${String(index + 1).padStart(4, "0")}`,
+        value: "0x0",
+      },
+    }));
+    const submittedSteps = steps.map((step) => ({
+      ...step,
+      transaction: { ...step.transaction },
+    }));
+    const client = rpc();
+    client.request = async () => ({
+      type: "CALL",
+      from: owner,
+      calls: submittedSteps.map(({ transaction }) => ({
+        type: "CALL",
+        from: owner,
+        to: transaction.to,
+        input: transaction.data,
+        value: transaction.value,
+      })),
+    });
+    client.getTransaction = async ({ hash: requested }) => ({
+      from: owner,
+      to: requested === nextHash ? second.to : target,
+      input: requested === nextHash ? second.data : expected.data,
+      value: 0n,
+      chainId: 31337,
+      blockHash,
+    });
+    client.getTransactionReceipt = async ({ hash: requested }) => ({
+      status: "success",
+      from: owner,
+      to: requested === nextHash ? second.to : target,
+      blockHash,
+      blockNumber: requested === nextHash ? 11n : 10n,
+    });
+    const identity = {
+      id: spaceId,
+      mode: "fork",
+      state: "DRAFT",
+      ownerAddress: owner,
+    };
+    const draft = { ownerAddress: owner };
+    const lifecycle = new ForkSpaceLifecycle({
+      client,
+      manifest: { chainId: 31337 },
+      providers: new Map(),
+      file: path.join(directory, "setup.json"),
+      service: {
+        getSpace: () => ({ identity, draft }),
+        repository: {
+          setSpaceReceiptStatus: () => {},
+          saveSpaceIdentity: (next) => Object.assign(identity, next),
+        },
+      },
+    });
+    lifecycle.plans[spaceId] = {
+      definition: { positionId: spaceId },
+      draft,
+      treasury: target,
+      minimumBlock: "0",
+      complete: false,
+      receipts: [],
+      steps,
+    };
+    lifecycle.prepare = async () => ({ complete: false });
+    try {
+      await lifecycle.confirmBatch(spaceId, [hash], "ACTIVATE", "wallet-1");
+      lifecycle.plans[spaceId].steps.push({
+        label: "capacity",
+        transaction: second,
+      });
+      lifecycle.plans[spaceId].receipts.push({
+        hash: nextHash,
+        blockHash,
+        blockNumber: "11",
+      });
+      lifecycle.usedReceipts[nextHash] = true;
+      await lifecycle.confirmBatch(spaceId, [hash], "ACTIVATE", "wallet-1");
+      expect(lifecycle.plans[spaceId].batchPlan.coveredCount).toBe(10);
+      expect(lifecycle.plans[spaceId].batchPlan.calls).toHaveLength(10);
+      expect(lifecycle.plans[spaceId].receipts).toHaveLength(11);
+      expect(lifecycle.plans[spaceId].receipts.at(-1).hash).toBe(nextHash);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps an UPDATE batch valid after its separate reauthorization step is appended", async () => {
+    const directory = mkdtempSync(path.join(tmpdir(), "aurka-update-batch-"));
+    const spaceId = "space:update-batch";
+    const nextHash = `0x${"77".repeat(32)}`;
+    const updateSteps = [expected, second].map((transaction, index) => ({
+      label: `update-${index}`,
+      transaction,
+    }));
+    const submittedUpdateSteps = updateSteps.map((step) => ({
+      ...step,
+      transaction: { ...step.transaction },
+    }));
+    const client = rpc();
+    client.request = async () => ({
+      type: "CALL",
+      from: owner,
+      calls: submittedUpdateSteps.map(({ transaction }) => ({
+        type: "CALL",
+        from: owner,
+        to: transaction.to,
+        input: transaction.data,
+        value: transaction.value,
+      })),
+    });
+    client.getTransaction = async ({ hash: requested }) => ({
+      from: owner,
+      to: requested === nextHash ? target : target,
+      input: requested === nextHash ? expected.data : expected.data,
+      value: 0n,
+      chainId: 31337,
+      blockHash,
+    });
+    client.getTransactionReceipt = async ({ hash: requested }) => ({
+      status: "success",
+      from: owner,
+      to: target,
+      blockHash,
+      blockNumber: requested === nextHash ? 11n : 10n,
+    });
+    const identity = {
+      id: spaceId,
+      mode: "fork",
+      state: "ACTIVE",
+      ownerAddress: owner,
+      treasuryAddress: target,
+    };
+    const draft = { ownerAddress: owner };
+    const lifecycle = new ForkSpaceLifecycle({
+      client,
+      manifest: { chainId: 31337 },
+      providers: new Map(),
+      file: path.join(directory, "setup.json"),
+      service: {
+        getSpace: () => ({ identity, draft, position: {} }),
+        repository: {
+          setSpaceReceiptStatus: () => {},
+          saveSpaceIdentity: (next) => Object.assign(identity, next),
+        },
+      },
+    });
+    lifecycle.operations[`${spaceId}:UPDATE`] = {
+      definition: { positionId: spaceId },
+      draft,
+      treasury: target,
+      operation: "UPDATE",
+      minimumBlock: "0",
+      complete: false,
+      receipts: [],
+      steps: updateSteps,
+    };
+    lifecycle.prepareOperation = async () => ({ complete: false });
+    lifecycle.recordPolicyReceipt = async () => {};
+    try {
+      await lifecycle.confirmBatch(spaceId, [hash], "UPDATE", "wallet-2");
+      lifecycle.operations[`${spaceId}:UPDATE`].steps.push({
+        label: "capacity",
+        transaction: expected,
+      });
+      lifecycle.operations[`${spaceId}:UPDATE`].receipts.push({
+        hash: nextHash,
+        blockHash,
+        blockNumber: "11",
+      });
+      lifecycle.usedReceipts[nextHash] = true;
+      await lifecycle.confirmBatch(spaceId, [hash], "UPDATE", "wallet-2");
+      expect(
+        lifecycle.operations[`${spaceId}:UPDATE`].batchPlan.coveredCount,
+      ).toBe(2);
+      expect(
+        lifecycle.operations[`${spaceId}:UPDATE`].batchPlan.calls,
+      ).toHaveLength(2);
+      expect(lifecycle.operations[`${spaceId}:UPDATE`].receipts).toHaveLength(
+        3,
+      );
+      expect(
+        lifecycle.operations[`${spaceId}:UPDATE`].receipts.at(-1).hash,
+      ).toBe(nextHash);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("verifies a complete atomic revert, records it, and permits a new batch identity", async () => {
+    const directory = mkdtempSync(path.join(tmpdir(), "aurka-batch-revert-"));
+    const spaceId = "space:batch-revert";
+    const failedHash = `0x${"88".repeat(32)}`;
+    const batchSteps = [expected, second].map((transaction, index) => ({
+      label: `batch-${index}`,
+      transaction,
+    }));
+    const identity = {
+      id: spaceId,
+      mode: "fork",
+      state: "DRAFT",
+      ownerAddress: owner,
+    };
+    const changes = [];
+    const client = rpc({ receipt: { status: "reverted" } });
+    client.request = async () => ({
+      type: "CALL",
+      from: owner,
+      error: "execution reverted",
+      calls: batchSteps.map(({ transaction }) => ({
+        type: "CALL",
+        from: owner,
+        to: transaction.to,
+        input: transaction.data,
+        value: transaction.value,
+      })),
+    });
+    const lifecycle = new ForkSpaceLifecycle({
+      client,
+      manifest: { chainId: 31337 },
+      file: path.join(directory, "setup.json"),
+      service: {
+        getSpace: () => ({ identity, draft: { ownerAddress: owner } }),
+        repository: {
+          setSpaceReceiptStatus: () => {},
+          saveSpaceIdentity: (next) => Object.assign(identity, next),
+          saveSpaceChange: (change) => changes.push(change),
+        },
+      },
+    });
+    lifecycle.plans[spaceId] = {
+      definition: { positionId: spaceId },
+      draft: { ownerAddress: owner },
+      complete: false,
+      receipts: [],
+      steps: batchSteps,
+    };
+    const offered = await lifecycle.prepare(spaceId);
+    lifecycle.prepare = async () => ({ complete: false, step: 0 });
+    const recovered = await lifecycle.reconcileBatch(
+      spaceId,
+      [failedHash],
+      "ACTIVATE",
+      "wallet-failed",
+      offered.batchPlanId,
+      offered.batchCommitment,
+      true,
+      500,
+    );
+    expect(recovered).toMatchObject({ complete: false });
+    expect(lifecycle.plans[spaceId].receipts).toHaveLength(0);
+    expect(lifecycle.plans[spaceId].batchPlan).toMatchObject({
+      recovery: {
+        outcome: "RETRYABLE_FULL_REVERT",
+        walletBatchId: "wallet-failed",
+      },
+    });
+    expect(lifecycle.plans[spaceId].batchPlan.walletBatchId).toBeUndefined();
+    expect(changes).toContainEqual(
+      expect.objectContaining({ status: "FAILED", receiptHash: failedHash }),
+    );
+    await expect(
+      lifecycle.reconcileBatch(
+        spaceId,
+        [failedHash],
+        "ACTIVATE",
+        "wallet-failed",
+        offered.batchPlanId,
+        offered.batchCommitment,
+        true,
+        500,
+      ),
+    ).resolves.toMatchObject({ complete: false });
+    expect(changes).toHaveLength(1);
+    rmSync(directory, { recursive: true, force: true });
+  });
+
+  it("continues only from a verified successful direct prefix after a partial result", async () => {
+    const directory = mkdtempSync(path.join(tmpdir(), "aurka-batch-prefix-"));
+    const spaceId = "space:batch-prefix";
+    const prefixHash = `0x${"99".repeat(32)}`;
+    const steps = [
+      expected,
+      second,
+      { to: target, data: "0xbeef", value: "0x0" },
+    ].map((transaction, index) => ({ label: `step-${index}`, transaction }));
+    const identity = {
+      id: spaceId,
+      mode: "fork",
+      state: "DRAFT",
+      ownerAddress: owner,
+    };
+    const client = rpc();
+    client.getTransaction = async () => ({
+      from: owner,
+      to: expected.to,
+      input: expected.data,
+      value: 0n,
+      chainId: 31337,
+      blockHash,
+    });
+    const lifecycle = new ForkSpaceLifecycle({
+      client,
+      manifest: { chainId: 31337 },
+      file: path.join(directory, "setup.json"),
+      service: {
+        getSpace: () => ({ identity, draft: { ownerAddress: owner } }),
+        repository: {
+          setSpaceReceiptStatus: () => {},
+          saveSpaceIdentity: (next) => Object.assign(identity, next),
+        },
+      },
+    });
+    lifecycle.plans[spaceId] = {
+      definition: { positionId: spaceId },
+      draft: { ownerAddress: owner },
+      complete: false,
+      receipts: [],
+      steps,
+    };
+    const offered = await lifecycle.prepare(spaceId);
+    lifecycle.prepare = async () => ({ complete: false, step: 1 });
+    await expect(
+      lifecycle.reconcileBatch(
+        spaceId,
+        [prefixHash],
+        "ACTIVATE",
+        "wallet-partial",
+        offered.batchPlanId,
+        offered.batchCommitment,
+        false,
+        600,
+      ),
+    ).resolves.toMatchObject({ complete: false, step: 1 });
+    expect(lifecycle.plans[spaceId].receipts).toHaveLength(1);
+    expect(lifecycle.plans[spaceId].receipts[0].hash).toBe(prefixHash);
+    expect(lifecycle.plans[spaceId].batchPlan.recovery).toMatchObject({
+      outcome: "CONTINUED_SUCCESSFUL_PREFIX",
+      recoveredCount: 1,
+    });
+    rmSync(directory, { recursive: true, force: true });
+  });
+
+  it("keeps the failed batch when trace verification is unavailable", async () => {
+    const directory = mkdtempSync(path.join(tmpdir(), "aurka-batch-outage-"));
+    const spaceId = "space:batch-outage";
+    const failedHash = `0x${"aa".repeat(32)}`;
+    const identity = {
+      id: spaceId,
+      mode: "fork",
+      state: "DRAFT",
+      ownerAddress: owner,
+    };
+    const client = rpc({ receipt: { status: "reverted" } });
+    client.request = async () => {
+      throw new Error("RPC unavailable");
+    };
+    const lifecycle = new ForkSpaceLifecycle({
+      client,
+      manifest: { chainId: 31337 },
+      file: path.join(directory, "setup.json"),
+      service: {
+        getSpace: () => ({ identity, draft: { ownerAddress: owner } }),
+        repository: { setSpaceReceiptStatus: () => {} },
+      },
+    });
+    lifecycle.plans[spaceId] = {
+      definition: { positionId: spaceId },
+      draft: { ownerAddress: owner },
+      complete: false,
+      receipts: [],
+      steps: [
+        { label: "one", transaction: expected },
+        { label: "two", transaction: second },
+      ],
+    };
+    const offered = await lifecycle.prepare(spaceId);
+    lifecycle.plans[spaceId].batchPlan.walletBatchId = "wallet-outage";
+    await expect(
+      lifecycle.reconcileBatch(
+        spaceId,
+        [failedHash],
+        "ACTIVATE",
+        "wallet-outage",
+        offered.batchPlanId,
+        offered.batchCommitment,
+        true,
+        500,
+      ),
+    ).rejects.toThrow("cannot verify");
+    expect(lifecycle.plans[spaceId].batchPlan.walletBatchId).toBe(
+      "wallet-outage",
+    );
+    expect(lifecycle.plans[spaceId].batchPlan.recovery).toBeUndefined();
+    rmSync(directory, { recursive: true, force: true });
+  });
+
+  it("persists an explicit repair state when a partial result includes a reverted call", async () => {
+    const directory = mkdtempSync(path.join(tmpdir(), "aurka-batch-repair-"));
+    const spaceId = "space:batch-repair";
+    const successHash = `0x${"ab".repeat(32)}`;
+    const failedHash = `0x${"ac".repeat(32)}`;
+    const steps = [
+      expected,
+      second,
+      { to: target, data: "0xbeef", value: "0x0" },
+    ].map((transaction, index) => ({ label: `step-${index}`, transaction }));
+    const identity = {
+      id: spaceId,
+      mode: "fork",
+      state: "DRAFT",
+      ownerAddress: owner,
+    };
+    const client = rpc();
+    client.getTransaction = async ({ hash: requested }) => ({
+      from: owner,
+      to: requested === successHash ? expected.to : second.to,
+      input: requested === successHash ? expected.data : second.data,
+      value: 0n,
+      chainId: 31337,
+      blockHash,
+    });
+    client.getTransactionReceipt = async ({ hash: requested }) => ({
+      status: requested === successHash ? "success" : "reverted",
+      from: owner,
+      to: requested === successHash ? expected.to : second.to,
+      blockHash,
+      blockNumber: requested === successHash ? 10n : 11n,
+    });
+    const lifecycle = new ForkSpaceLifecycle({
+      client,
+      manifest: { chainId: 31337 },
+      file: path.join(directory, "setup.json"),
+      service: {
+        getSpace: () => ({ identity, draft: { ownerAddress: owner } }),
+        repository: {
+          setSpaceReceiptStatus: () => {},
+          saveSpaceIdentity: (next) => Object.assign(identity, next),
+        },
+      },
+    });
+    lifecycle.plans[spaceId] = {
+      definition: { positionId: spaceId },
+      draft: { ownerAddress: owner },
+      complete: false,
+      receipts: [],
+      steps,
+    };
+    const offered = await lifecycle.prepare(spaceId);
+    await expect(
+      lifecycle.reconcileBatch(
+        spaceId,
+        [successHash, failedHash],
+        "ACTIVATE",
+        "wallet-repair",
+        offered.batchPlanId,
+        offered.batchCommitment,
+        false,
+        600,
+      ),
+    ).rejects.toThrow("manual repair");
+    expect(lifecycle.plans[spaceId].receipts).toHaveLength(1);
+    expect(lifecycle.plans[spaceId].batchPlan.recovery).toMatchObject({
+      outcome: "REPAIR_REQUIRED",
+      failedIndex: 1,
+    });
+    await expect(lifecycle.prepare(spaceId)).rejects.toThrow("manual repair");
+    rmSync(directory, { recursive: true, force: true });
   });
 });
 

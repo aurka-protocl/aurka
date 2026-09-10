@@ -14,16 +14,21 @@ type Setup = {
   label: string;
   transaction: { to: string; data: string; value: string };
   batch?: readonly { to: string; data: string; value: string }[];
+  batchPlanId?: string;
+  batchCommitment?: string;
 };
 
 type CallsStatus = {
-  id?: string;
-  chainId?: string;
+  id: string;
+  chainId: string;
   status: number;
+  atomic: boolean;
   receipts?: readonly { transactionHash: string; status?: string }[];
 };
 type SavedBatch = {
   id: string;
+  planId: string;
+  commitment: string;
   spaceId: string;
   operation: string;
   owner: string;
@@ -51,7 +56,8 @@ async function supportsAtomicCalls(
       method: "wallet_getCapabilities",
       params: [owner],
     })) as Record<string, { atomic?: { status?: string } }>;
-    const chain = capabilities[`0x${supportedChainId.toString(16)}`];
+    const chain =
+      capabilities[`0x${supportedChainId.toString(16)}`] ?? capabilities["0x0"];
     return ["supported", "ready"].includes(chain?.atomic?.status ?? "");
   } catch {
     return false;
@@ -67,12 +73,22 @@ async function waitForCalls(
       method: "wallet_getCallsStatus",
       params: [id],
     })) as CallsStatus;
-    if (status.id && status.id !== id)
+    if (typeof status.id !== "string" || status.id !== id)
       throw new Error("Wallet returned status for a different setup batch.");
-    if (status.chainId && BigInt(status.chainId) !== BigInt(supportedChainId))
+    if (
+      typeof status.chainId !== "string" ||
+      BigInt(status.chainId) !== BigInt(supportedChainId)
+    )
       throw new Error("Wallet returned batch status for a different chain.");
-    if (status.status === 200 || status.status >= 400) return status;
-    await new Promise((resolve) => setTimeout(resolve, 1000));
+    if (status.status === 100) {
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      continue;
+    }
+    if ((status.status >= 200 && status.status < 300) || status.status >= 400)
+      return status;
+    throw new Error(
+      `Wallet returned an unsupported setup status ${status.status}.`,
+    );
   }
   throw new Error(
     "Atomic setup is still pending. Retry to continue verifying the same wallet batch.",
@@ -124,6 +140,14 @@ export async function activateForkSpace(
       throw new Error(
         "Saved wallet batch does not match this Space operation.",
       );
+    if (
+      batch &&
+      ((setup.batchPlanId && setup.batchPlanId !== batch.planId) ||
+        (setup.batchCommitment && setup.batchCommitment !== batch.commitment))
+    )
+      throw new Error(
+        "Saved wallet batch no longer matches the reviewed plan.",
+      );
     if ((batch || setup.batch?.length) && !pending) {
       if (!batch) {
         const offeredBatch = setup.batch;
@@ -159,11 +183,15 @@ export async function activateForkSpace(
           const id = parseSendCallsResult(result);
           batch = {
             id,
+            planId: setup.batchPlanId ?? "",
+            commitment: setup.batchCommitment ?? "",
             spaceId,
             operation,
             owner,
             chainId: supportedChainId,
           };
+          if (!batch.planId || !batch.commitment)
+            throw new Error("Server did not return the immutable batch plan.");
           localStorage.setItem(`${key}:batch`, JSON.stringify(batch));
         } else {
           progress(
@@ -172,18 +200,68 @@ export async function activateForkSpace(
         }
       }
       if (batch) {
+        const currentChain = await provider.request({ method: "eth_chainId" });
+        const accounts = (await provider.request({
+          method: "eth_accounts",
+        })) as string[];
+        if (
+          Number(currentChain) !== supportedChainId ||
+          accounts[0]?.toLowerCase() !== owner.toLowerCase()
+        )
+          throw new Error(
+            "Wallet account or network changed before batch verification.",
+          );
         progress(`Fund/configure submitted as wallet batch ${batch.id}.`);
         const status = await waitForCalls(provider, batch.id);
-        if (status.status !== 200 || !status.receipts?.length) {
-          if (status.status >= 400) localStorage.removeItem(`${key}:batch`);
+        if (
+          status.status !== 200 ||
+          status.atomic !== true ||
+          !status.receipts?.length ||
+          status.receipts.some((receipt) => receipt.status !== "0x1")
+        ) {
+          if (status.status === 400) {
+            localStorage.removeItem(`${key}:batch`);
+            throw new Error(
+              "Wallet did not submit the atomic setup batch; retry is safe.",
+            );
+          }
+          if (status.status === 500 || status.status === 600) {
+            // The wallet result is only a hint. Keep the saved identity until
+            // the server verifies canonical receipts and authorizes retry or
+            // continuation from the immutable plan.
+            setup = await request("reconcile", {
+              spaceId,
+              operation,
+              batch: true,
+              status: status.status,
+              atomic: status.atomic,
+              batchId: batch.id,
+              batchPlanId: batch.planId,
+              batchCommitment: batch.commitment,
+              hashes:
+                status.receipts?.map((receipt) => receipt.transactionHash) ??
+                [],
+            });
+            localStorage.removeItem(`${key}:batch`);
+            progress(
+              status.status === 500
+                ? "Server verified a complete revert; retrying with a fresh wallet batch."
+                : "Server verified the successful batch prefix; continuing from the next setup step.",
+            );
+            continue;
+          }
           throw new Error(
-            "Atomic setup failed or returned no verifiable receipt; Ready was not claimed.",
+            "Atomic setup requires a successful atomic result; saved batch state was preserved for reconciliation.",
           );
         }
         setup = await request("confirm", {
           spaceId,
           operation,
           batch: true,
+          atomic: true,
+          batchId: batch.id,
+          batchPlanId: batch.planId,
+          batchCommitment: batch.commitment,
           hashes: status.receipts.map((receipt) => receipt.transactionHash),
         });
         localStorage.removeItem(`${key}:batch`);

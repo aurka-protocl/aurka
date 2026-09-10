@@ -66,14 +66,21 @@ rejected with `UNVERIFIED_SPACE_RECEIPT`.
 The local fork gateway supplies the real wallet transaction path:
 
 ```text
-POST /fork/spaces/prepare  {spaceId, operation?: "ACTIVATE"|"UPDATE"|"PAUSE"|"RESUME"}
+POST /fork/spaces/prepare  {spaceId, operation?: "ACTIVATE"|"UPDATE"|"PAUSE"|"RESUME"|"REACTIVATE"}
 POST /fork/spaces/confirm  {spaceId, operation?, step, hash}
+POST /fork/spaces/confirm  {spaceId, operation?, batch: true, atomic: true,
+                            batchId, batchPlanId, batchCommitment, hashes}
+POST /fork/spaces/reconcile {spaceId, operation?, batch: true,
+                             status: 500|600, atomic, batchId,
+                             batchPlanId, batchCommitment, hashes}
 ```
 
 These fork-only endpoints return a plain JSON setup response: either
 `{complete:false, spaceId, ownerAddress, treasury, step, total, label, transaction}`
-or `{complete:true, space}`. The browser sends the prepared transaction through
-the owner wallet. Confirmation checks the configured chain, canonical successful
+or `{complete:true, space}`. When an EIP-5792 atomic setup is available, the
+incomplete response also contains `batch`, `batchPlanId`, and `batchCommitment`.
+The browser sends the prepared transaction or wallet call batch through the
+owner wallet. Confirmation checks the configured chain, canonical successful
 receipt, authorized caller, destination, exact calldata/value, preparation
 block, and receipt reuse. A submitted hash alone cannot activate a Space.
 
@@ -90,11 +97,14 @@ infrastructure.
 The server persists setup steps, verified receipts, and receipt reuse protection
 atomically in `space-setup.json` beside the fork database. The browser persists
 submitted hashes while waiting. Retry/reload resumes verified steps; failed
-wallet transactions do not advance setup. Restart discovers completed Spaces and
-verifies their chain evidence before registering snapshot/quote providers.
-Orphaned receipts downgrade the affected Space and change records; verified
-missing steps can be retried. RPC outages keep receipt history and block
-dependent trading.
+wallet transactions do not advance setup. A verified status-500 atomic revert
+records failed history and releases the old wallet identity for a fresh batch. A
+status-600 result may continue only from a server-verified successful direct
+prefix; ambiguous or unavailable evidence stays pending for reconciliation.
+Restart discovers completed Spaces and verifies their chain evidence before
+registering snapshot/quote providers. Orphaned receipts downgrade the affected
+Space and change records; verified missing steps can be retried. RPC outages
+keep receipt history and block dependent trading.
 
 Save the signed draft first, then prepare `UPDATE` to apply its reviewed bounds
 and limit. Rule/pause receipts produce durable Space-scoped change records.
