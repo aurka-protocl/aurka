@@ -1,0 +1,111 @@
+{
+  "task": "TASK99-006",
+  "validationDate": "2026-09-09",
+  "integrationMode": "real",
+  "scope": "Disposable local Ethereum-mainnet fork; no public-network broadcast",
+  "fork": {
+    "chainId": 31337,
+    "upstreamChainId": 1,
+    "block": 25500000,
+    "deploymentBlock": 25500023,
+    "deploymentBlockHash": "0x09ea810631b7b7285e29b4c0fa71a2be6c6d9328e1df2b29e7ba93dd0d19c362"
+  },
+  "contracts": {
+    "aqua": "0x499943e74fb0ce105688beee8ef2abec5d936d31",
+    "router": "0xd9f214dc9abb3cdaec89ab01c68d722caa98e279",
+    "vaultFactory": "0x629484b75d554ca327a20002561a2a1225a5dd60",
+    "oracle": "0xb1cf93f953586f7b9c26b61ac9342a18c96c27a1",
+    "directAdapter": "0x9e6b222a71644484b6e9eb67bd8400128e0c3fb8",
+    "tokens": {
+      "usdc": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+      "weth": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+    }
+  },
+  "runtimeEvidence": {
+    "aquaCodeHash": "0xced66b74e01f418c698e6aca8560d33957fb2588ea120eadbde74960f138baa2",
+    "usdcCodeHash": "0xd80d4b7c890cb9d6a4893e6b52bc34b56b25335cb13716e0d1d31383e6b41505",
+    "wethCodeHash": "0xd0a06b12ac47863b5c7be4185c2deaad1c61557033f56c7d4ea74429cbb25e23",
+    "executionProgram": "AURKA_DIRECT_PAIR_V1",
+    "upstreamSwapVM": "not used or claimed"
+  },
+  "priceSource": {
+    "quoteCurrency": "USD",
+    "settlementPriceDecimals": 0,
+    "nativeFeedDecimals": 8,
+    "normalization": "nearest whole settlement value; raw round is fingerprinted",
+    "feeds": {
+      "ETH/USD": {
+        "address": "0x5f4ec3df9cbd43714fe2740f5e3616155c5b8419",
+        "roundId": "129127208515966892716",
+        "answer": "177484404526",
+        "observedAt": "1783659203"
+      },
+      "USDC/USD": {
+        "address": "0x8fFfFfd4AfB6115b954Bd326cbe7B4BA576818f6",
+        "roundId": "55340232221128655906",
+        "answer": "99976089",
+        "observedAt": "1783584047"
+      }
+    },
+    "maximumAgeSeconds": 86400,
+    "staleSourceBehavior": "reject; no fixture fallback"
+  },
+  "walletJourney": {
+    "wallets": "Alice owner and Bob trader, ordinary disposable EIP-1193 Anvil wallets",
+    "spaces": 2,
+    "trades": 2,
+    "setupTransactions": [
+      "0xdf29c30c3d97a277490519cbdc3333b891cfae2dde303a9c7e04785a228908fd",
+      "0xcfb14f1215e46d1d6c9234d008372f07c16b6a71c0d2976559fde1b46bd12e7d"
+    ],
+    "fundingApprovalTransactions": [
+      "0x616cef4a1cf5f57f6355a4c36964a08c3feb19143ce5d19073e3cf426fb64346",
+      "0x664d4ee8c984fa88acd3737b4473fc32ad84f3c071150a119537c8c840bbe90a",
+      "0xb36cfb13e96e96c7d96c9d57b594ca0ebb46f66a9cf3bc0ce9435f261ab5b99c",
+      "0xb675352f1a9cb10011c2c7940a7c4096f6fe4d862320f2c9649e3659eb3efc2d"
+    ],
+    "tradeTransactions": [
+      "0x40b03cf06f0dd90a4bdb45e3e61d690310212c8ffb6a06a6f34e03e29d26bb94",
+      "0x2285276dabd1cd80a8763f65b6abd2c5a0e7ebc53cc79e8dbd5032d5602ed833"
+    ],
+    "setupShape": "one factory initialization transaction plus two exact token approvals per Space",
+    "journey": "create, trade, inspect Activity, pause/resume, update rule, re-quote, repeat on second Space, reload"
+  },
+  "graph": {
+    "source": "same-fork disposable Graph Node",
+    "deployment": "QmTnbn8wSQQG7MctmTEPw1un39ndKah1P8wf74FnNKG5un",
+    "hasIndexingErrors": false,
+    "indexedBlock": {
+      "number": 25500042,
+      "hash": "0x6dc9999bf36012b11568b085768a4b633331baa320a2fa981488ca6d06ed793d",
+      "timestamp": 1783660178
+    },
+    "entityCounts": {
+      "spaces": 2,
+      "trades": 2,
+      "fees": 2,
+      "policyMutations": 13
+    },
+    "tradeReceipts": [
+      {
+        "transactionHash": "0x2285276dabd1cd80a8763f65b6abd2c5a0e7ebc53cc79e8dbd5032d5602ed833",
+        "blockNumber": 25500033,
+        "blockHash": "0xf36270772d6049605b1b324e8609cec0d70bad4ef0fa16b01d3387fdb91689d0",
+        "proposalHash": "0x0a9555f2c42a04aea856e01bf5f3384da4338280ab12a299b5c1ddf0c34c6334"
+      },
+      {
+        "transactionHash": "0x40b03cf06f0dd90a4bdb45e3e61d690310212c8ffb6a06a6f34e03e29d26bb94",
+        "blockNumber": 25500031,
+        "blockHash": "0x752a6c2c8a21e2b18be264a4d94f2f8349647e78208d3648d724b1a76c62146b",
+        "proposalHash": "0x3fc3a3d027efaca7fc1322b012f92b182d15e0aa45144c3a1dd6394a2a05c37f"
+      }
+    ],
+    "feeReceiptPairing": "Each trade receipt above has a same-transaction FeesRouted entity with the same proposalHash.",
+    "outageRecovery": "App returned 503 GRAPH_ACTIVITY_UNAVAILABLE while Graph Node was stopped, then recovered after restart and re-indexing."
+  },
+  "limitations": [
+    "No public deployment, public-chain broadcast, live Privy wallet/policy, or external audit is covered.",
+    "AURKA_DIRECT_PAIR_V1 is the tested execution adapter; upstream SwapVM is not claimed.",
+    "The fixture Graph runner supplies the reorg replacement check; the real-fork runner supplies same-fork indexing, app consumption, lag boundary, outage, and restart evidence."
+  ]
+}

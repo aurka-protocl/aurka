@@ -1,13 +1,35 @@
 # AURKA-012 integration target and wallet-policy specification
 
 Decision record date: 2026-09-07  
-Decision state: candidate proposal; no live network, deployment, pool, Graph
-deployment, Privy wallet, or Privy policy is selected, approved, or verified.
+Decision state: candidate proposal for public/production rollout; no public
+network deployment, pool, Graph deployment, Privy wallet, or Privy policy is
+selected, approved, or verified. TASK99-006 separately verifies an isolated
+Ethereum-mainnet fork release candidate; that local selection is reconciled
+below and is not a public deployment decision.
 
 This document is the handoff artifact for AURKA-014 and AURKA-015. It records
 what can be proposed from primary evidence and what still requires an explicit
 operator or governance decision. The fixture configuration is intentionally
 separate from this proposal and is not a production deployment.
+
+## TASK99-006 reconciliation
+
+The local release candidate selected for TASK99-006 is Ethereum mainnet fork
+block `25,500,000`, presented to the app as Anvil chain `31337`. At that pinned
+block the runner verifies bytecode for real 1inch Aqua, mainnet USDC/WETH, and
+Chainlink ETH/USD and USDC/USD feeds, then reads the feeds through the local
+`ChainlinkPriceOracle` adapter. The release path uses AURKA's narrow
+`AURKA_DIRECT_PAIR_V1` adapter; it does not claim or invoke the upstream SwapVM
+router. A disposable Graph Node stack indexes the same fork RPC and the app
+reads confirmed Activity from that GraphQL endpoint.
+
+The exact addresses, runtime hashes, price rounds, Graph deployment identity,
+receipt identities, and wallet-journey counts are recorded in
+[`docs/evidence/task99-006-real-release-summary.json`](evidence/task99-006-real-release-summary.json)
+and the reproducible command is `pnpm integration:fork-real`. This resolves the
+local real-integration acceptance gap only. Public deployment, live Privy
+custody, an external audit, and competitive DEX-price claims remain separate
+gates.
 
 ## State vocabulary and current outcome
 
@@ -18,8 +40,12 @@ separate from this proposal and is not a production deployment.
   policies for provisioning. No live target has this state.
 - Verified: read back from the target chain/Graph/Privy resource and matched to
   the approved record. No live target has this state.
-- Fixture-selected: the only completed local state; it is Anvil/Foundry chain
-  `31337`, with generated addresses and deterministic fixture observations.
+- Fixture-selected: the deterministic compatibility state; it is Anvil/Foundry
+  chain `31337`, with generated addresses and fixture observations.
+- Local-real-selected: the completed TASK99-006 state; it is an isolated Anvil
+  presentation of Ethereum mainnet fork block `25,500,000`, with actual Aqua,
+  token, and Chainlink feed identities verified at that snapshot. It is not a
+  public or production deployment.
 
 The current recommendation is to investigate Base first for a live pilot, with
 Ethereum Mainnet as the conservative reference candidate. This is a proposal,
@@ -81,8 +107,9 @@ documents that current Aqua routers support only the Aqua instruction set.
 ### Compatibility evidence and limitations
 
 - The official 1inch Aqua README describes `ship`, `dock`, `pull`, and `push`,
-  and says the strategy hash is `keccak256(abi.encode(strategy))`. Those are the
-  surfaces represented by the local `IAqua` boundary.
+  and the selected contract returns the exact strategy-byte hash
+  `keccak256(strategy)`. Those are the surfaces represented by the local `IAqua`
+  boundary.
 - The official SwapVM SDK constants and repository list the common router
   address and supported networks. They do not prove that an AURKA custom router,
   oracle, policy registry, or risk registry exists at those addresses.

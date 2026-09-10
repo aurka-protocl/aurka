@@ -27,12 +27,44 @@ function base(event: ethereum.Event): Entity {
   entity.set("contract", Value.fromBytes(event.address));
   entity.set("blockNumber", Value.fromBigInt(event.block.number));
   entity.set("blockHash", Value.fromBytes(event.block.hash));
+  entity.set("occurredAt", Value.fromBigInt(event.block.timestamp));
   entity.set("transactionHash", Value.fromBytes(event.transaction.hash));
   entity.set("logIndex", Value.fromBigInt(event.logIndex));
   return entity;
 }
+
+export function handleSpaceInitialized(event: ethereum.Event): void {
+  const entity = base(event);
+  entity.set("spaceId", Value.fromBytes(event.parameters[0].value.toBytes()));
+  entity.set("policyId", Value.fromBytes(event.parameters[1].value.toBytes()));
+  entity.set("owner", Value.fromBytes(event.parameters[2].value.toAddress()));
+  entity.set("vault", Value.fromBytes(event.parameters[3].value.toAddress()));
+  entity.set(
+    "usdcAmount",
+    Value.fromBigInt(event.parameters[4].value.toBigInt()),
+  );
+  entity.set(
+    "wethAmount",
+    Value.fromBigInt(event.parameters[5].value.toBigInt()),
+  );
+  entity.set(
+    "capacityEpochId",
+    Value.fromBytes(event.parameters[6].value.toBytes()),
+  );
+  entity.set(
+    "capacityBaseline",
+    Value.fromBigInt(event.parameters[7].value.toBigInt()),
+  );
+  save("SpaceInitialized", entity);
+}
 function save(kind: string, entity: Entity): void {
   store.set(kind, entity.get("id")!.toString(), entity);
+}
+
+function policyBase(event: ethereum.Event): Entity {
+  const entity = base(event);
+  entity.set("actor", Value.fromBytes(event.transaction.from));
+  return entity;
 }
 
 export function handleFeesRouted(event: ethereum.Event): void {
@@ -243,7 +275,7 @@ export function handleRiskModeChanged(event: ethereum.Event): void {
 export function handleWatchtowerAuthorizationChanged(
   event: ethereum.Event,
 ): void {
-  const entity = base(event);
+  const entity = policyBase(event);
   entity.set("policyId", Value.fromBytes(event.parameters[0].value.toBytes()));
   entity.set("eventName", Value.fromString("WatchtowerAuthorizationChanged"));
   // The authorization event has no policy nonce. A zero value distinguishes
@@ -253,7 +285,7 @@ export function handleWatchtowerAuthorizationChanged(
   save("PolicyMutation", entity);
 }
 export function handleAssetAdded(event: ethereum.Event): void {
-  const entity = base(event);
+  const entity = policyBase(event);
   entity.set("policyId", Value.fromBytes(event.parameters[0].value.toBytes()));
   entity.set("eventName", Value.fromString("AssetAdded"));
   entity.set("nonce", Value.fromBigInt(event.parameters[4].value.toBigInt()));
@@ -261,7 +293,7 @@ export function handleAssetAdded(event: ethereum.Event): void {
   save("PolicyMutation", entity);
 }
 export function handleTreasuryUpdated(event: ethereum.Event): void {
-  const entity = base(event);
+  const entity = policyBase(event);
   entity.set("policyId", Value.fromBytes(event.parameters[0].value.toBytes()));
   entity.set("eventName", Value.fromString("TreasuryUpdated"));
   entity.set("nonce", Value.fromBigInt(event.parameters[3].value.toBigInt()));
@@ -269,7 +301,7 @@ export function handleTreasuryUpdated(event: ethereum.Event): void {
   save("PolicyMutation", entity);
 }
 export function handleGovernanceTransferStarted(event: ethereum.Event): void {
-  const entity = base(event);
+  const entity = policyBase(event);
   entity.set("policyId", Value.fromBytes(event.parameters[0].value.toBytes()));
   entity.set("eventName", Value.fromString("GovernanceTransferStarted"));
   entity.set("nonce", Value.fromBigInt(BigInt.zero()));
@@ -277,7 +309,7 @@ export function handleGovernanceTransferStarted(event: ethereum.Event): void {
   save("PolicyMutation", entity);
 }
 export function handleGovernanceTransferred(event: ethereum.Event): void {
-  const entity = base(event);
+  const entity = policyBase(event);
   entity.set("policyId", Value.fromBytes(event.parameters[0].value.toBytes()));
   entity.set("eventName", Value.fromString("GovernanceTransferred"));
   entity.set("nonce", Value.fromBigInt(event.parameters[3].value.toBigInt()));
@@ -285,7 +317,7 @@ export function handleGovernanceTransferred(event: ethereum.Event): void {
   save("PolicyMutation", entity);
 }
 export function handlePolicyCreated(event: ethereum.Event): void {
-  const entity = base(event);
+  const entity = policyBase(event);
   entity.set("policyId", Value.fromBytes(event.parameters[0].value.toBytes()));
   entity.set("eventName", Value.fromString("PolicyCreated"));
   entity.set("nonce", Value.fromBigInt(event.parameters[3].value.toBigInt()));
@@ -293,7 +325,7 @@ export function handlePolicyCreated(event: ethereum.Event): void {
   save("PolicyMutation", entity);
 }
 export function handleAssetBoundsUpdated(event: ethereum.Event): void {
-  const entity = base(event);
+  const entity = policyBase(event);
   entity.set("policyId", Value.fromBytes(event.parameters[0].value.toBytes()));
   entity.set("eventName", Value.fromString("AssetBoundsUpdated"));
   entity.set("nonce", Value.fromBigInt(event.parameters[4].value.toBigInt()));
@@ -303,7 +335,7 @@ export function handleAssetBoundsUpdated(event: ethereum.Event): void {
 export function handleMaximumTransactionValueUpdated(
   event: ethereum.Event,
 ): void {
-  const entity = base(event);
+  const entity = policyBase(event);
   entity.set("policyId", Value.fromBytes(event.parameters[0].value.toBytes()));
   entity.set("eventName", Value.fromString("MaximumTransactionValueUpdated"));
   entity.set("nonce", Value.fromBigInt(event.parameters[2].value.toBigInt()));
@@ -311,7 +343,7 @@ export function handleMaximumTransactionValueUpdated(
   save("PolicyMutation", entity);
 }
 export function handleFeeConfigurationUpdated(event: ethereum.Event): void {
-  const entity = base(event);
+  const entity = policyBase(event);
   entity.set("policyId", Value.fromBytes(event.parameters[0].value.toBytes()));
   entity.set("eventName", Value.fromString("FeeConfigurationUpdated"));
   entity.set("nonce", Value.fromBigInt(event.parameters[1].value.toBigInt()));
@@ -319,17 +351,21 @@ export function handleFeeConfigurationUpdated(event: ethereum.Event): void {
   save("PolicyMutation", entity);
 }
 export function handlePauseStatusUpdated(event: ethereum.Event): void {
-  const entity = base(event);
+  const entity = policyBase(event);
   entity.set("policyId", Value.fromBytes(event.parameters[0].value.toBytes()));
   entity.set("eventName", Value.fromString("PauseStatusUpdated"));
   entity.set("nonce", Value.fromBigInt(event.parameters[2].value.toBigInt()));
+  entity.set(
+    "paused",
+    Value.fromBoolean(event.parameters[1].value.toBoolean()),
+  );
   entity.set("payload", Value.fromBytes(event.transaction.input));
   save("PolicyMutation", entity);
 }
 export function handleSettlementConfigurationUpdated(
   event: ethereum.Event,
 ): void {
-  const entity = base(event);
+  const entity = policyBase(event);
   entity.set("policyId", Value.fromBytes(event.parameters[0].value.toBytes()));
   entity.set("eventName", Value.fromString("SettlementConfigurationUpdated"));
   entity.set("nonce", Value.fromBigInt(event.parameters[4].value.toBigInt()));
@@ -339,7 +375,7 @@ export function handleSettlementConfigurationUpdated(
 export function handlePriceProtectionConfigurationUpdated(
   event: ethereum.Event,
 ): void {
-  const entity = base(event);
+  const entity = policyBase(event);
   entity.set("policyId", Value.fromBytes(event.parameters[0].value.toBytes()));
   entity.set(
     "eventName",

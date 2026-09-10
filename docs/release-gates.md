@@ -1,11 +1,13 @@
 # AURKA release-gate and independent-review packet
 
-Status: **blocked — local verification complete, external release evidence
-missing**  
-Date: 2026-09-07 (America/Mexico_City)  
-Task: AURKA-015  
-Tested checkout: `HEAD b1c52ca` plus the uncommitted working-tree changes
-present in this checkout. There is no immutable release revision yet.
+Status: **local real-fork verification complete; public and independent gates
+remain blocked**
+
+Date: 2026-09-09 (America/Mexico_City)
+
+Task: AURKA-015 Tested checkout: `HEAD b1c52ca` plus the uncommitted
+working-tree changes present in this checkout. There is no immutable release
+revision yet.
 
 This is the durable, non-secret handoff for the final verification gate. It is
 not an audit report, deployment approval, or production-readiness claim.
@@ -17,8 +19,10 @@ checks pass, but the following gates remain open:
 
 - no independent external security/custody reviewer, identity, scope, date, or
   verification reference has been supplied;
-- no production chain, Aqua/SwapVM/oracle deployment, Graph deployment or DEX
-  source has been selected and verified;
+- no public/production chain deployment, Graph deployment, DEX source or
+  upstream SwapVM deployment has been selected and verified; TASK99-006 does
+  have a separately documented isolated mainnet-fork candidate using real Aqua,
+  mainnet tokens, and Chainlink rounds;
 - no real Privy wallet/policy IDs, fingerprints, authorization arrangement, or
   policy read-back has been supplied;
 - the protected GitHub environment and required reviewers have not been
@@ -94,20 +98,21 @@ inventory, and missing production values are recorded in
 tested. `BLOCKED` means the required external or independent evidence is absent;
 it is not inferred from a successful build or mock.
 
-| Original gate                              | Owner / follow-up                                  | Exact artifact or command                                                                                     | Environment and result                                                                                                               | Release state              |
-| ------------------------------------------ | -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ | -------------------------- |
-| AURKA-005 independent audit                | Independent reviewer; user to appoint              | AURKA-005 unchecked audit item; audit report and reviewer verification reference                              | No external reviewer or report supplied                                                                                              | **BLOCKED**                |
-| AURKA-005 live Aqua/SwapVM/oracle boundary | Deployment owner; AURKA-012 decision record        | `docs/integrations.md`; `docs/aurka-012-integration-spec.md`; selected deployment bytecode/code-hash evidence | Only Anvil `31337` `MockAqua`/`AurkaDirectSwapVM` fixture exists                                                                     | **BLOCKED**                |
-| AURKA-007 live Graph and Privy selection   | Product/governance, infrastructure, custody owners | AURKA-012 candidate matrix and policy JSON; protected workflow inputs                                         | Candidates and policies are proposals; no selected deployment, pool, wallet, or policy read-back                                     | **BLOCKED**                |
-| AURKA-007 real default-deny policies       | Custody owner                                      | Privy policy IDs/fingerprints plus read-only policy verification artifact                                     | Local fake/native-client denial tests pass; no real policy was provisioned                                                           | **BLOCKED**                |
-| AURKA-007 protected live smoke             | Operations; AURKA-014 workflow                     | `.github/workflows/protected-integration.yml`; `packages/services/scripts/protected-smoke.mjs`                | Local invocation returns `status=blocked`, `reason=missing_inputs` for nine absent `AURKA_*` deployment/wallet inputs; no remote run | **BLOCKED**                |
-| AURKA-007 independent review               | Independent reviewer; AURKA-015                    | Review identity, independence statement, scope, dated findings, and verification                              | The repository review is an implementation self-review, not independent evidence                                                     | **BLOCKED**                |
-| AURKA-008 dependency release gate          | AURKA-007 and release owner                        | AURKA-008 unchecked dependency item; SDK/app local checks                                                     | SDK and apps pass locally, but live/review dependency remains open                                                                   | **BLOCKED**                |
-| AURKA-009 signed local settlement          | AURKA-009 / AURKA-014                              | `pnpm integration:local-settlement` and `packages/services/scripts/local-settlement-e2e.mjs`                  | Anvil `31337`; 3 indexed receipt events, restart/replay projection, and six rejection cases passed                                   | PASS (local)               |
-| AURKA-011 actual indexing                  | AURKA-011 / AURKA-014                              | `pnpm integration:graph-node`; `packages/services/scripts/local-graph-node-e2e.mjs`                           | Disposable Graph Node stack; deployment/query, pagination, finality/lag, and orphan replacement passed                               | PASS (local)               |
-| AURKA-013 measured readiness               | AURKA-013 / AURKA-014                              | `packages/services/test/readiness.test.ts`; Docker body-based `/ready` check                                  | Fixture container returned `ok=true`, `status=ready`; failure/recovery diagnostics covered in tests                                  | PASS (fixture/local)       |
-| AURKA-014 browser and workflow gates       | AURKA-014                                          | `pnpm integration:browser-smoke`; `.github/workflows/integration.yml`                                         | 16 desktop/mobile route checks plus quote/solve/external-signature/unsigned-tx/error checks passed                                   | PASS (local)               |
-| AURKA-015 final release decision           | AURKA-015                                          | This packet and the task report                                                                               | Residual risks and owners are named; external gates remain explicitly open                                                           | PASS (reconciliation only) |
+| Original gate                                     | Owner / follow-up                                  | Exact artifact or command                                                                                     | Environment and result                                                                                                                | Release state                  |
+| ------------------------------------------------- | -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------ |
+| AURKA-005 independent audit                       | Independent reviewer; user to appoint              | AURKA-005 unchecked audit item; audit report and reviewer verification reference                              | No external reviewer or report supplied                                                                                               | **BLOCKED**                    |
+| AURKA-005 public/prod Aqua/SwapVM/oracle boundary | Deployment owner; AURKA-012 decision record        | `docs/integrations.md`; `docs/aurka-012-integration-spec.md`; selected deployment bytecode/code-hash evidence | No public/production deployment is selected; TASK99-006's isolated fork evidence is recorded separately                               | **BLOCKED**                    |
+| TASK99-006 isolated real-fork integration         | TASK99-006 implementation and release owner        | `pnpm integration:fork-real`; sanitized release summary and disposable Graph evidence                         | Real Aqua, mainnet USDC/WETH, Chainlink V3 rounds, same-fork Graph Node, two-space wallet journey, and outage/restart recovery passed | **PASS (local isolated fork)** |
+| AURKA-007 live Graph and Privy selection          | Product/governance, infrastructure, custody owners | AURKA-012 candidate matrix and policy JSON; protected workflow inputs                                         | Candidates and policies are proposals; no selected deployment, pool, wallet, or policy read-back                                      | **BLOCKED**                    |
+| AURKA-007 real default-deny policies              | Custody owner                                      | Privy policy IDs/fingerprints plus read-only policy verification artifact                                     | Local fake/native-client denial tests pass; no real policy was provisioned                                                            | **BLOCKED**                    |
+| AURKA-007 protected live smoke                    | Operations; AURKA-014 workflow                     | `.github/workflows/protected-integration.yml`; `packages/services/scripts/protected-smoke.mjs`                | Local invocation returns `status=blocked`, `reason=missing_inputs` for nine absent `AURKA_*` deployment/wallet inputs; no remote run  | **BLOCKED**                    |
+| AURKA-007 independent review                      | Independent reviewer; AURKA-015                    | Review identity, independence statement, scope, dated findings, and verification                              | The repository review is an implementation self-review, not independent evidence                                                      | **BLOCKED**                    |
+| AURKA-008 dependency release gate                 | AURKA-007 and release owner                        | AURKA-008 unchecked dependency item; SDK/app local checks                                                     | SDK and apps pass locally, but live/review dependency remains open                                                                    | **BLOCKED**                    |
+| AURKA-009 signed local settlement                 | AURKA-009 / AURKA-014                              | `pnpm integration:local-settlement` and `packages/services/scripts/local-settlement-e2e.mjs`                  | Anvil `31337`; 3 indexed receipt events, restart/replay projection, and six rejection cases passed                                    | PASS (local)                   |
+| AURKA-011 actual indexing                         | AURKA-011 / AURKA-014                              | `pnpm integration:graph-node`; `packages/services/scripts/local-graph-node-e2e.mjs`                           | Disposable Graph Node stack; deployment/query, pagination, finality/lag, and orphan replacement passed                                | PASS (local)                   |
+| AURKA-013 measured readiness                      | AURKA-013 / AURKA-014                              | `packages/services/test/readiness.test.ts`; Docker body-based `/ready` check                                  | Fixture container returned `ok=true`, `status=ready`; failure/recovery diagnostics covered in tests                                   | PASS (fixture/local)           |
+| AURKA-014 browser and workflow gates              | AURKA-014                                          | `pnpm integration:browser-smoke`; `.github/workflows/integration.yml`                                         | 16 desktop/mobile route checks plus quote/solve/external-signature/unsigned-tx/error checks passed                                    | PASS (local)                   |
+| AURKA-015 final release decision                  | AURKA-015                                          | This packet and the task report                                                                               | Residual risks and owners are named; external gates remain explicitly open                                                            | PASS (reconciliation only)     |
 
 ## Changes since the 2026-09-06 review
 
@@ -129,23 +134,24 @@ evidence.
 Commands were run on the tested checkout identified above. Exit status was zero
 unless explicitly noted.
 
-| Check                                                                           | Result                                                                                               |
-| ------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| `pnpm install --frozen-lockfile --ignore-scripts=false`                         | PASS; lockfile current                                                                               |
-| `pnpm build`                                                                    | PASS; all workspace packages and both applications built                                             |
-| `pnpm typecheck`                                                                | PASS; all workspace packages and both applications                                                   |
-| `pnpm lint` / `pnpm format:check` / `git diff --check`                          | PASS                                                                                                 |
-| `pnpm test`                                                                     | PASS; 112 TypeScript tests: shared 50, services 44, watchtower 5, Graph 7, wallet 3, SDK 3           |
-| `forge fmt --check && forge build --sizes && forge snapshot --check`            | PASS; router runtime `24,492` bytes, only `84` bytes below EIP-170                                   |
-| `forge test -vvv`                                                               | PASS; 116 Solidity tests, 0 failed; fuzz runs 514 and invariants 128 × 8,192 calls                   |
-| `pnpm --filter @aurka/graph subgraph:build`                                     | PASS; codegen and WASM mapping compilation                                                           |
-| `docker compose -f docker-compose.services.yml config --quiet`                  | PASS                                                                                                 |
-| `docker build -f packages/services/Dockerfile -t aurka-services:task015 .`      | PASS; legacy Docker builder warning only                                                             |
-| disposable `aurka-services:task015` container + `/ready` body and Docker health | PASS; fixture mode returned `ok=true`, `status=ready`; Docker health `healthy`; container removed    |
-| `pnpm integration:local-settlement`                                             | PASS; signed local execution, event projection, replay/restart and six rejection cases               |
-| `pnpm integration:graph-node`                                                   | PASS; Graph Node `v0.41.2`, two paginated observations, lag/finality rejection and reorg replacement |
-| `pnpm integration:browser-smoke`                                                | PASS; 16 route/viewport checks and settlement-preparation/error checks                               |
-| `node packages/services/scripts/protected-smoke.mjs` with no external inputs    | Expected BLOCKED; missing RPC, contract, Graph, wallet-policy and wallet identifiers                 |
+| Check                                                                           | Result                                                                                                                       |
+| ------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm install --frozen-lockfile --ignore-scripts=false`                         | PASS; lockfile current                                                                                                       |
+| `pnpm build`                                                                    | PASS; all workspace packages and both applications built                                                                     |
+| `pnpm typecheck`                                                                | PASS; all workspace packages and both applications                                                                           |
+| `pnpm lint` / `pnpm format:check` / `git diff --check`                          | PASS                                                                                                                         |
+| `pnpm test`                                                                     | PASS; 184 TypeScript tests: shared 60, services 92, watchtower 5, Graph 7, wallet 3, SDK 3, trader 14                        |
+| `forge fmt --check && forge build --sizes && forge snapshot --check`            | PASS; router runtime `24,492` bytes, only `84` bytes below EIP-170                                                           |
+| `forge test`                                                                    | PASS; 127 Solidity tests, 0 failed; fuzz runs 514 and invariants 128 × 8,192 calls                                           |
+| `pnpm --filter @aurka/graph subgraph:build`                                     | PASS; codegen and WASM mapping compilation                                                                                   |
+| `docker compose -f docker-compose.services.yml config --quiet`                  | PASS                                                                                                                         |
+| `docker build -f packages/services/Dockerfile -t aurka-services:task015 .`      | PASS; legacy Docker builder warning only                                                                                     |
+| disposable `aurka-services:task015` container + `/ready` body and Docker health | PASS; fixture mode returned `ok=true`, `status=ready`; Docker health `healthy`; container removed                            |
+| `pnpm integration:local-settlement`                                             | PASS; signed local execution, event projection, replay/restart and six rejection cases                                       |
+| `pnpm integration:graph-node`                                                   | PASS; Graph Node `v0.41.2`, two paginated observations, lag/finality rejection and reorg replacement                         |
+| `pnpm integration:fork-real`                                                    | PASS; pinned mainnet fork, real Aqua/Chainlink, two Spaces/two trades, same-fork Graph Activity, outage and restart recovery |
+| `pnpm integration:browser-smoke`                                                | PASS; 16 route/viewport checks and settlement-preparation/error checks                                                       |
+| `node packages/services/scripts/protected-smoke.mjs` with no external inputs    | Expected BLOCKED; missing RPC, contract, Graph, wallet-policy and wallet identifiers                                         |
 
 Foundry emitted non-fatal target-discovery and stale invariant-cache warnings;
 the test and snapshot commands still exited successfully. Build output also
@@ -160,8 +166,10 @@ loss, reorg downgrade/replacement, duplicate event replay, stale settlement
 commitments, modified signatures, expired intents, and Docker readiness
 recovery. These are deterministic doubles/local infrastructure scenarios.
 
-Not evidenced: recovery of a real Graph deployment, a real RPC reorg, a real
+Not evidenced: a public/production Graph deployment, a real RPC reorg, a real
 Privy signer/policy, a production certificate submission, or a live settlement.
+The local same-fork Graph Node outage/restart path is evidenced by TASK99-006;
+the existing fixture Graph runner remains the reorg replacement check.
 
 ## Handoff and owners
 

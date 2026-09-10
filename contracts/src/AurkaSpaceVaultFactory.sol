@@ -15,9 +15,9 @@ interface ISpaceCapacityInitializer {
     ) external returns (bytes32 capacityEpochId, uint256 capacityBaseline);
 }
 
-/// @notice Single owner entry point for the local fork Space lifecycle.
-/// @dev The Aqua seed call is deliberately an explicit test-fixture adapter;
-///      production Aqua must provide a separately audited initialization path.
+/// @notice Single owner entry point for the owner-managed Space lifecycle.
+/// @dev Funding and Aqua registration are performed through the isolated vault
+///      so Aqua records the vault as maker rather than the factory.
 contract AurkaSpaceVaultFactory {
     uint256 public constant INITIAL_USDC_AMOUNT = 35_000e6;
     uint256 public constant INITIAL_WETH_AMOUNT = 5e18;
@@ -33,6 +33,7 @@ contract AurkaSpaceVaultFactory {
         bytes32 spaceId;
         bytes32 policyId;
         bytes32 strategyHash;
+        bytes strategy;
         address owner;
         AurkaPolicyRegistry.AssetConfig[] assets;
         uint256 maximumTransactionValue;
@@ -105,8 +106,8 @@ contract AurkaSpaceVaultFactory {
         vault = _createVault(msg.sender, spaceId);
     }
 
-    /// @notice Pulls the disclosed funding, creates and configures all policy
-    /// state, seeds the local Aqua fixture, and activates capacity in one tx.
+    /// @notice Pulls the disclosed funding, creates policy state, ships the
+    /// immutable Aqua strategy, and activates capacity in one transaction.
     function createAndInitializeSpace(SpaceInitialization calldata params)
         external
         nonReentrant
@@ -117,7 +118,8 @@ contract AurkaSpaceVaultFactory {
         }
         if (
             params.spaceId == bytes32(0) || params.policyId == bytes32(0)
-                || params.strategyHash == bytes32(0) || params.priceOracle == address(0)
+                || params.strategyHash == bytes32(0) || params.strategy.length == 0
+                || keccak256(params.strategy) != params.strategyHash || params.priceOracle == address(0)
                 || params.assets.length != 2
         ) revert InvalidInitialization();
         if (AurkaPolicyRegistry(policyRegistry).initializationFactory() != address(this)) {
@@ -168,30 +170,16 @@ contract AurkaSpaceVaultFactory {
 
         AurkaSpaceVault(vault).initializeApproval(usdc, aqua, INITIAL_USDC_AMOUNT);
         AurkaSpaceVault(vault).initializeApproval(weth, aqua, INITIAL_WETH_AMOUNT);
-        // MockAqua is the only supported local adapter. This call is kept as
-        // a narrow interface so no arbitrary target/call data is accepted.
-        (bool seededUsdc,) = aqua.call(
-            abi.encodeWithSignature(
-                "seed(address,address,bytes32,address,uint256)",
-                vault,
-                router,
-                params.strategyHash,
-                usdc,
-                INITIAL_USDC_AMOUNT
-            )
+        address[] memory tokens = new address[](2);
+        tokens[0] = usdc;
+        tokens[1] = weth;
+        uint256[] memory amounts = new uint256[](2);
+        amounts[0] = INITIAL_USDC_AMOUNT;
+        amounts[1] = INITIAL_WETH_AMOUNT;
+        bytes32 shippedStrategyHash = AurkaSpaceVault(vault).initializeAquaStrategy(
+            aqua, router, params.strategy, tokens, amounts
         );
-        if (!seededUsdc) revert InvalidInitialization();
-        (bool seededWeth,) = aqua.call(
-            abi.encodeWithSignature(
-                "seed(address,address,bytes32,address,uint256)",
-                vault,
-                router,
-                params.strategyHash,
-                weth,
-                INITIAL_WETH_AMOUNT
-            )
-        );
-        if (!seededWeth) revert InvalidInitialization();
+        if (shippedStrategyHash != params.strategyHash) revert InvalidInitialization();
 
         (capacityEpochId, capacityBaseline) = ISpaceCapacityInitializer(router)
             .activateCapacityEpochFromFactory(params.policyId, params.capacityEpoch, params.priceInput);

@@ -17,7 +17,6 @@ import { MockPriceOracle } from "./mocks/MockPriceOracle.sol";
 contract AurkaSpaceCreationTest is TestBase {
     bytes32 internal constant SPACE_ID = keccak256("space:atomic");
     bytes32 internal constant POLICY_ID = keccak256("policy:atomic");
-    bytes32 internal constant STRATEGY = keccak256("strategy:atomic");
     address internal constant PROTOCOL = address(0xCAFE);
 
     MockERC20 internal usdc;
@@ -29,6 +28,8 @@ contract AurkaSpaceCreationTest is TestBase {
     AurkaSpaceVaultFactory internal factory;
     AurkaPolicyRegistry.AssetConfig[] internal assets;
     AurkaSpaceVaultFactory.SpaceInitialization internal params;
+    bytes internal strategy;
+    bytes32 internal strategyHash;
 
     function setUp() public {
         vm.warp(1_000);
@@ -57,6 +58,8 @@ contract AurkaSpaceCreationTest is TestBase {
 
         assets.push(AurkaPolicyRegistry.AssetConfig(address(usdc), 6, 5_500, 10_000));
         assets.push(AurkaPolicyRegistry.AssetConfig(address(weth), 18, 0, 3_500));
+        strategy = abi.encode(SPACE_ID, address(usdc), address(weth));
+        strategyHash = keccak256(strategy);
         params = _buildParams();
     }
 
@@ -67,7 +70,8 @@ contract AurkaSpaceCreationTest is TestBase {
     {
         p.spaceId = SPACE_ID;
         p.policyId = POLICY_ID;
-        p.strategyHash = STRATEGY;
+        p.strategyHash = strategyHash;
+        p.strategy = strategy;
         p.owner = address(this);
         p.assets = assets;
         p.maximumTransactionValue = 5_000;
@@ -147,7 +151,7 @@ contract AurkaSpaceCreationTest is TestBase {
             portfolioPriceSnapshot: keccak256(abi.encode(tokens, prices)),
             policyNonce: 3,
             riskCertificateHash: bytes32(0),
-            aquaStrategyHash: STRATEGY,
+            aquaStrategyHash: strategyHash,
             capacityBaseline: 0,
             consumedBefore: 0,
             chainId: block.chainid,
@@ -167,8 +171,10 @@ contract AurkaSpaceCreationTest is TestBase {
         assertEq(weth.balanceOf(vault), 5e18);
         assertEq(usdc.allowance(vault, address(aqua)), 35_000e6);
         assertEq(weth.allowance(vault, address(aqua)), 5e18);
-        (uint248 usdcBalance,) = aqua.rawBalances(vault, address(router), STRATEGY, address(usdc));
-        (uint248 wethBalance,) = aqua.rawBalances(vault, address(router), STRATEGY, address(weth));
+        (uint248 usdcBalance,) =
+            aqua.rawBalances(vault, address(router), strategyHash, address(usdc));
+        (uint248 wethBalance,) =
+            aqua.rawBalances(vault, address(router), strategyHash, address(weth));
         assertEq(usdcBalance, 35_000e6);
         assertEq(wethBalance, 5e18);
         AurkaSwapVMRouter.CapacityState memory state =

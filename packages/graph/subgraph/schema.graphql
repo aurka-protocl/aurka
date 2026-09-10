@@ -4,6 +4,7 @@ type TradeExecuted @entity(immutable: true) {
   contract: Bytes!
   blockNumber: BigInt!
   blockHash: Bytes!
+  occurredAt: BigInt!
   transactionHash: Bytes!
   logIndex: BigInt!
   policyId: Bytes!
@@ -30,6 +31,7 @@ type FeesRouted @entity(immutable: true) {
   contract: Bytes!
   blockNumber: BigInt!
   blockHash: Bytes!
+  occurredAt: BigInt!
   transactionHash: Bytes!
   logIndex: BigInt!
   proposalHash: Bytes!
@@ -47,6 +49,7 @@ type RiskModeChanged @entity(immutable: true) {
   contract: Bytes!
   blockNumber: BigInt!
   blockHash: Bytes!
+  occurredAt: BigInt!
   transactionHash: Bytes!
   logIndex: BigInt!
   policyId: Bytes!
@@ -64,11 +67,14 @@ type PolicyMutation @entity(immutable: true) {
   contract: Bytes!
   blockNumber: BigInt!
   blockHash: Bytes!
+  occurredAt: BigInt!
   transactionHash: Bytes!
   logIndex: BigInt!
   policyId: Bytes!
   eventName: String!
   nonce: BigInt!
+  actor: Bytes!
+  paused: Boolean
   payload: Bytes!
 }
 
@@ -89,4 +95,23 @@ type RiskObservation @entity(immutable: true) {
   observedAt: BigInt!
   payloadHash: Bytes!
   payload: Bytes!
+}
+
+type SpaceInitialized @entity(immutable: true) {
+  id: ID!
+  chainId: BigInt!
+  contract: Bytes!
+  blockNumber: BigInt!
+  blockHash: Bytes!
+  occurredAt: BigInt!
+  transactionHash: Bytes!
+  logIndex: BigInt!
+  spaceId: Bytes!
+  policyId: Bytes!
+  owner: Bytes!
+  vault: Bytes!
+  usdcAmount: BigInt!
+  wethAmount: BigInt!
+  capacityEpochId: Bytes!
+  capacityBaseline: BigInt!
 }

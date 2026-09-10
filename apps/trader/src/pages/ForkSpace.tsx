@@ -20,6 +20,9 @@ interface ForkState {
   chainId: number;
   rpcUrl: string;
   forkBlock: number;
+  integrationMode?: "real" | "fixture";
+  aquaKind?: string;
+  oracleKind?: string;
   alice: string;
   bob: string;
   router: string;
@@ -448,8 +451,10 @@ export default function ForkSpace({
       <div className="rounded-xl border border-amber-700 bg-amber-950/40 p-4">
         <strong>Ethereum fork · test funds only</strong>
         <p>
-          Block {state?.forkBlock ?? "22400000"} · local chain 31337. Aqua and
-          prices are mocked.
+          Block {state?.forkBlock ?? "—"} · local chain 31337.
+          {state?.aquaKind === "REAL_AQUA"
+            ? " Real Aqua + Chainlink prices."
+            : " Fixture Aqua + prices."}
         </p>
       </div>
       {!embedded && (
@@ -756,9 +761,9 @@ export default function ForkSpace({
               ))}
             </ul>
             <p className="mt-3">
-              The fixed reference price is 3200 USDC units per WETH. This is a
-              seeded mechanism demonstration, not a market quote. Amounts are
-              rounded to whole reference units before sizing.
+              {state.aquaKind === "REAL_AQUA"
+                ? "Chainlink rounds are read from the pinned mainnet fork and normalized to whole settlement units; the raw round is retained in the price snapshot."
+                : "The fixture uses fixed reference prices. It is a seeded mechanism demonstration, not a market quote."}
             </p>
           </details>
         </>

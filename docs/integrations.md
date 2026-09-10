@@ -1,8 +1,32 @@
 # AURKA integration boundaries
 
-Status: reviewed for AURKA-005 and AURKA-007; local deterministic adapters only.
-The AURKA-012 candidate and policy decision record is in
+Status: TASK99-006 real-fork release candidate verified locally; the fixture
+configuration remains an explicit compatibility test path. The AURKA-012
+candidate and policy decision record is in
 [`aurka-012-integration-spec.md`](./aurka-012-integration-spec.md).
+
+## TASK99-006 selected real-fork release candidate
+
+The reproducible release rehearsal is `pnpm integration:fork-real`. It starts an
+isolated Anvil fork of Ethereum mainnet at block `25,500,000` (local chain ID
+`31337`), deploys the AURKA contracts into that fork, and connects a disposable
+Graph Node/Postgres/IPFS stack to the same RPC. It never broadcasts to Ethereum
+mainnet and does not require Privy for the ordinary browser wallet journey.
+
+| Component | Selected integration                                                                                                                                                   | Truthful boundary                                                                                                                             |
+| --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| Aqua      | Real 1inch Aqua at `0x499943e74fb0ce105688beee8ef2abec5d936d31`                                                                                                        | Actual `ship` virtual balances and maker-wallet allowances; the factory performs no mock `seed` call.                                         |
+| Assets    | Mainnet USDC `0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48` and WETH `0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2`                                                        | Fork-only test funding is used for Alice/Bob; no public token transfer occurs.                                                                |
+| Prices    | Locally deployed `ChainlinkPriceOracle` adapter reading ETH/USD `0x5f4ec3df9cbd43714fe2740f5e3616155c5b8419` and USDC/USD `0x8fFfFfd4AfB6115b954Bd326cbe7B4BA576818f6` | Native 8-decimal rounds are validated and normalized to whole settlement units; raw round data and the normalized snapshot are fingerprinted. |
+| Execution | `AurkaDirectSwapVM` / `AURKA_DIRECT_PAIR_V1`                                                                                                                           | AURKA's narrow direct-pair adapter is used. The upstream SwapVM router is not claimed or used.                                                |
+| Indexing  | Graph Node `v0.41.2`, Postgres `14.11`, IPFS Kubo `v0.17.0`                                                                                                            | The temporary manifest points at the fork's deployed AURKA addresses and the app reads confirmed Activity from its GraphQL endpoint.          |
+| Wallets   | Ordinary EIP-1193 test wallets derived only inside the disposable Anvil                                                                                                | Alice owns both Spaces; Bob signs the two trades. Privy remains a separate production custody gate.                                           |
+
+The runner writes a sanitized `release.json` when `AURKA_RELEASE_EVIDENCE_DIR`
+is supplied. It records the fork/deployment identity, contract addresses, Graph
+entity receipt hashes/counts, wallet journey evidence, and Graph outage/restart
+result. The checked-in subgraph manifest remains a fixture template so a public
+deployment cannot be implied by running code generation alone.
 
 ## Graph and Privy pin (AURKA-007)
 
@@ -39,11 +63,12 @@ chain reader, configured lag/finality limits, and block hashes. The documented
 Graph block-hash limitation for non-final state is why normalization alone
 reports `UNFINALIZED`; only the checked source query can report `FINAL`.
 
-The initial DEX source is `fixture-dex-v1` on Anvil/Foundry chain `31337` only.
-There is no production DEX subgraph ID, network, or live smoke test selected in
-this milestone. `packages/graph/subgraph/subgraph.yaml` therefore contains
-reviewed fixture addresses; replacing them is a separately approved deployment
-decision.
+The risk-runtime DEX source remains `fixture-dex-v1` on Anvil/Foundry chain
+`31337`; it is not used to claim competitive market pricing in the TASK99-006
+settlement rehearsal. There is no public DEX deployment or public subgraph
+selected in this milestone. The checked-in subgraph manifest contains reviewed
+fixture addresses; the release runner creates a temporary manifest with the
+actual fork deployment addresses.
 
 The watchtower consumes the normalized observations and produces a pure integer
 decision. A prose explanation is post-decision only. It cannot alter mode,
@@ -66,16 +91,18 @@ implemented:
   registry reference as `0x1111113ccf1426a8e30e2bff5e005d929bf6a90a` and the
   SwapVM router reference as `0x111111338c5091e8440b67b168bae16a668ac0de`.
 
-The older `0x499943...` Aqua address previously recorded here is retained only
-as historical research; it is not a current target. Every reference address
-still requires chain-specific bytecode, immutables, and deployment verification.
+The selected `0x499943...` Aqua address is verified at the pinned mainnet fork
+block and is the address used by the real-mode release runner. Every reference
+address still requires chain-specific bytecode, immutables, and deployment
+verification; the runner records the selected Aqua runtime code hash rather than
+treating an address alone as proof.
 
 The addresses above are reference data, not settlement targets in this
 repository. Automated tests never broadcast to or call a live network.
 
-## Selected Phase 4 boundary
+## Fixture compatibility boundary (explicit fallback)
 
-The supported deterministic test environment is Anvil/Foundry chain `31337`:
+The original deterministic fixture environment is Anvil/Foundry chain `31337`:
 
 | Component | Selected artifact                                              | Role                                                                                          |
 | --------- | -------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
@@ -137,11 +164,11 @@ manual; no CI job receives production keys or broadcasts funds.
 
 ## Integration corrections — 2026-09-07
 
-`pnpm --filter @aurka/graph subgraph:build` now performs Graph code generation
-and compiles the actual AssemblyScript mapping to WASM. Its handlers persist
-trade, fee, policy, risk-mode and execution-observation entities. The manifest
-still targets fixture chain 31337 and fixture addresses. Compilation and fixture
-normalization tests do not establish indexing against a deployed Graph node.
+`pnpm --filter @aurka/graph subgraph:build` performs Graph code generation and
+compiles the actual AssemblyScript mapping to WASM. Its handlers persist trade,
+fee, policy, risk-mode and execution-observation entities. The checked-in
+manifest is still a fixture template; `pnpm integration:fork-real` proves the
+same mapping against a deployed Graph Node and actual fork transactions.
 
 `GraphSignalSource` queries `riskObservations` and `_meta` at an explicit
 RPC-proven finalized block. It verifies chain identity, deployment, canonical

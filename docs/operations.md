@@ -25,9 +25,10 @@ bounded retry helper and never retry arbitrary transaction submission.
 The service workflow runs migrations, type checks, tests, builds, formatting,
 linting, and Docker configuration/build checks. `RPC_URL`, `CHAIN_ID`,
 `SETTLEMENT_CONTRACT`, and `INDEX_CONFIRMATIONS` are wired into the service
-runtime; the default remains fixture-only. Production broadcasting, live log
-providers, and live chain tests remain outside this workflow and require a
-separate protected environment.
+runtime. The normal fork runner defaults to the real-integration path; fixture
+mode must be selected explicitly. Production broadcasting, live log providers,
+and public-chain tests remain outside this workflow and require a separate
+protected environment.
 
 Risk operations are documented in [`risk-watchtower.md`](./risk-watchtower.md).
 The fixture watchtower and wallet adapters never load production credentials;
@@ -62,6 +63,19 @@ seconds; request a fresh quote after expiry or restart. Its cache is bounded at
 provider is a live balance or oracle source.
 
 ## Reproducible system verification
+
+The TASK99-006 release rehearsal uses a pinned Ethereum mainnet fork, real Aqua
+and Chainlink reads, ordinary isolated test wallets, and a same-fork Graph Node
+stack:
+
+```bash
+pnpm integration:fork-real
+```
+
+It runs the two-Space wallet journey, checks exact approval/setup counts,
+Graph-backed confirmed Activity, and Graph outage/restart recovery. Set
+`AURKA_RELEASE_EVIDENCE_DIR` to retain its sanitized release JSON and wallet
+evidence; otherwise the runner cleans its temporary resources.
 
 The deterministic system checks are credential-free and use disposable local
 resources:

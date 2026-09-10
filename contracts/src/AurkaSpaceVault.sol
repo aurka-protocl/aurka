@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.28;
 
+import { IAqua } from "./interfaces/IAqua.sol";
+
 /// @notice A separate token treasury for one owner-managed Space.
 /// @dev Policy governance stays with the owner. This vault only holds funds,
 /// approves the settlement custodian, and allows its owner to withdraw tokens.
@@ -14,6 +16,7 @@ contract AurkaSpaceVault {
     error InitializationFinalized();
     error InvalidAddress();
     error TokenCallFailed();
+    error InvalidStrategy();
 
     constructor(address owner_, address initializationAuthority_) {
         if (owner_ == address(0) || initializationAuthority_ == address(0)) {
@@ -27,6 +30,28 @@ contract AurkaSpaceVault {
         if (msg.sender != initializationAuthority) revert NotInitializationAuthority();
         if (initializationFinalized) revert InitializationFinalized();
         _call(token, abi.encodeWithSignature("approve(address,uint256)", spender, amount));
+    }
+
+    /// @notice Registers this vault as a maker for an Aqua strategy.
+    /// @dev Aqua.ship records virtual balances against its caller. Keeping the
+    /// call inside the vault preserves the maker boundary: the factory can
+    /// initialize only this vault, while Aqua never sees the factory as maker.
+    function initializeAquaStrategy(
+        address aqua,
+        address app,
+        bytes calldata strategy,
+        address[] calldata tokens,
+        uint256[] calldata amounts
+    ) external returns (bytes32 strategyHash) {
+        if (msg.sender != initializationAuthority) revert NotInitializationAuthority();
+        if (initializationFinalized || aqua == address(0) || app == address(0)) {
+            revert InvalidStrategy();
+        }
+        if (strategy.length == 0 || tokens.length == 0 || tokens.length != amounts.length) {
+            revert InvalidStrategy();
+        }
+        strategyHash = IAqua(aqua).ship(app, strategy, tokens, amounts);
+        if (strategyHash != keccak256(strategy)) revert InvalidStrategy();
     }
 
     function finalizeInitialization() external {

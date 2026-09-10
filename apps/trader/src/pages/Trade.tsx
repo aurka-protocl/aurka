@@ -43,6 +43,9 @@ interface ForkState {
   readonly chainId: number;
   readonly rpcUrl: string;
   readonly forkBlock: number;
+  readonly integrationMode?: "real" | "fixture";
+  readonly aquaKind?: string;
+  readonly oracleKind?: string;
   readonly bob: string;
   readonly router: string;
   readonly usdc: string;
@@ -859,7 +862,9 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
           <strong>Ethereum fork · test funds only</strong>
           <p className="mt-1 text-amber-100/75">
             Chain {source.fork.chainId} · fork block {source.fork.forkBlock} ·
-            Aqua and oracle prices are explicitly mocked.
+            {source.fork?.aquaKind === "REAL_AQUA"
+              ? "Real Aqua and Chainlink prices are read from the pinned mainnet fork."
+              : "Aqua and oracle prices are explicitly mocked for the fixture fork."}
           </p>
         </div>
       )}

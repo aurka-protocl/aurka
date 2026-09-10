@@ -17,6 +17,7 @@
     "integration:browser-smoke": "pnpm build && pnpm --filter @aurka/services exec node scripts/browser-smoke.mjs",
     "integration:local-settlement": "pnpm build && forge build && pnpm --filter @aurka/services exec node scripts/local-settlement-e2e.mjs",
     "integration:graph-node": "pnpm build && forge build && pnpm --filter @aurka/graph subgraph:build && pnpm --filter @aurka/services exec node scripts/local-graph-node-e2e.mjs",
+    "integration:fork-real": "pnpm build && forge build && pnpm --filter @aurka/graph subgraph:build && node --env-file=.env packages/services/scripts/fork-real-release-e2e.mjs",
     "lint": "eslint .",
     "test": "pnpm -r --if-present test",
     "typecheck": "pnpm -r --if-present typecheck",

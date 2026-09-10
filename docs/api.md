@@ -93,12 +93,14 @@ submitted hash alone cannot activate a Space.
 
 Creation deploys a deterministic, owner-scoped `AurkaSpaceVault` through
 `AurkaSpaceVaultFactory`, creates/configures its policy, transfers **35,000 USDC
-and 5 WETH** from the owner, approves MockAqua from that treasury, registers
-those virtual balances, and authorizes the supported WETH→USDC capacity. The
-supported fork assets are mainnet USDC (6 decimals) and WETH (18 decimals).
-Initial bounds must include that disclosed funding allocation. The vault owner
-may withdraw funds or revoke allowances; it does not give another Space access
-to this inventory. MockAqua and fixed reference prices remain local test
+and 5 WETH** from the owner, calls the configured Aqua `ship(...)` entrypoint
+from that treasury with the exact strategy bytes, registers those virtual
+balances, and authorizes the supported WETH→USDC capacity. The supported fork
+assets are mainnet USDC (6 decimals) and WETH (18 decimals). Initial bounds must
+include that disclosed funding allocation. The vault owner may withdraw funds or
+revoke allowances; it does not give another Space access to this inventory. Real
+fork mode reads Chainlink V3 rounds through the `ChainlinkPriceOracle` adapter;
+fixture mode explicitly uses MockAqua and fixed reference prices as local test
 infrastructure.
 
 The server persists setup steps, verified receipts, and receipt reuse protection

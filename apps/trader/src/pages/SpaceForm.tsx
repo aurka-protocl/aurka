@@ -599,7 +599,7 @@ export default function SpaceForm({
                   ? "Your wallet transaction is recorded locally and will not be sent again while confirmation is pending. Check again to continue verification."
                   : setupState === "confirmation-unavailable"
                     ? "The wallet or configured fork could not confirm the submitted hash. Check again first; retry is offered only after the server proves that the step had no effect."
-                    : "Save your draft before activation. This local fork creation uses up to two explicit token approvals (35,000 USDC and 5 WETH to the reviewed factory spender), followed by exactly one wallet transaction that creates, funds, configures, and authorizes the Space. MockAqua is a test-only fixture. Trading starts only after server verification."
+                    : "Save your draft before activation. This local fork creation uses up to two explicit token approvals (35,000 USDC and 5 WETH to the reviewed factory spender), followed by exactly one wallet transaction that creates, funds, configures, and authorizes the Space through the configured Aqua integration. Trading starts only after server verification."
                 : "Saving creates a durable draft. Activation or a rule change requires another exact signature; a rejected wallet request leaves the previous state unchanged."}
             </p>
           </div>

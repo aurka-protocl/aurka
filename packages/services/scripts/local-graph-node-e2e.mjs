@@ -13,6 +13,7 @@ import os from "node:os";
 import path from "node:path";
 import { once } from "node:events";
 import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import net from "node:net";
 
 import {
@@ -262,7 +263,7 @@ async function waitHttp(url, label, timeout = STARTUP_TIMEOUT_MS) {
   throw new Error(`${label} did not become reachable in time`);
 }
 
-function composeFile(anvilPort, ports) {
+function composeFile(anvilPort, ports, genesisBlockNumber = 0) {
   return `services:
   postgres:
     image: postgres:${POSTGRES_VERSION}
@@ -303,6 +304,7 @@ function composeFile(anvilPort, ports) {
       postgres_db: graph-node
       ipfs: ipfs:5001
       ethereum: localhost:http://host.docker.internal:${anvilPort}
+      GRAPH_ETHEREUM_GENESIS_BLOCK_NUMBER: "${genesisBlockNumber}"
       GRAPH_LOG: info
     ports:
       - "127.0.0.1:${ports.graphql}:8000"
@@ -311,16 +313,19 @@ function composeFile(anvilPort, ports) {
 `;
 }
 
-async function startGraphStack(anvilPort) {
+export async function startGraphStack(anvilPort, requestedPorts = {}) {
   const ports = {
-    graphql: await freePort(),
-    admin: await freePort(),
-    status: await freePort(),
-    ipfs: await freePort(),
+    graphql: requestedPorts.graphql ?? (await freePort()),
+    admin: requestedPorts.admin ?? (await freePort()),
+    status: requestedPorts.status ?? (await freePort()),
+    ipfs: requestedPorts.ipfs ?? (await freePort()),
   };
   const directory = mkdtempSync(path.join(os.tmpdir(), "aurka-graph-node-"));
   const compose = path.join(directory, "docker-compose.yml");
-  writeFileSync(compose, composeFile(anvilPort, ports));
+  writeFileSync(
+    compose,
+    composeFile(anvilPort, ports, requestedPorts.genesisBlockNumber ?? 0),
+  );
   const project =
     process.env.AURKA_GRAPH_PROJECT ??
     `aurka-graph-${process.pid}-${Date.now()}`;
@@ -366,7 +371,7 @@ async function startGraphStack(anvilPort) {
   };
 }
 
-async function stopGraphStack(stack) {
+export async function stopGraphStack(stack) {
   if (!stack) return;
   await run(
     "docker",
@@ -385,7 +390,7 @@ async function stopGraphStack(stack) {
   rmSync(stack.directory, { recursive: true, force: true });
 }
 
-function temporaryManifest(stackDirectory, deployments) {
+export function temporaryManifest(stackDirectory, deployments) {
   // Deploy from the source manifest so graph-cli performs codegen/build for
   // this runtime-calibrated manifest. Deploying the checked-in build manifest
   // makes graph-cli look for a source file named `*.wasm.ts`.
@@ -419,7 +424,7 @@ function temporaryManifest(stackDirectory, deployments) {
   return target;
 }
 
-async function deploySubgraph(stack, manifestDirectory) {
+export async function deploySubgraph(stack, manifestDirectory) {
   const name = `aurka-local-${process.pid}-${Date.now()}`.toLowerCase();
   const graphCli = path.join(ROOT, "packages/graph/node_modules/.bin/graph");
   await run(graphCli, ["create", name, "--node", `${stack.admin}/`]);
@@ -454,6 +459,8 @@ async function graphQuery(endpoint, query, variables = {}) {
   check(body.data, "GraphQL response did not include data");
   return body.data;
 }
+
+export { graphQuery, waitForIndexedBlock };
 
 async function waitForIndexedBlock(endpoint, blockNumber) {
   const started = Date.now();
@@ -1555,7 +1562,12 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  console.error(error instanceof Error ? error.message : error);
-  process.exitCode = 1;
-});
+if (
+  process.argv[1] !== undefined &&
+  path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+) {
+  main().catch((error) => {
+    console.error(error instanceof Error ? error.message : error);
+    process.exitCode = 1;
+  });
+}

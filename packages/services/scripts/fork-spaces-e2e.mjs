@@ -203,16 +203,24 @@ try {
       180,
     );
     const creationTransactions = transactions.slice(creationStart);
-    assert.equal(
-      creationTransactions.length,
-      3,
-      "Each new Space requires two explicit token approvals and one setup transaction",
+    const setupTransactions = creationTransactions.filter(
+      (transaction) =>
+        transaction.to.toLowerCase() === manifest.vaultFactory.toLowerCase(),
     );
-    assert.deepEqual(
-      creationTransactions.map((transaction) => transaction.to.toLowerCase()),
-      [manifest.usdc, manifest.weth, manifest.vaultFactory].map((address) =>
-        address.toLowerCase(),
+    const approvalTransactions = creationTransactions.filter((transaction) =>
+      [manifest.usdc, manifest.weth].some(
+        (token) => transaction.to.toLowerCase() === token.toLowerCase(),
       ),
+    );
+    assert.equal(
+      setupTransactions.length,
+      1,
+      "Each new Space uses exactly one factory setup transaction",
+    );
+    assert.equal(
+      approvalTransactions.length,
+      2,
+      "Each new Space uses exactly two funding approvals",
     );
     await owner.reload();
     await owner
@@ -237,6 +245,25 @@ try {
       spaces[0].position.currentPortfolio.assets[0].balance,
       spaces[1].position.currentPortfolio.assets[0].balance,
     );
+  const setupTransactions = transactions.filter(
+    (transaction) =>
+      transaction.to.toLowerCase() === manifest.vaultFactory.toLowerCase(),
+  );
+  const approvalTransactions = transactions.filter((transaction) =>
+    [manifest.usdc, manifest.weth].some(
+      (token) => transaction.to.toLowerCase() === token.toLowerCase(),
+    ),
+  );
+  assert.equal(
+    setupTransactions.length,
+    2,
+    "Each new Space uses exactly one factory setup transaction",
+  );
+  assert.equal(
+    approvalTransactions.length,
+    4,
+    "The two Spaces require two explicit token approvals each",
+  );
   for (const [index, id] of ids.entries()) {
     const otherId = ids[1 - index];
     const beforeOther = (await api(`/v1/spaces/${encodeURIComponent(otherId)}`))
@@ -336,7 +363,8 @@ try {
   assert.equal(
     (await api(`/fork?spaceId=${encodeURIComponent(ids[0])}`)).capacity
       .authorized,
-    false,
+    true,
+    "Rule update must complete a fresh capacity authorization before returning ACTIVE",
   );
   assert.equal(
     (await api(`/v1/spaces/${encodeURIComponent(ids[1])}`)).position.policy

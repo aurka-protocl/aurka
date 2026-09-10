@@ -183,7 +183,11 @@ contract AurkaSettlementAuthority {
             ) revert PolicyStateMismatch();
             (uint248 balance, uint8 tokensCount) =
                 aqua.rawBalances(policy.treasury, router, strategyHash, tokens[i]);
-            if (tokensCount != 1) revert PolicyStateMismatch();
+            // Aqua returns the number of tokens in the strategy, not a
+            // per-token presence flag. Require the complete managed asset
+            // set so a partial or differently-shaped strategy cannot be
+            // valued as the policy portfolio.
+            if (tokensCount != tokens.length) revert PolicyStateMismatch();
             balancesBefore[i] = balance;
             assets[i] = PortfolioBounds.AssetState({
                 token: tokens[i],

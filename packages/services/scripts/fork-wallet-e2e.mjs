@@ -1,8 +1,7 @@
-/* global console, window */
+/* global console, process, window */
 import assert from "node:assert/strict";
 import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 import {
   createPublicClient,
@@ -14,14 +13,11 @@ import { mnemonicToAccount } from "viem/accounts";
 
 // A dedicated EIP-1193 test wallet, injected into Chromium. It signs EIP-712
 // and broadcasts actual transactions; it never uses an unsigned preview path.
-const root = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  "../../..",
-);
+const forkDir = path.resolve(process.env.AURKA_FORK_DIR ?? ".fork-space");
 const manifest = JSON.parse(
-  readFileSync(path.join(root, ".fork-space/manifest.json"), "utf8"),
+  readFileSync(path.join(forkDir, "manifest.json"), "utf8"),
 );
-const output = path.join(root, ".fork-space/evidence");
+const output = path.join(forkDir, "evidence");
 mkdirSync(output, { recursive: true });
 const chain = defineChain({
   id: 31337,

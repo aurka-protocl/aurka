@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, writeFileSync, renameSync } from "node:fs";
-import { decodeEventLog, encodeFunctionData } from "viem";
+import { decodeEventLog, encodeFunctionData, stringToHex } from "viem";
 import { hashBytes, ServiceError } from "../dist/index.js";
 import {
   calculateDirectSettlement,
@@ -494,6 +494,9 @@ export class ForkSpaceLifecycle {
       policyId: hashBytes(`policy:${spaceId}`),
       positionIdHash: hashBytes(spaceId),
       strategyHash: hashBytes(`strategy:${spaceId}`),
+      // Aqua hashes the exact strategy bytes, not an ABI re-encoding. The
+      // direct AURKA adapter treats this as immutable strategy identity.
+      strategy: stringToHex(`strategy:${spaceId}`),
     };
     const treasury = await this.client.readContract({
       ...this.contracts.vaultFactory,
@@ -603,6 +606,7 @@ export class ForkSpaceLifecycle {
             spaceId: definition.positionIdHash,
             policyId: definition.policyId,
             strategyHash: definition.strategyHash,
+            strategy: definition.strategy,
             owner: draft.ownerAddress,
             assets: draft.assets.map(
               ({ token, decimals, minimumWeightBps, maximumWeightBps }) => ({

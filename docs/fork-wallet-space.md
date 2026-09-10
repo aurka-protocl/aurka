@@ -1,13 +1,15 @@
-# One Space on an Ethereum fork
+# Spaces on an Ethereum fork
 
-AURKA-029 runs the canonical AURKA application against a persistent local
-Ethereum fork. All transactions use test funds. The upstream RPC is read only;
-nothing is deployed or broadcast on mainnet.
+The canonical AURKA application can run against a persistent local Ethereum
+fork. The default fork mode uses the real Aqua deployment and Chainlink V3
+rounds from a pinned Ethereum snapshot; fixture mode is explicit. All local
+transactions use test funds. The upstream RPC is read only; nothing is deployed
+or broadcast on mainnet.
 
 ## Start and reset
 
 Prerequisites: Node 23.3.0, pnpm, Foundry (`anvil`, `forge`), and an Ethereum
-mainnet archive RPC that can serve block **22400000**. Put `MAINNET_RPC_URL` in
+mainnet archive RPC that can serve block **25500000**. Put `MAINNET_RPC_URL` in
 the root `.env`. Do not supply a production signing key. This runner ignores
 `DEPLOYER_PRIVATE_KEY`. Run from the repository root:
 
@@ -31,10 +33,11 @@ pnpm fork:reset
 
 Reset discards this local scenario, redeploys, and funds the dedicated accounts
 again. Wallets may cache nonces: clear their local activity/nonce data after a
-reset. Missing or unavailable upstream RPC fails explicitly; this mode never
-falls back to demo fixtures. The mocked price expires after 24 hours; reset to
-start a new priced scenario. Anvil state is periodically saved and saved on
-shutdown. An interrupted initial deployment should be reset.
+reset. Missing or unavailable upstream RPC fails explicitly; real mode never
+falls back to demo fixtures. Anvil state is periodically saved and saved on
+shutdown. An interrupted initial deployment should be reset. Fixture mode is
+explicit: set `AURKA_FORK_INTEGRATION=fixture` and use a separate fork
+directory.
 
 ## Wallet setup
 
@@ -61,9 +64,9 @@ known accounts.
 New fork Spaces use an ordinary `eth_sendTransaction` to
 `AurkaSpaceVaultFactory.createAndInitializeSpace`. The reviewed call deploys the
 deterministic owner vault, pulls exactly **35,000 USDC + 5 WETH**, configures
-the policy and price protection, registers the balances in the explicit local
-MockAqua adapter, derives capacity from the post-funding onchain state, and
-activates trading. There is no normal `wallet_getCapabilities` probe,
+the policy and price protection, calls the real Aqua `ship(...)` registration
+with the exact strategy bytes, derives capacity from the post-funding onchain
+state, and activates trading. There is no normal `wallet_getCapabilities` probe,
 `wallet_sendCalls` batch, separate capacity transaction, or eleven-transaction
 fallback.
 
@@ -96,10 +99,10 @@ obtained through the real WETH deposit function. No token code is replaced.
    The Space is ready only after its canonical receipt and initialized state are
    verified; no Grant allowance or Authorize capacity step follows.
 3. Open the same app in another profile at the Space's `/trade/:spaceId` route
-   with Bob selected. Connect, request 2 WETH, and inspect the partial fill. At
-   the explicitly mocked price of 3,200 reference units/WETH, the request is
-   worth 6,400, exceeding the 5,000 limit. The review shows exact raw-token-
-   scaled input/output and fee legs.
+   with Bob selected. Connect, request the supported WETH amount, and inspect
+   the quote. The screen identifies the real Chainlink source, its normalized
+   settlement precision, and the raw-round evidence in the fork manifest. The
+   review shows exact raw-token-scaled input/output and fee legs.
 4. Accept the reviewed amounts. **Review and sign exact trade** requests the
    required WETH allowance and an EIP-712 intent signature. It then simulates
    the signed router transaction. **Prepared** means it has not yet been
@@ -120,6 +123,15 @@ obtained through the real WETH deposit function. No token code is replaced.
    prepared state are invalidated when wallet context or relevant state changes.
 
 ## Integration checks
+
+For the full TASK99-006 release rehearsal, use one command. It starts a fresh
+real fork, deploys a same-fork Graph Node stack, runs the two-Space Alice/Bob
+journey, verifies Graph-backed Activity, simulates a Graph outage/restart, and
+writes sanitized evidence when `AURKA_RELEASE_EVIDENCE_DIR` is set:
+
+```sh
+pnpm integration:fork-real
+```
 
 With a freshly reset runner active in one terminal, run in another:
 
@@ -164,22 +176,24 @@ forge test --match-contract 'AurkaPolicyRegistryTest|AurkaSwapVMRouterTest|Direc
   and replayed idempotently after restart. Browser receipt checks use the actual
   submitted hash; the legacy API's synthetic pending preparation identifier is
   not a chain hash.
-- MockAqua is deliberately an unrestricted test fixture, not production custody
-  or a secure external integration. Actual ERC20 transfers occur in Alice's
-  account. MockPriceOracle holds fixed USDC=1 and WETH=3200 reference prices.
-  FixtureProposalSigner is the public test solver. All are named in the UI and
-  deployment manifest. The price is not an executable external market quote.
+- Real mode uses the deployed Aqua contract at
+  `0x499943e74fb0ce105688beee8ef2abec5d936d31`, and the locally deployed
+  `ChainlinkPriceOracle` reads the pinned ETH/USD and USDC/USD rounds. The
+  adapter normalizes those 8-decimal answers to the whole settlement units used
+  by this MVP and fingerprints both raw and normalized values.
+  `AurkaDirectSwapVM` is the narrow AURKA execution adapter; upstream SwapVM is
+  not claimed. `FixtureProposalSigner` remains the public test solver. The
+  manifest labels every fixture and real dependency.
 - New user Spaces use the typed factory entry point and the two fork tokens. The
   predefined demo Spaces retain their seeded fixture allocations. The factory
   keeps owner governance on each policy and finalized vault; it has no owner
-  withdrawal path or arbitrary-call surface. Task 030 must replace the explicit
-  MockAqua seed adapter with a production-supported Aqua initialization path if
-  live external custody is required.
+  withdrawal path or arbitrary-call surface. Fixture mode retains the explicit
+  MockAqua seed path and is never presented as real integration evidence.
 - Standard application startup without `VITE_AURKA_MODE=fork` retains the
   labelled unsigned demo. Fork mode uses the same canonical routes and shell;
   its wallet state is shared by the header, Space settings, and trade flow.
 
-The seeded WETH reference price is 3200 so whole reference-unit fills map
-exactly to 18-decimal WETH. This avoids claiming support for nonrepresentable
-raw amounts in the current whole-unit settlement model; 030 must retain rounding
-checks.
+Fixture mode uses a seeded WETH reference price of 3200 so whole reference-unit
+fills map exactly to 18-decimal WETH. Real mode uses the pinned Chainlink round
+and explicitly records whole-settlement-unit normalization; it does not silently
+pretend fixture precision is market precision.

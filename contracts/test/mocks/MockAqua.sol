@@ -8,6 +8,8 @@ import { IERC20Minimal } from "../../src/interfaces/IERC20Minimal.sol";
 /// virtual-balance direction and intentionally has no external dependencies.
 contract MockAqua is IAqua {
     mapping(bytes32 key => uint256 balance) private _balances;
+    mapping(bytes32 strategyKey => uint8 tokensCount) private _tokenCounts;
+    mapping(bytes32 strategyKey => mapping(address token => bool)) private _knownToken;
     address public callbackTarget;
     bytes public callbackData;
     bool public callbackAttempted;
@@ -16,6 +18,11 @@ contract MockAqua is IAqua {
     function seed(address maker, address app, bytes32 strategyHash, address token, uint256 amount)
         external
     {
+        bytes32 strategyKey = _strategyKey(maker, app, strategyHash);
+        if (!_knownToken[strategyKey][token]) {
+            _knownToken[strategyKey][token] = true;
+            ++_tokenCounts[strategyKey];
+        }
         _balances[_key(maker, app, strategyHash, token)] = amount;
     }
 
@@ -26,7 +33,7 @@ contract MockAqua is IAqua {
     {
         uint256 stored = _balances[_key(maker, app, strategyHash, token)];
         require(stored <= type(uint248).max, "balance overflow");
-        return (uint248(stored), 1);
+        return (uint248(stored), _tokenCounts[_strategyKey(maker, app, strategyHash)]);
     }
 
     function safeBalances(
@@ -42,12 +49,20 @@ contract MockAqua is IAqua {
         );
     }
 
-    function ship(address, bytes calldata strategy, address[] calldata, uint256[] calldata)
-        external
-        pure
-        returns (bytes32 strategyHash)
-    {
-        return keccak256(strategy);
+    function ship(
+        address app,
+        bytes calldata strategy,
+        address[] calldata tokens,
+        uint256[] calldata amounts
+    ) external returns (bytes32 strategyHash) {
+        require(tokens.length == amounts.length && tokens.length > 0, "strategy");
+        strategyHash = keccak256(strategy);
+        bytes32 strategyKey = _strategyKey(msg.sender, app, strategyHash);
+        _tokenCounts[strategyKey] = uint8(tokens.length);
+        for (uint256 i; i < tokens.length; ++i) {
+            _knownToken[strategyKey][tokens[i]] = true;
+            _balances[_key(msg.sender, app, strategyHash, tokens[i])] = amounts[i];
+        }
     }
 
     function dock(address, bytes32, address[] calldata) external pure { }
@@ -91,5 +106,13 @@ contract MockAqua is IAqua {
         returns (bytes32)
     {
         return keccak256(abi.encode(maker, app, strategyHash, token));
+    }
+
+    function _strategyKey(address maker, address app, bytes32 strategyHash)
+        private
+        pure
+        returns (bytes32)
+    {
+        return keccak256(abi.encode(maker, app, strategyHash));
     }
 }

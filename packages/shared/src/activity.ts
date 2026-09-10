@@ -58,6 +58,7 @@ export const activityEvidenceSchema = z
   .object({
     tradeEventId: identifierSchema.optional(),
     feeEventId: identifierSchema.optional(),
+    graphEntityId: identifierSchema.optional(),
     receiptHash: transactionHashSchema.optional(),
     blockHash: bytes32Schema.optional(),
   })

@@ -18,7 +18,9 @@ import {
   defineChain,
   http,
   encodeFunctionData,
+  keccak256,
   parseAbi,
+  stringToHex,
 } from "viem";
 import { mnemonicToAccount } from "viem/accounts";
 import {
@@ -65,11 +67,38 @@ const DIR = process.env.AURKA_FORK_DIR
   : path.join(ROOT, ".fork-space");
 const RPC_PORT = Number(process.env.AURKA_FORK_RPC_PORT ?? 8545);
 const RPC = `http://127.0.0.1:${RPC_PORT}`;
+const FORK_BIND_HOST = process.env.AURKA_FORK_BIND_HOST ?? "127.0.0.1";
 const API_PORT = Number(process.env.AURKA_FORK_API_PORT ?? 8797);
 const APP_PORT = Number(process.env.AURKA_FORK_APP_PORT ?? 3011);
-const FORK_BLOCK = 22400000;
+const GRAPH_ENDPOINT = process.env.AURKA_GRAPH_ENDPOINT;
+const GRAPH_ENDPOINT_FILE = process.env.AURKA_GRAPH_ENDPOINT_FILE;
+const INTEGRATION_MODE = process.env.AURKA_FORK_INTEGRATION ?? "real";
+if (INTEGRATION_MODE !== "real" && INTEGRATION_MODE !== "fixture")
+  throw new Error('AURKA_FORK_INTEGRATION must be "real" or "fixture".');
+const FORK_BLOCK = Number(
+  process.env.AURKA_FORK_BLOCK ??
+    (INTEGRATION_MODE === "real" ? 25500000 : 22400000),
+);
 const USDC = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
 const WETH = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
+// Official 1inch Aqua deployment on Ethereum mainnet. The local AURKA
+// router remains the app; the upstream SwapVM router is intentionally not
+// substituted for it because AURKA's direct program is a separate adapter.
+const REAL_AQUA = "0x499943e74fb0ce105688beee8ef2abec5d936d31";
+const CHAINLINK_ETH_USD = "0x5f4ec3df9cbd43714fe2740f5e3616155c5b8419";
+const CHAINLINK_USDC_USD = "0x8fFfFfd4AfB6115b954Bd326cbe7B4BA576818f6";
+const CHAINLINK_ABI = parseAbi([
+  "function decimals() view returns (uint8)",
+  "function latestRoundData() view returns (uint80 roundId, int256 answer, uint256 startedAt, uint256 updatedAt, uint80 answeredInRound)",
+]);
+const REAL_AQUA_ABI = parseAbi([
+  "function rawBalances(address,address,bytes32,address) view returns (uint248 balance, uint8 tokensCount)",
+  "function safeBalances(address,address,bytes32,address,address) view returns (uint256 balance0, uint256 balance1)",
+  "function ship(address,bytes,address[],uint256[]) returns (bytes32)",
+  "function dock(address,bytes32,address[])",
+  "function pull(address,bytes32,address,uint256,address)",
+  "function push(address,address,bytes32,address,uint256)",
+]);
 // Public Anvil test derivation only. Never consume DEPLOYER_PRIVATE_KEY.
 const MNEMONIC = "test test test test test test test test test test test junk";
 const stringify = (value) =>
@@ -78,6 +107,282 @@ const stringify = (value) =>
     (_, item) => (typeof item === "bigint" ? item.toString() : item),
     2,
   );
+
+const GRAPH_ACTIVITY_QUERY = `query AurkaActivity {
+  tradeExecuteds(first: 200, orderBy: id, orderDirection: asc) {
+    id chainId contract blockNumber blockHash occurredAt transactionHash logIndex
+    policyId positionIdHash intentHash proposalHash trader treasury
+    traderInputToken traderOutputToken traderInputValue traderOutputValue
+    totalFeeAmount consumedBefore consumedAfter expectedPostStateHash
+  }
+  feesRouteds(first: 200, orderBy: id, orderDirection: asc) {
+    id chainId contract blockNumber blockHash occurredAt transactionHash logIndex
+    proposalHash feeToken solver protocolRecipient solverAmount protocolAmount treasuryAmount
+  }
+  policyMutations(first: 200, orderBy: id, orderDirection: asc) {
+    id chainId contract blockNumber blockHash occurredAt transactionHash logIndex
+    policyId eventName nonce paused actor payload
+  }
+  spaceInitializeds(first: 200, orderBy: id, orderDirection: asc) {
+    id chainId contract blockNumber blockHash occurredAt transactionHash logIndex
+    spaceId policyId owner vault usdcAmount wethAmount capacityEpochId capacityBaseline
+  }
+  _meta { deployment hasIndexingErrors block { number hash timestamp } }
+}`;
+
+async function readGraphActivity() {
+  const endpoint =
+    GRAPH_ENDPOINT ??
+    (GRAPH_ENDPOINT_FILE && existsSync(GRAPH_ENDPOINT_FILE)
+      ? readFileSync(GRAPH_ENDPOINT_FILE, "utf8").trim()
+      : undefined);
+  if (!endpoint) return undefined;
+  let response;
+  try {
+    response = await fetch(endpoint, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ query: GRAPH_ACTIVITY_QUERY, variables: {} }),
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!response.ok) throw new Error(`Graph HTTP ${response.status}`);
+    const body = await response.json();
+    if (body.errors?.length)
+      throw new Error(body.errors.map((item) => item.message).join("; "));
+    if (!body.data?._meta) throw new Error("Graph response has no metadata");
+    const meta = body.data._meta;
+    if (meta.hasIndexingErrors)
+      throw new Error("Graph Node reports indexing errors");
+    if (!meta.block || Number(meta.block.number) < 0)
+      throw new Error("Graph response has no indexed block");
+    return body.data;
+  } catch (error) {
+    throw new ServiceError(
+      "GRAPH_ACTIVITY_UNAVAILABLE",
+      `Confirmed Activity is unavailable until the same-fork Graph endpoint recovers: ${error instanceof Error ? error.message : String(error)}`,
+      503,
+      { endpoint, state: "UNAVAILABLE" },
+    );
+  }
+}
+
+function graphHex(value) {
+  return typeof value === "string" ? value : "0x";
+}
+
+function graphPosition(definitions, positionIdHash) {
+  return definitions.find(
+    (space) =>
+      space.positionIdHash?.toLowerCase() === positionIdHash?.toLowerCase(),
+  );
+}
+
+function graphTradeActivity(data, definitions) {
+  const fees = new Map(
+    (data.feesRouteds ?? []).map((fee) => [
+      fee.proposalHash.toLowerCase(),
+      fee,
+    ]),
+  );
+  return (data.tradeExecuteds ?? []).flatMap((trade) => {
+    const definition = graphPosition(definitions, trade.positionIdHash);
+    if (!definition) return [];
+    const fee = fees.get(trade.proposalHash.toLowerCase());
+    const totalFee = fee
+      ? BigInt(fee.solverAmount) +
+        BigInt(fee.protocolAmount) +
+        BigInt(fee.treasuryAmount)
+      : BigInt(trade.totalFeeAmount);
+    return [
+      {
+        id: `graph:trade:${trade.id}`,
+        type: "SWAP",
+        spaceId: definition.positionId,
+        spaceName: definition.name ?? definition.positionId,
+        positionId: definition.positionId,
+        chainId: Number(trade.chainId),
+        status: "CONFIRMED",
+        source: "CHAIN_EVENT",
+        transactionHash: trade.transactionHash,
+        intentHash: graphHex(trade.intentHash),
+        proposalHash: graphHex(trade.proposalHash),
+        trader: trade.trader,
+        actor: trade.trader,
+        treasury: trade.treasury,
+        traderInputToken: trade.traderInputToken,
+        traderOutputToken: trade.traderOutputToken,
+        traderInputSymbol: "WETH",
+        traderOutputSymbol: "USDC",
+        requestedTraderInputValue: trade.traderInputValue,
+        executedTraderInputValue: trade.traderInputValue,
+        traderOutputValue: trade.traderOutputValue,
+        submittedAt: Number(trade.occurredAt),
+        occurredAt: Number(trade.occurredAt),
+        confirmedAt: Number(trade.occurredAt),
+        blockNumber: String(trade.blockNumber),
+        bindingConstraint: "NONE",
+        feeState: fee ? "EARNED" : "NONE",
+        ...(fee
+          ? {
+              earnedFee: {
+                feeToken: fee.feeToken,
+                treasuryAmount: fee.treasuryAmount,
+                solverAmount: fee.solverAmount,
+                protocolAmount: fee.protocolAmount,
+                totalAmount: totalFee.toString(),
+                unit: "NORMALIZED_SETTLEMENT_VALUE",
+                eventId: `graph:fee:${fee.id}`,
+              },
+            }
+          : {}),
+        expectedPostStateHash: graphHex(trade.expectedPostStateHash),
+        evidence: {
+          tradeEventId: `graph:trade:${trade.id}`,
+          ...(fee ? { feeEventId: `graph:fee:${fee.id}` } : {}),
+          graphEntityId: trade.id,
+          receiptHash: trade.transactionHash,
+          blockHash: trade.blockHash,
+        },
+      },
+    ];
+  });
+}
+
+function graphChangeActivity(data, definitions) {
+  return (data.policyMutations ?? []).flatMap((change) => {
+    const definition = definitions.find(
+      (space) =>
+        space.policyId?.toLowerCase() === change.policyId?.toLowerCase(),
+    );
+    if (!definition) return [];
+    const statusEvent = change.eventName === "PauseStatusUpdated";
+    const type = statusEvent ? "TRADING_STATUS" : "RULE_CHANGE";
+    return [
+      {
+        id: `graph:policy:${change.id}`,
+        type,
+        spaceId: definition.positionId,
+        spaceName: definition.name ?? definition.positionId,
+        positionId: definition.positionId,
+        chainId: Number(change.chainId),
+        status: "CONFIRMED",
+        source: "CHAIN_EVENT",
+        actor: change.actor,
+        transactionHash: change.transactionHash,
+        submittedAt: Number(change.occurredAt),
+        occurredAt: Number(change.occurredAt),
+        confirmedAt: Number(change.occurredAt),
+        blockNumber: String(change.blockNumber),
+        eventType:
+          type === "TRADING_STATUS"
+            ? change.paused
+              ? "SPACE_PAUSED"
+              : "SPACE_RESUMED"
+            : "SPACE_UPDATED",
+        evidence: {
+          receiptHash: change.transactionHash,
+          blockHash: change.blockHash,
+          graphEntityId: change.id,
+        },
+        payload: {
+          eventName: change.eventName,
+          nonce: String(change.nonce),
+          graphEntityId: change.id,
+        },
+      },
+    ];
+  });
+}
+
+function graphSpaceActivity(data, definitions) {
+  return (data.spaceInitializeds ?? []).flatMap((event) => {
+    const definition = definitions.find(
+      (space) =>
+        space.positionIdHash?.toLowerCase() === event.spaceId?.toLowerCase(),
+    );
+    if (!definition) return [];
+    return [
+      {
+        id: `graph:space:${event.id}`,
+        type: "RULE_CHANGE",
+        spaceId: definition.positionId,
+        spaceName: definition.name ?? definition.positionId,
+        positionId: definition.positionId,
+        chainId: Number(event.chainId),
+        status: "CONFIRMED",
+        source: "CHAIN_EVENT",
+        actor: event.owner,
+        transactionHash: event.transactionHash,
+        submittedAt: Number(event.occurredAt),
+        occurredAt: Number(event.occurredAt),
+        confirmedAt: Number(event.occurredAt),
+        blockNumber: String(event.blockNumber),
+        eventType: "SPACE_ACTIVATED",
+        evidence: {
+          receiptHash: event.transactionHash,
+          blockHash: event.blockHash,
+          graphEntityId: event.id,
+        },
+        payload: { eventName: "SpaceInitialized", graphEntityId: event.id },
+      },
+    ];
+  });
+}
+
+async function graphActivityPage(query, localService, definitions) {
+  const data = await readGraphActivity();
+  const graphItems = [
+    ...graphTradeActivity(data, definitions),
+    ...graphChangeActivity(data, definitions),
+    ...graphSpaceActivity(data, definitions),
+  ];
+  const local = localService.listActivity(query);
+  const graphTransactions = new Set(
+    graphItems
+      .map((item) => item.transactionHash?.toLowerCase())
+      .filter(Boolean),
+  );
+  const retainedLocal = local.items.filter(
+    (item) =>
+      item.status === "PREPARED" ||
+      item.status === "PENDING" ||
+      item.status === "FAILED" ||
+      !item.transactionHash ||
+      !graphTransactions.has(item.transactionHash.toLowerCase()),
+  );
+  const merged = [...graphItems, ...retainedLocal]
+    .filter(
+      (item) => query.spaceId === undefined || item.spaceId === query.spaceId,
+    )
+    .filter(
+      (item) =>
+        query.positionId === undefined || item.positionId === query.positionId,
+    )
+    .filter(
+      (item) => query.chainId === undefined || item.chainId === query.chainId,
+    )
+    .filter((item) => query.type === undefined || item.type === query.type)
+    .filter(
+      (item) => query.status === undefined || item.status === query.status,
+    )
+    .filter(
+      (item) =>
+        query.from === undefined ||
+        (item.occurredAt ?? item.submittedAt) >= query.from,
+    )
+    .filter(
+      (item) =>
+        query.to === undefined ||
+        (item.occurredAt ?? item.submittedAt) <= query.to,
+    )
+    .sort(
+      (left, right) =>
+        (right.occurredAt ?? right.submittedAt) -
+          (left.occurredAt ?? left.submittedAt) ||
+        right.id.localeCompare(left.id),
+    );
+  return { items: merged.slice(0, query.limit), nextCursor: null };
+}
 const accounts = [0, 1, 2].map((addressIndex) =>
   mnemonicToAccount(MNEMONIC, { addressIndex }),
 );
@@ -104,6 +409,7 @@ const erc20Abi = parseAbi([
 ]);
 const children = [];
 let api, gateway, database;
+let integrationEvidence;
 let stopping = false;
 async function stop() {
   if (stopping) return;
@@ -148,7 +454,76 @@ async function main() {
       transport: http(upstream, { timeout: 15000, retryCount: 0 }),
     });
     if ((await upstreamClient.getChainId()) !== 1) throw new Error();
-    await upstreamClient.getBlock({ blockNumber: BigInt(FORK_BLOCK) });
+    const forkBlock = await upstreamClient.getBlock({
+      blockNumber: BigInt(FORK_BLOCK),
+    });
+    if (INTEGRATION_MODE === "real") {
+      const codeTargets = {
+        aqua: REAL_AQUA,
+        usdc: USDC,
+        weth: WETH,
+        chainlinkEthUsd: CHAINLINK_ETH_USD,
+        chainlinkUsdcUsd: CHAINLINK_USDC_USD,
+      };
+      const code = {};
+      for (const [name, address] of Object.entries(codeTargets)) {
+        const runtime = await upstreamClient.getCode({
+          address,
+          blockNumber: BigInt(FORK_BLOCK),
+        });
+        if (!runtime || runtime === "0x")
+          throw new Error(`${name} has no bytecode at the pinned fork block`);
+        code[name] = {
+          address,
+          bytes: (runtime.length - 2) / 2,
+          codeHash: keccak256(runtime),
+        };
+      }
+      const feeds = {};
+      for (const [name, feed] of [
+        ["ETH/USD", CHAINLINK_ETH_USD],
+        ["USDC/USD", CHAINLINK_USDC_USD],
+      ]) {
+        const decimals = await upstreamClient.readContract({
+          address: feed,
+          abi: CHAINLINK_ABI,
+          functionName: "decimals",
+          blockNumber: BigInt(FORK_BLOCK),
+        });
+        const round = await upstreamClient.readContract({
+          address: feed,
+          abi: CHAINLINK_ABI,
+          functionName: "latestRoundData",
+          blockNumber: BigInt(FORK_BLOCK),
+        });
+        const answer = round[1];
+        const updatedAt = round[3];
+        if (
+          decimals > 36 ||
+          answer <= 0n ||
+          updatedAt === 0n ||
+          updatedAt > forkBlock.timestamp
+        )
+          throw new Error(
+            `${name} is not a valid positive round at the pinned fork block`,
+          );
+        feeds[name] = {
+          address: feed,
+          decimals,
+          roundId: round[0],
+          answer,
+          observedAt: updatedAt,
+        };
+      }
+      integrationEvidence = {
+        chainId: 1,
+        forkBlock: FORK_BLOCK,
+        forkTimestamp: forkBlock.timestamp,
+        aqua: code.aqua,
+        tokens: { USDC: code.usdc, WETH: code.weth },
+        priceFeeds: feeds,
+      };
+    }
   } catch {
     throw new Error(
       `MAINNET_RPC_URL cannot read Ethereum mainnet block ${FORK_BLOCK}; no demo fallback.`,
@@ -172,7 +547,7 @@ async function main() {
     "anvil",
     [
       "--host",
-      "127.0.0.1",
+      FORK_BIND_HOST,
       "--port",
       String(RPC_PORT),
       "--chain-id",
@@ -188,8 +563,7 @@ async function main() {
       stateFile,
       "--state-interval",
       "5",
-      "--block-time",
-      "1",
+      ...(INTEGRATION_MODE === "fixture" ? ["--block-time", "1"] : []),
     ],
     { cwd: ROOT, stdio: "ignore" },
   );
@@ -214,8 +588,13 @@ async function main() {
     throw new Error(
       `Anvil fork startup failed. Check archive RPC availability and local port ${RPC_PORT}.`,
     );
+  // Real mode keeps the fork's historical clock. Rewriting it to wall-clock
+  // time would falsely make a historical oracle round appear fresh.
   const currentTime = Math.floor(Date.now() / 1000);
-  if (Number((await client.getBlock()).timestamp) < currentTime) {
+  if (
+    INTEGRATION_MODE === "fixture" &&
+    Number((await client.getBlock()).timestamp) < currentTime
+  ) {
     await client.request({
       method: "evm_setNextBlockTimestamp",
       params: [currentTime],
@@ -226,6 +605,10 @@ async function main() {
   const manifestFile = path.join(DIR, "manifest.json");
   if (existsSync(manifestFile)) {
     manifest = JSON.parse(readFileSync(manifestFile, "utf8"));
+    if ((manifest.integrationMode ?? "fixture") !== INTEGRATION_MODE)
+      throw new Error(
+        `Saved fork uses ${manifest.integrationMode ?? "fixture"} integrations; requested ${INTEGRATION_MODE}. Stop it and use a separate AURKA_FORK_DIR or reset only that isolated fork.`,
+      );
     if (!(await client.getCode({ address: manifest.router })))
       throw new Error(
         "Saved deployment is absent from fork state; run fork:reset.",
@@ -238,8 +621,18 @@ async function main() {
     const riskRegistry = await deploy(wallet, client, "RiskModeRegistry", [
       policyRegistry.address,
     ]);
-    const aqua = await deploy(wallet, client, "MockAqua");
-    const oracle = await deploy(wallet, client, "MockPriceOracle");
+    const aqua =
+      INTEGRATION_MODE === "real"
+        ? { address: REAL_AQUA, abi: REAL_AQUA_ABI }
+        : await deploy(wallet, client, "MockAqua");
+    const oracle =
+      INTEGRATION_MODE === "real"
+        ? await deploy(wallet, client, "ChainlinkPriceOracle", [
+            [USDC, WETH],
+            [CHAINLINK_USDC_USD, CHAINLINK_ETH_USD],
+            0,
+          ])
+        : await deploy(wallet, client, "MockPriceOracle");
     const swapVM = await deploy(wallet, client, "AurkaDirectSwapVM");
     const router = await deploy(wallet, client, "AurkaSwapVMRouter", [
       policyRegistry.address,
@@ -256,7 +649,11 @@ async function main() {
     await write(wallet, client, policyRegistry, "setInitializationFactory", [
       vaultFactory.address,
     ]);
-    console.log("AURKA fork contracts deployed; seeding fork token balances.");
+    console.log(
+      INTEGRATION_MODE === "real"
+        ? "AURKA real fork contracts deployed; registering strategies in upstream Aqua."
+        : "AURKA fixture fork contracts deployed; seeding fixture balances.",
+    );
     const alice = accounts[0].address;
     await write(wallet, client, policyRegistry, "createPolicy", [
       POLICY_ID,
@@ -294,7 +691,6 @@ async function main() {
       STRATEGY_HASH,
       oracle.address,
     ]);
-    // Explicitly mocked, fixed reference prices, valid for this one-day test session.
     await write(wallet, client, policyRegistry, "setPriceProtection", [
       POLICY_ID,
       86400n,
@@ -341,18 +737,20 @@ async function main() {
       86400n,
       100,
     ]);
-    const block = await client.getBlock();
-    for (const [token, price, byte] of [
-      [USDC, 1n, "11"],
-      [WETH, 3200n, "22"],
-    ])
-      await write(wallet, client, oracle, "setPrice", [
-        token,
-        price,
-        0,
-        block.timestamp,
-        `0x${byte.repeat(32)}`,
-      ]);
+    if (INTEGRATION_MODE === "fixture") {
+      const block = await client.getBlock();
+      for (const [token, price, byte] of [
+        [USDC, 1n, "11"],
+        [WETH, 3200n, "22"],
+      ])
+        await write(wallet, client, oracle, "setPrice", [
+          token,
+          price,
+          0,
+          block.timestamp,
+          `0x${byte.repeat(32)}`,
+        ]);
+    }
     // Local impersonation transfers real fork USDC; never broadcast to upstream.
     const holder = "0x55FE002aefF02F77364de339a1292923A15844B8";
     await client.request({
@@ -402,31 +800,62 @@ async function main() {
       )
         throw new Error("WETH funding failed");
     }
-    for (const [token, amount] of [
-      [USDC, 70000n * 1000000n],
-      [WETH, 10n * 10n ** 18n],
-    ])
-      await write(wallet, client, aqua, "seed", [
-        alice,
-        router.address,
+    const strategies = [
+      [
+        stringToHex("strategy:local-settlement-e2e"),
         STRATEGY_HASH,
-        token,
-        amount,
-      ]);
-    for (const [token, amount] of [
-      [USDC, 35000n * 1000000n],
-      [WETH, 5n * 10n ** 18n],
-    ])
-      await write(wallet, client, aqua, "seed", [
-        alice,
-        router.address,
+        [70000n * 1000000n, 10n * 10n ** 18n],
+      ],
+      [
+        stringToHex("strategy:local-settlement-e2e-secondary"),
         SECOND_SPACE.strategyHash,
-        token,
-        amount,
-      ]);
+        [35000n * 1000000n, 5n * 10n ** 18n],
+      ],
+    ];
+    if (INTEGRATION_MODE === "real") {
+      for (const [strategy, expectedHash, amounts] of strategies) {
+        for (const [token, amount] of [
+          [USDC, amounts[0]],
+          [WETH, amounts[1]],
+        ]) {
+          await write(
+            wallet,
+            client,
+            { address: token, abi: erc20Abi },
+            "approve",
+            [REAL_AQUA, amount],
+          );
+        }
+        const hash = await write(wallet, client, aqua, "ship", [
+          router.address,
+          strategy,
+          [USDC, WETH],
+          amounts,
+        ]);
+        if (keccak256(strategy).toLowerCase() !== expectedHash.toLowerCase())
+          throw new Error(
+            "Pinned local strategy hash does not match Aqua strategy bytes",
+          );
+        void hash;
+      }
+    } else {
+      for (const [, strategyHash, amounts] of strategies)
+        for (const [token, amount] of [
+          [USDC, amounts[0]],
+          [WETH, amounts[1]],
+        ])
+          await write(wallet, client, aqua, "seed", [
+            alice,
+            router.address,
+            strategyHash,
+            token,
+            amount,
+          ]);
+    }
     // Alice explicitly enables allowance and epoch from her browser wallet.
     manifest = {
       mode: "fork",
+      integrationMode: INTEGRATION_MODE,
       name: "Team inventory",
       chainId: CHAIN_ID,
       upstreamChainId: 1,
@@ -450,11 +879,39 @@ async function main() {
       vaultFactoryVersion: 2,
       spaceCreationMode: "single-transaction",
       deploymentBlock: Number((await client.getBlock()).number),
-      mocks: [
-        "MockAqua: unrestricted test virtual balances; not production Aqua",
-        "MockPriceOracle: fixed USDC=1 and WETH=3200 reference units; valid 24 hours",
-        "FixtureProposalSigner: public test solver",
-      ],
+      aquaKind: INTEGRATION_MODE === "real" ? "REAL_AQUA" : "MOCK_AQUA",
+      oracleKind: INTEGRATION_MODE === "real" ? "CHAINLINK_V3" : "MOCK_ORACLE",
+      priceSource:
+        INTEGRATION_MODE === "real"
+          ? {
+              quoteCurrency: "USD",
+              feeds: { USDC: CHAINLINK_USDC_USD, WETH: CHAINLINK_ETH_USD },
+              feedDecimals: 8,
+              settlementPriceDecimals: 0,
+              normalization:
+                "nearest whole settlement value; raw round is fingerprinted",
+              maximumAgeSeconds: 86400,
+            }
+          : { quoteCurrency: "fixture-value", maximumAgeSeconds: 86400 },
+      graph: GRAPH_ENDPOINT
+        ? {
+            endpoint: GRAPH_ENDPOINT,
+            source: "same-fork-graph-node",
+            query:
+              "TradeExecuted + FeesRouted + PolicyMutation + SpaceInitialized",
+          }
+        : { status: "not-configured" },
+      executionEngine:
+        "AURKA_DIRECT_PAIR_V1 (AurkaDirectSwapVM adapter; upstream SwapVM not used)",
+      integrationEvidence,
+      mocks:
+        INTEGRATION_MODE === "real"
+          ? ["FixtureProposalSigner: public test solver"]
+          : [
+              "MockAqua: explicit fixture-only virtual balances",
+              "MockPriceOracle: fixed USDC=1 and WETH=3200 fixture values",
+              "FixtureProposalSigner: public test solver",
+            ],
       funding:
         "Fork-only USDC holder impersonation and WETH deposit; dedicated public Anvil accounts 0/1",
       spaces: [
@@ -521,14 +978,26 @@ async function main() {
       ["vaultFactory", "AurkaSpaceVaultFactory"],
       ["policyRegistry", "AurkaPolicyRegistry"],
       ["riskRegistry", "RiskModeRegistry"],
-      ["aqua", "MockAqua"],
-      ["oracle", "MockPriceOracle"],
       ["router", "AurkaSwapVMRouter"],
     ].map(([key, name]) => [
       key,
       { address: manifest[key], abi: artifact(name).abi },
     ]),
   );
+  contracts.aqua = {
+    address: manifest.aqua,
+    abi:
+      manifest.aquaKind === "REAL_AQUA"
+        ? REAL_AQUA_ABI
+        : artifact("MockAqua").abi,
+  };
+  contracts.oracle = {
+    address: manifest.oracle,
+    abi:
+      manifest.oracleKind === "CHAINLINK_V3"
+        ? artifact("ChainlinkPriceOracle").abi
+        : artifact("MockPriceOracle").abi,
+  };
   contracts.erc20Abi = erc20Abi;
   contracts.vaultAbi = artifact("AurkaSpaceVault").abi;
   const solver = new FixtureProposalSigner();
@@ -1035,6 +1504,44 @@ async function main() {
           "cache-control": "no-store",
         });
         response.end(stringify(transaction));
+      } else if (
+        request.method === "GET" &&
+        url.pathname === "/v1/activity" &&
+        (GRAPH_ENDPOINT ||
+          (GRAPH_ENDPOINT_FILE && existsSync(GRAPH_ENDPOINT_FILE)))
+      ) {
+        const numberValue = (name) => {
+          const value = url.searchParams.get(name);
+          return value === null ? undefined : Number(value);
+        };
+        const query = {
+          ...(url.searchParams.get("spaceId")
+            ? { spaceId: url.searchParams.get("spaceId") }
+            : {}),
+          ...(url.searchParams.get("positionId")
+            ? { positionId: url.searchParams.get("positionId") }
+            : {}),
+          ...(url.searchParams.get("chainId")
+            ? { chainId: numberValue("chainId") }
+            : {}),
+          ...(url.searchParams.get("status")
+            ? { status: url.searchParams.get("status") }
+            : {}),
+          ...(url.searchParams.get("type")
+            ? { type: url.searchParams.get("type") }
+            : {}),
+          ...(url.searchParams.get("from")
+            ? { from: numberValue("from") }
+            : {}),
+          ...(url.searchParams.get("to") ? { to: numberValue("to") } : {}),
+          limit: numberValue("limit") ?? 20,
+        };
+        const page = await graphActivityPage(query, service, spaceDefinitions);
+        response.writeHead(200, {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+        });
+        response.end(stringify({ ok: true, data: page }));
       } else {
         for (const space of spaceDefinitions)
           if (providers.has(space.positionId)) await refresh(space.positionId);
@@ -1120,7 +1627,7 @@ async function main() {
     });
   }
   console.log(
-    `Fork ready: AURKA app http://127.0.0.1:${APP_PORT}/spaces · API http://127.0.0.1:${API_PORT} · manifest .fork-space/manifest.json. Test funds; mocked Aqua and prices.`,
+    `Fork ready: AURKA app http://127.0.0.1:${APP_PORT}/spaces · API http://127.0.0.1:${API_PORT} · manifest ${path.join(DIR, "manifest.json")}. ${INTEGRATION_MODE === "real" ? "Real Aqua + Chainlink prices; AURKA direct execution adapter; test funds." : "Fixture-only Aqua and prices; test funds."}`,
   );
 }
 process.once("SIGINT", () => void stop());
