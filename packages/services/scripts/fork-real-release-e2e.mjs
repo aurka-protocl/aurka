@@ -22,6 +22,7 @@ import {
   temporaryManifest,
   waitForIndexedBlock,
 } from "./local-graph-node-e2e.mjs";
+import { keccak256, stringToHex } from "viem";
 
 const ROOT = path.resolve(
   new globalThis.URL("../../..", import.meta.url).pathname,
@@ -33,9 +34,127 @@ const dir = path.resolve(
     mkdtempSync(path.join(os.tmpdir(), "aurka-real-release-")),
 );
 mkdirSync(dir, { recursive: true, mode: 0o700 });
+const upstreamSwapSelector = keccak256(
+  stringToHex("swap((address,uint256,bytes),uint256,bytes)"),
+).slice(0, 10);
 
 function check(condition, message) {
   assert.ok(condition, message);
+}
+
+function traceHasCall(trace, target) {
+  if (trace?.to?.toLowerCase() === target.toLowerCase()) return true;
+  return (trace?.calls ?? []).some((child) => traceHasCall(child, target));
+}
+
+function traceCallInput(trace, target, selector) {
+  if (
+    trace?.to?.toLowerCase() === target.toLowerCase() &&
+    trace.input?.slice(0, 10).toLowerCase() === selector.toLowerCase()
+  )
+    return trace.input;
+  for (const child of trace?.calls ?? []) {
+    const input = traceCallInput(child, target, selector);
+    if (input) return input;
+  }
+  return undefined;
+}
+
+async function captureSwapVMExecution(manifest, forkDirectory) {
+  const walletEvidenceFile = path.join(
+    forkDirectory,
+    "evidence",
+    "mvp002-wallet.json",
+  );
+  check(existsSync(walletEvidenceFile), "Wallet journey evidence is missing");
+  const walletEvidence = JSON.parse(readFileSync(walletEvidenceFile, "utf8"));
+  const routerTransactions = walletEvidence.transactions.filter(
+    (transaction) =>
+      transaction.to?.toLowerCase() === manifest.router.toLowerCase() &&
+      transaction.data?.slice(0, 10) === "0xa9aedf0c",
+  );
+  check(
+    routerTransactions.length >= 2,
+    "Expected two real SwapVM router transactions",
+  );
+  const upstreamEventTopic = keccak256(
+    stringToHex(
+      "UpstreamSwapVMExecuted(bytes32,bytes32,address,address,address,uint256,uint256,bytes32)",
+    ),
+  );
+  const executions = [];
+  for (const transaction of routerTransactions) {
+    check(
+      transaction.data?.slice(0, 10) === "0xa9aedf0c",
+      "Real fork trade did not use executeWithSwapVM",
+    );
+    const [receipt, trace] = await Promise.all([
+      rpc(manifest.rpcUrl, "eth_getTransactionReceipt", [transaction.hash]),
+      rpc(manifest.rpcUrl, "debug_traceTransaction", [
+        transaction.hash,
+        { tracer: "callTracer" },
+      ]),
+    ]);
+    check(receipt?.status === "0x1", "SwapVM transaction did not succeed");
+    check(
+      traceHasCall(trace, manifest.swapVM),
+      "Call trace does not contain the pinned SwapVM wrapper",
+    );
+    check(
+      traceHasCall(trace, manifest.aqua),
+      "Call trace does not contain real Aqua",
+    );
+    check(
+      receipt.logs.some(
+        (log) =>
+          log.address.toLowerCase() === manifest.router.toLowerCase() &&
+          log.topics[0].toLowerCase() === upstreamEventTopic.toLowerCase(),
+      ),
+      "Receipt does not contain UpstreamSwapVMExecuted",
+    );
+    const programCall = traceCallInput(
+      trace,
+      manifest.swapVM,
+      upstreamSwapSelector,
+    );
+    check(programCall, "Trace is missing the upstream SwapVM call data");
+    let bypassError;
+    try {
+      await rpc(manifest.rpcUrl, "eth_call", [
+        {
+          from: manifest.bob,
+          to: manifest.swapVM,
+          data: programCall,
+        },
+        "latest",
+      ]);
+    } catch (error) {
+      bypassError = error instanceof Error ? error.message : String(error);
+    }
+    check(
+      bypassError,
+      "Direct upstream SwapVM call unexpectedly filled the protected strategy",
+    );
+    executions.push({
+      hash: transaction.hash,
+      blockNumber: receipt.blockNumber,
+      routerSelector: transaction.data.slice(0, 10),
+      programCall,
+      directCallBypass: {
+        from: manifest.bob,
+        target: manifest.swapVM,
+        rejected: true,
+        error: bypassError,
+      },
+      trace,
+      receipt: {
+        status: receipt.status,
+        blockHash: receipt.blockHash,
+        logs: receipt.logs,
+      },
+    });
+  }
+  return executions;
 }
 
 async function freePort() {
@@ -193,7 +312,7 @@ function assertEntityTrace(data, manifest, indexedBlock) {
   );
 }
 
-async function main() {
+export async function main() {
   const rpcPort = await freePort();
   const apiPort = await freePort();
   const appPort = await freePort();
@@ -286,6 +405,11 @@ async function main() {
     await waitForExit(browser, "two-Space wallet journey");
     console.log("Browser wallet journey exited successfully");
     browser = undefined;
+
+    const swapVMExecutions = await captureSwapVMExecution(
+      manifest,
+      forkDirectory,
+    );
 
     const head = await currentBlock(manifest.rpcUrl);
     const indexedMeta = await waitForIndexedBlock(subgraph.endpoint, head);
@@ -388,6 +512,13 @@ async function main() {
         })),
       },
       journeyEvidence: path.join(forkDirectory, "evidence"),
+      execution: {
+        engine: manifest.executionEngine,
+        upstreamCommit: manifest.swapVMUpstreamCommit,
+        aquaCommit: manifest.aquaUpstreamCommit,
+        wrapper: manifest.upstreamWrapper,
+        transactions: swapVMExecutions,
+      },
       graphOutage:
         "503 GRAPH_ACTIVITY_UNAVAILABLE then successful query after Graph Node restart",
     };

@@ -24,12 +24,14 @@ import {
 } from "./trading.js";
 import {
   activeAssetBoundSchema,
+  riskModeSchema,
   riskCertificateSchema,
   riskConfigurationSchema,
   riskEvaluationSchema,
   riskObservationSchema,
   riskStateSchema,
 } from "./risk.js";
+import { spaceStateSchema } from "./space.js";
 
 export const apiErrorSchema = z
   .object({
@@ -269,6 +271,7 @@ export const agentProposalRequestSchema = z
     message: z.string().trim().min(1).max(1_000),
     trader: addressSchema,
     chainId: chainIdSchema,
+    spaceId: identifierSchema.optional(),
   })
   .strict();
 
@@ -278,6 +281,51 @@ export const agentStatusSchema = z
     configured: z.boolean(),
     model: z.string().min(1).max(128),
     custody: z.literal("wallet-approved"),
+  })
+  .strict();
+
+export const agentUnavailableCodeSchema = z.enum([
+  "MISSING_CONFIGURATION",
+  "AUTHENTICATION_REJECTED",
+  "RATE_LIMITED",
+  "TIMEOUT",
+  "UNSUPPORTED_CAPABILITY",
+  "PROVIDER_OUTAGE",
+  "MALFORMED_RESPONSE",
+  "NETWORK_ERROR",
+  "CONCURRENCY_LIMIT",
+  "TOOL_BUDGET_EXHAUSTED",
+]);
+
+export type AgentUnavailableCode = z.infer<typeof agentUnavailableCodeSchema>;
+
+const agentBlockedCodeSchema = z.enum([
+  "NO_ELIGIBLE_SPACES",
+  "TRADE_RULE_REJECTED",
+  "INVALID_TRADE_REQUEST",
+  "SIMULATION_REJECTED",
+  "SPACE_UNAVAILABLE",
+]);
+
+const agentRuleAssetSchema = z
+  .object({
+    token: addressSchema,
+    symbol: z.string().trim().min(1).max(16),
+    decimals: z.number().int().nonnegative().safe(),
+    minimumWeightBps: z.number().int().nonnegative().max(10_000).safe(),
+    maximumWeightBps: z.number().int().nonnegative().max(10_000).safe(),
+  })
+  .strict();
+
+const agentRulesSchema = z
+  .object({
+    chainId: chainIdSchema,
+    state: spaceStateSchema,
+    riskMode: riskModeSchema,
+    policyNonce: uint256StringSchema,
+    maximumTransactionValue: uint256StringSchema,
+    valueDecimals: z.number().int().nonnegative().safe(),
+    assets: z.array(agentRuleAssetSchema).min(1).max(32),
   })
   .strict();
 
@@ -322,10 +370,48 @@ export const agentProposalResponseSchema = z.discriminatedUnion("status", [
     .strict(),
   z
     .object({
-      status: z.literal("BLOCKED"),
+      status: z.literal("CLARIFICATION"),
       provider: z.literal("openrouter"),
       model: z.string().min(1).max(128),
       reason: z.string().min(1).max(500),
+      nextAction: z.string().min(1).max(500),
+      suggestions: z.array(z.string().min(1).max(160)).max(4),
+      toolTrace: z.array(agentToolTraceSchema).max(16),
+    })
+    .strict(),
+  z
+    .object({
+      status: z.literal("READ_ONLY_ANSWER"),
+      provider: z.literal("openrouter"),
+      model: z.string().min(1).max(128),
+      selectedSpace: agentSelectedSpaceSchema,
+      rules: agentRulesSchema,
+      answer: z.string().min(1).max(1_000),
+      toolTrace: z.array(agentToolTraceSchema).min(1).max(16),
+    })
+    .strict(),
+  z
+    .object({
+      status: z.literal("UNSUPPORTED_ACTION"),
+      provider: z.literal("openrouter"),
+      model: z.string().min(1).max(128),
+      reason: z.string().min(1).max(500),
+      nextAction: z.string().min(1).max(500),
+      settingsPath: z
+        .string()
+        .regex(/^\/spaces\/[^/]+\/settings$/)
+        .optional(),
+      toolTrace: z.array(agentToolTraceSchema).max(16),
+    })
+    .strict(),
+  z
+    .object({
+      status: z.literal("BLOCKED"),
+      provider: z.literal("openrouter"),
+      model: z.string().min(1).max(128),
+      code: agentBlockedCodeSchema,
+      reason: z.string().min(1).max(500),
+      nextAction: z.string().min(1).max(500).optional(),
       toolTrace: z.array(agentToolTraceSchema).min(1).max(16),
     })
     .strict(),
@@ -334,7 +420,9 @@ export const agentProposalResponseSchema = z.discriminatedUnion("status", [
       status: z.literal("UNAVAILABLE"),
       provider: z.literal("openrouter"),
       model: z.string().min(1).max(128),
-      reason: z.literal("Agent unavailable"),
+      code: agentUnavailableCodeSchema,
+      reason: z.string().min(1).max(500),
+      retryable: z.boolean(),
       toolTrace: z.array(agentToolTraceSchema).max(16),
     })
     .strict(),

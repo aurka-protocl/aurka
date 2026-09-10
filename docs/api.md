@@ -38,6 +38,7 @@ GET  /v1/delegated/status
 POST /v1/delegated/sessions/authorize
 GET  /v1/delegated/sessions/:id
 POST /v1/delegated/sessions/:id/start
+POST /v1/delegated/sessions/:id/approve
 POST /v1/delegated/sessions/:id/stop
 POST /v1/delegated/sessions/:id/reconcile
 POST /v1/delegated/sessions/:id/recover
@@ -45,7 +46,11 @@ POST /v1/delegated/sessions/:id/recover
 
 `authorize` requires Bob's EIP-712 signature over the reviewed wallet, Space,
 pair, integer-unit caps, count, slippage, nonce, and expiry. `start` performs
-one bounded worker tick. `recover` is available only after Stop, expiry, or
+one bounded worker tick. Start, approve, stop, and reconcile require a fresh,
+one-time owner-signed control authorization bound to the session, agent wallet,
+chain, action, request hash, expiry, and nonce. Live configuration additionally
+binds the configured wallet to a server-trusted owner address; an owner field in
+JSON is not authentication. `recover` is available only after Stop, expiry, or
 exhaustion, requires a fresh owner signature whose destination is Bob, and calls
 a separate owner/operator recovery module; the delegated additional signer
 cannot use this route. Pending or ambiguous trades must reconcile before

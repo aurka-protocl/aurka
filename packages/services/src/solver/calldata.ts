@@ -10,8 +10,10 @@ import { AURKA_ROUTER_EXECUTE_SELECTOR } from "@aurka/shared";
 import type { AssetStateForHash } from "./hash.js";
 import { encodeDirectProgram } from "./hash.js";
 import type { SolverSnapshot } from "./types.js";
+import { buildUpstreamSwapVMData } from "./upstream.js";
 
 export const ROUTER_EXECUTE_SELECTOR = AURKA_ROUTER_EXECUTE_SELECTOR;
+export const ROUTER_EXECUTE_SWAPVM_SELECTOR = "0xa9aedf0c" as const;
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 
 const constraintCode: Record<BindingConstraint, number> = {
@@ -123,6 +125,9 @@ export function encodeSettlementDirectProgram(
 }
 
 export function encodeRouterExecuteCall(input: RouterExecuteInput): string {
+  const upstream = input.snapshot.swapVMGuard
+    ? buildUpstreamSwapVMData(input.intent, input.proposal, input.snapshot)
+    : undefined;
   // Head words:
   // 0: Intent (15 words)
   // 1: intentSignature offset (1 word)
@@ -244,7 +249,7 @@ export function encodeRouterExecuteCall(input: RouterExecuteInput): string {
     uintWord(p.maximumPriceDeviationBps),
   ].join("");
 
-  const HEAD_BYTES = 103 * 32;
+  const HEAD_BYTES = (upstream ? 106 : 103) * 32;
 
   const intentSignatureTail = encodeBytesTail(input.intentSignature ?? "");
   const offset1 = HEAD_BYTES;
@@ -267,6 +272,12 @@ export function encodeRouterExecuteCall(input: RouterExecuteInput): string {
 
   const directProgramTail = encodeBytesTail(input.directProgramHex);
   const offset7 = offset4 + assetsTail.length / 2;
+  const orderDataTail = upstream ? encodeBytesTail(upstream.orderData) : "";
+  const takerTraitsTail = upstream
+    ? encodeBytesTail(upstream.takerTraitsAndData)
+    : "";
+  const offset8 = offset7 + directProgramTail.length / 2;
+  const offset9 = offset8 + (upstream ? orderDataTail.length / 2 : 0);
 
   const head =
     intentWords +
@@ -276,15 +287,19 @@ export function encodeRouterExecuteCall(input: RouterExecuteInput): string {
     uintWord(offset4) +
     epochWords +
     priceInputWords +
-    uintWord(offset7);
+    uintWord(offset7) +
+    (upstream
+      ? uintWord(upstream.makerTraits) + uintWord(offset8) + uintWord(offset9)
+      : "");
 
   const calldataHex =
-    ROUTER_EXECUTE_SELECTOR +
+    (upstream ? ROUTER_EXECUTE_SWAPVM_SELECTOR : ROUTER_EXECUTE_SELECTOR) +
     head +
     intentSignatureTail +
     proposalSignatureTail +
     assetsTail +
-    directProgramTail;
+    directProgramTail +
+    (upstream ? orderDataTail + takerTraitsTail : "");
 
   return calldataHex;
 }

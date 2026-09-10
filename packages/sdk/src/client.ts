@@ -69,6 +69,7 @@ import {
   type AgentProposalResponse,
   type AgentStatus,
   delegatedAuthorizationSchema,
+  delegatedControlRequestSchema,
   delegatedRecoveryRequestSchema,
   delegatedSessionResponseSchema,
   delegatedStartRequestSchema,
@@ -77,6 +78,7 @@ import {
   type DelegatedSessionAuthorization,
   type DelegatedRecoveryRequest,
   type DelegatedStartRequest,
+  type DelegatedControlRequest,
   type DelegatedStatus,
 } from "@aurka/shared";
 
@@ -260,20 +262,38 @@ export class AurkaClient {
     );
   }
 
-  async stopDelegatedSession(id: string): Promise<DelegatedSession> {
+  async stopDelegatedSession(
+    id: string,
+    input: DelegatedControlRequest,
+  ): Promise<DelegatedSession> {
     return this.request(
       "POST",
       `/v1/delegated/sessions/${encodeURIComponent(id)}/stop`,
-      {},
+      delegatedControlRequestSchema.parse(input),
       delegatedSessionResponseSchema,
     );
   }
 
-  async reconcileDelegatedSession(id: string): Promise<DelegatedSession> {
+  async approveDelegatedSession(
+    id: string,
+    input: DelegatedControlRequest,
+  ): Promise<DelegatedSession> {
+    return this.request(
+      "POST",
+      `/v1/delegated/sessions/${encodeURIComponent(id)}/approve`,
+      delegatedControlRequestSchema.parse(input),
+      delegatedSessionResponseSchema,
+    );
+  }
+
+  async reconcileDelegatedSession(
+    id: string,
+    input: DelegatedControlRequest,
+  ): Promise<DelegatedSession> {
     return this.request(
       "POST",
       `/v1/delegated/sessions/${encodeURIComponent(id)}/reconcile`,
-      {},
+      delegatedControlRequestSchema.parse(input),
       delegatedSessionResponseSchema,
     );
   }

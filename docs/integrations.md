@@ -1,11 +1,41 @@
 # AURKA integration boundaries
 
-Status: TASK99-006 real-fork release candidate verified locally; the fixture
-configuration remains an explicit compatibility test path. The AURKA-012
-candidate and policy decision record is in
-[`aurka-012-integration-spec.md`](./aurka-012-integration-spec.md).
+Status: TASK99-013 real-fork SwapVM path is implemented and live-fork verified.
+TASK99-006's prior direct-path release candidate remains a separate reference.
+TASK99-009 configuration verification is blocked by missing Privy resource
+inputs in this checkout. The fixture configuration remains an explicit
+compatibility test path. The AURKA-012 candidate and policy decision record is
+in [`aurka-012-integration-spec.md`](./aurka-012-integration-spec.md).
 
-## TASK99-006 selected real-fork release candidate
+## Trade assistant result handling (TASK99-010)
+
+The trade assistant is server-configured and its package start/migration
+commands load the root `.env` when present. `POST /v1/agent/propose` returns a
+typed clarification, read-only rules answer, unsupported-action guidance,
+deterministic trade block, usable `READY` proposal, or safe `UNAVAILABLE` code.
+Only `READY` proposals can enter browser wallet review or the delegated worker;
+the latter never reserves a budget or signs for clarification, read-only, or
+unavailable results. OpenRouter keys remain server-only, and provider response
+bodies are not copied into API responses or logs.
+
+## TASK99-013 selected real-fork SwapVM path
+
+The task-specific runner is `pnpm integration:fork-swapvm`. It starts an
+isolated Ethereum mainnet fork, deploys the pinned official-derived
+`AurkaUpstreamAquaSwapVMRouter` with the real Aqua app, creates two
+independently custom-funded Spaces through the atomic factory, and executes both
+trades through upstream `StaticBalances` and `LimitSwap` instructions. It fails
+closed if the manifest does not identify the upstream engine, the upstream
+wrapper is not built, or the real Aqua/Chainlink dependencies have no code at
+the pinned fork block. It never broadcasts to Ethereum mainnet.
+
+The router's `executeWithSwapVM` entry owns AURKA validation and calls the
+official VM. The VM owns the principal Aqua push/pull; AURKA owns recipient fee
+transfers and pushes the treasury-retained fee back into Aqua. The strict VM
+threshold is the pre-fee oracle exchange; `OptionSpaceFee` remains the source of
+truth for utilization-dependent fees and all AURKA post-state checks.
+
+## TASK99-006 selected real-fork release candidate (reference)
 
 The reproducible release rehearsal is `pnpm integration:fork-real`. It starts an
 isolated Anvil fork of Ethereum mainnet at block `25,500,000` (local chain ID
@@ -18,7 +48,7 @@ mainnet and does not require Privy for the ordinary browser wallet journey.
 | Aqua      | Real 1inch Aqua at `0x499943e74fb0ce105688beee8ef2abec5d936d31`                                                                                                        | Actual `ship` virtual balances and maker-wallet allowances; the factory performs no mock `seed` call.                                         |
 | Assets    | Mainnet USDC `0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48` and WETH `0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2`                                                        | Fork-only test funding is used for Alice/Bob; no public token transfer occurs.                                                                |
 | Prices    | Locally deployed `ChainlinkPriceOracle` adapter reading ETH/USD `0x5f4ec3df9cbd43714fe2740f5e3616155c5b8419` and USDC/USD `0x8fFfFfd4AfB6115b954Bd326cbe7B4BA576818f6` | Native 8-decimal rounds are validated and normalized to whole settlement units; raw round data and the normalized snapshot are fingerprinted. |
-| Execution | `AurkaDirectSwapVM` / `AURKA_DIRECT_PAIR_V1`                                                                                                                           | AURKA's narrow direct-pair adapter is used. The upstream SwapVM router is not claimed or used.                                                |
+| Execution | `AurkaUpstreamAquaSwapVMRouter` / `AURKA_UPSTREAM_LIMIT_SWAP_V1`                                                                                                       | TASK99-013's pinned official-derived VM path; `AurkaDirectSwapVM` remains fixture/reference only.                                             |
 | Indexing  | Graph Node `v0.41.2`, Postgres `14.11`, IPFS Kubo `v0.17.0`                                                                                                            | The temporary manifest points at the fork's deployed AURKA addresses and the app reads confirmed Activity from its GraphQL endpoint.          |
 | Wallets   | Ordinary EIP-1193 test wallets derived only inside the disposable Anvil                                                                                                | Alice owns both Spaces; Bob signs the two trades. Privy remains a separate production custody gate.                                           |
 
@@ -68,43 +98,76 @@ is not the Privy owner and is not the agent wallet. Bob's browser EIP-712
 signature is AURKA's session consent, binding Bob, the agent address, chain,
 Space allowlist, token direction, integer caps, nonce, and expiry.
 
-The operator command is read-only by default:
+The operator command is read-only by default. The package script loads `.env`
+when present (`--env-file-if-exists`); the explicit form is useful when checking
+that the root environment is the one being inspected:
 
 ```sh
 pnpm privy:delegated                 # sanitized check; never creates a wallet
+node --env-file=.env packages/wallet/scripts/privy-delegated-wallet.mjs check
 pnpm privy:delegated template         # print the candidate policy shape only
 PRIVY_DELEGATED_PROVISION=true pnpm privy:delegated provision
 ```
 
-Provisioning requires pre-created, reviewed Privy owner/signer/policy IDs and
-the explicit opt-in. It is idempotent, refuses to mutate an existing wallet
-whose owner, additional signer, policy override, or chain type does not match,
-and prints only wallet/policy IDs, address, signer attachment, and rule
-metadata. It never prints `PRIVY_APP_SECRET`, authorization contexts, or keys.
+Provisioning requires pre-created, reviewed Privy owner/signer IDs plus two
+policies and the explicit opt-in. `PRIVY_DELEGATED_RECOVERY_POLICY_ID` is the
+wallet's one base policy and permits only owner-destination ERC-20 transfers;
+`PRIVY_DELEGATED_POLICY_ID` is the additional signer's override and permits only
+the reviewed router execution and exact input-token approval. It is idempotent,
+refuses to mutate an existing wallet whose owner, base recovery policy,
+additional signer, override policy, or chain type does not match, and prints
+only wallet/policy IDs, address, signer attachment, and rule metadata. It never
+prints `PRIVY_APP_SECRET`, authorization contexts, or keys.
 
-The configured `PRIVY_DELEGATED_POLICY_MODULE` must also expose
-`recoverDelegatedFunds`. That operator-owned function receives only the session
-ID, Bob's already-authenticated destination, and the reviewed input / output
-token amounts. It must use the Privy owner/recovery authorization path and exact
-token transfers; it must not call the delegated additional signer, accept
-arbitrary recipients/tokens, or expose a private key to AURKA. The UI signs the
-recovery intent in the browser after Stop, and the service blocks recovery while
-any submitted or ambiguous trade lacks a receipt.
+The check also reads both configured key quorums through the installed
+`@privy-io/node@0.34.0` API (`client.keyQuorums().get(...)`). It derives the
+public SPKI key in memory, verifies the configured authorization material is a
+P-256 key registered in the intended quorum, and verifies that the returned
+threshold can be satisfied. The wallet and policy calls use the SDK's callable
+services (`client.wallets()` and `client.policies()`); they are not property
+accessors. `PRIVY_APP_ID` is the server-only app identifier; the old
+`NEXT_PUBLIC_PRIVY_APP_ID` name is not used for backend authentication. Readback
+rejects extra base policies, additional signers, signer override policies, or
+unexpected `ALLOW` methods in either reviewed policy.
 
-The new delegated adapter is a distinct execution boundary. Privy is asked only
-to sign the exact settlement intent and broadcast one exact
-`eth_sendTransaction` to the configured router; the remote policy is limited to
-the reviewed Ethereum chain, typed-data domain, router, and zero native value.
-AURKA enforces the session Space/pair/direction, integer per-trade and
-cumulative budgets, count, expiry, delegated identity, exact ABI re-encoding,
-token balance, router allowance, refreshed nonce, chain RPC, and target
-`eth_call` before every send. The settlement contracts remain authoritative for
-intent/proposal signatures, policy/risk/price/balance commitments, and
-accounting. Privy policy enforcement is not claimed to provide AURKA's
-cumulative budget or nested settlement semantics.
+The bundled server modules expose the policy readback, additional-signer revoke,
+request authorization, and `recoverDelegatedFunds` callbacks. The recovery
+callback receives only the session ID, Bob's already-authenticated destination,
+the reviewed one-token amount, the consumed authorization hash, and the
+server-selected canonical RPC route. It uses the Privy owner/recovery
+authorization path and exact token transfers; it does not call the delegated
+additional signer, accept arbitrary recipients/tokens, or expose a private key
+to AURKA. The UI signs the recovery intent in the browser after Stop, and the
+service blocks recovery while any submitted or ambiguous trade lacks a receipt.
+The bundled demo callback accepts one exact token transfer per recovery
+authorization so each result has one durable receipt/hash. The recovery UI
+therefore submits input and output as separate signed operations. Recovery
+policy readback also requires the transfer function, configured owner
+destination, token contract, and amount cap.
+
+The new delegated adapter is a distinct execution boundary. In the selected
+`sign-and-broadcast` route, Privy signs an exact transaction and AURKA submits
+the returned RLP to the configured canonical fork RPC. This same route is used
+for owner recovery after Stop. The remote delegated policy is limited to the
+reviewed Ethereum chain, typed-data domain, zero-value router call, and an
+input-token `approve` whose function, spender, and amount cap are all decoded by
+Privy. The `privy` broadcast mode remains available for a supported hosted route
+but is not claimed as live evidence here. AURKA enforces the session
+Space/pair/direction, integer per-trade and cumulative budgets, count, expiry,
+delegated identity, exact ABI re-encoding, token balance, router allowance,
+refreshed nonce, chain RPC, and target `eth_call` before every send. The
+settlement contracts remain authoritative for intent/proposal signatures,
+policy/risk/price/balance commitments, and accounting. Privy policy enforcement
+is not claimed to provide AURKA's cumulative budget or nested settlement
+semantics.
 
 The implementation deliberately does not claim a live proof in this checkout.
-The TASK99-006 runner uses loopback Anvil chain `31337`, while Privy's hosted
+TASK99-009 ran the root check and found `PRIVY_APP_ID`, the wallet/policy/target
+configuration, and the live fork binding absent; it therefore did not contact
+Privy, fund a wallet, revoke a signer, or broadcast a transaction. The complete
+sanitized result is `.aurkadev/reviews/TASK99-009-report.md` with
+machine-readable evidence at `docs/evidence/task99-009-live-privy.json`. The
+TASK99-006 runner uses loopback Anvil chain `31337`, while Privy's hosted
 broadcast path has not been proven to reach that local RPC or its generated
 contracts. A supported Privy custom-network setup, real wallet/policy readback,
 funded test wallet, remote denial check, and confirmed receipt are required
@@ -139,8 +202,8 @@ implemented:
 
 - [1inch Aqua](https://github.com/1inch/aqua), current `main` at
   `9c5c42e5840e8741fba3597c48456c9510212b66`.
-- [1inch SwapVM](https://github.com/1inch/swap-vm), current `main` at
-  `f09a41e689240adc645934f965c8061749397cd2`.
+- [1inch SwapVM](https://github.com/1inch/swap-vm), pinned for TASK99-013 at
+  `afd99c408b4ed610027f4426c6f98650acac9f5f`.
 - The [SwapVM SDK](https://github.com/1inch/swap-vm-sdk) documents the current
   `AquaSwapVMRouter` reference address as
   `0x111111338c5091e8440b67b168bae16a668ac0de`.
@@ -148,11 +211,12 @@ implemented:
   registry reference as `0x1111113ccf1426a8e30e2bff5e005d929bf6a90a` and the
   SwapVM router reference as `0x111111338c5091e8440b67b168bae16a668ac0de`.
 
-The selected `0x499943...` Aqua address is verified at the pinned mainnet fork
-block and is the address used by the real-mode release runner. Every reference
-address still requires chain-specific bytecode, immutables, and deployment
-verification; the runner records the selected Aqua runtime code hash rather than
-treating an address alone as proof.
+The selected `0x499943...` Aqua address is used by the real-mode fork runner.
+Every address still requires chain-specific bytecode, immutables, and deployment
+verification; the TASK99-013 runner records the selected Aqua, token, oracle,
+and locally deployed wrapper runtime code hashes rather than treating an address
+alone as proof. The wrapper constructor binds Aqua, WETH, and owner; the AURKA
+router binds the wrapper as its immutable SwapVM and Aqua app.
 
 The addresses above are reference data, not settlement targets in this
 repository. Automated tests never broadcast to or call a live network.
@@ -161,16 +225,15 @@ repository. Automated tests never broadcast to or call a live network.
 
 The original deterministic fixture environment is Anvil/Foundry chain `31337`:
 
-| Component | Selected artifact                                              | Role                                                                                          |
-| --------- | -------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
-| Aqua      | `MockAqua`                                                     | Local virtual-balance fixture implementing the reviewed `IAqua` pull/push surface.            |
-| SwapVM    | `AurkaDirectSwapVM` / `ISwapVM` program `AURKA_DIRECT_PAIR_V1` | Immutable local adapter boundary for one direct pair; no arbitrary target or solver calldata. |
-| Oracle    | Governance-bound `IPriceOracle`                                | Interface only; the deterministic mock is used locally and no live oracle is deployed.        |
+| Component | Selected artifact                                              | Role                                                                                         |
+| --------- | -------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| Aqua      | `MockAqua`                                                     | Local virtual-balance fixture implementing the reviewed `IAqua` pull/push surface.           |
+| SwapVM    | `AurkaDirectSwapVM` / `ISwapVM` program `AURKA_DIRECT_PAIR_V1` | Explicit fixture/reference adapter only; real mode uses the pinned upstream-derived wrapper. |
+| Oracle    | Governance-bound `IPriceOracle`                                | Interface only; the deterministic mock is used locally and no live oracle is deployed.       |
 
-The local compatibility interfaces use Solidity `0.8.28` so they can be tested
-with the repository toolchain. The reviewed upstream sources currently use their
-own source licenses and a newer compiler; they are not vendored or redistributed
-by the local fixture.
+The AURKA compatibility interfaces use Solidity `0.8.28`. The reviewed upstream
+sources retain their own source licenses and are vendored as pinned submodules;
+the wrapper is compiled separately with Solidity `0.8.30`.
 
 ## Interface commitment
 
@@ -203,13 +266,15 @@ swap((address,uint256,bytes),uint256,bytes)(uint256,uint256,bytes32)
 Interface hash:
 `0x174449ed93e32df5dc7a8c9fd4e9fe8ae402a4986b3ead08d788ca9ba73ae6a8`.
 
-The router binds `DIRECT_PROGRAM_ID`, every direct-program argument, the
-proposal hash, and the EIP-712 domain to its own address and chain. The
-immutable `ISwapVM` adapter is called with the exact input amount and its
-returned order hash and amounts are checked before Aqua custody changes. Aqua is
-called only through the immutable `IAqua` address and only with exact token
-amount approvals. The oracle address and price-age/deviation policy are
-governance-bound and included in the policy nonce transition.
+The router binds the reference direct-program arguments or the upstream order,
+program, packed taker data, and their proposal hash to its own address and
+chain. The upstream path calls `quote` and then `swap` with the exact input;
+both the order hash and pre-fee output are checked before finalization. Aqua is
+called only through the immutable app/registry address and exact token
+approvals. The oracle address and price-age/deviation policy are
+governance-bound and included in the policy nonce transition. See
+[`adr-0043-real-swapvm-settlement.md`](./adr-0043-real-swapvm-settlement.md) for
+the transfer-owner and direct-call-bypass analysis.
 
 ## Testing and deployment policy
 

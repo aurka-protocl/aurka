@@ -1,0 +1,197 @@
+{
+  "taskId": "TASK99-013-real-aqua-swapvm-strategy",
+  "complete": true,
+  "verifiedAt": "2026-09-10",
+  "integrationMode": "real",
+  "executionEngine": "AURKA_UPSTREAM_LIMIT_SWAP_V1",
+  "sourcePins": {
+    "swapVM": {
+      "repository": "https://github.com/1inch/swap-vm",
+      "commit": "afd99c408b4ed610027f4426c6f98650acac9f5f",
+      "license": "https://github.com/1inch/swap-vm/blob/main/LICENSES/SwapVM-1.1.txt"
+    },
+    "aqua": {
+      "repository": "https://github.com/1inch/aqua",
+      "commit": "9c5c42e5840e8741fba3597c48456c9510212b66",
+      "license": "https://github.com/1inch/aqua/blob/main/LICENSE"
+    },
+    "solidityUtils": "6.9.10",
+    "openzeppelin": "v5.4.0",
+    "compilerSplit": {
+      "aurka": "0.8.28",
+      "upstreamWrapper": "0.8.30"
+    }
+  },
+  "fork": {
+    "upstreamChainId": 1,
+    "forkBlock": 25500000,
+    "chainId": 31337,
+    "deploymentBlock": 25500023,
+    "deploymentBlockHash": "0x1313388c0277dc81f79397db5d30821583ab315a14f4b74dae92b58b4cee68ad"
+  },
+  "deployment": {
+    "aqua": "0x499943e74fb0ce105688beee8ef2abec5d936d31",
+    "aquaCodeHashAtFork": "0xced66b74e01f418c698e6aca8560d33957fb2588ea120eadbde74960f138baa2",
+    "swapVMWrapper": "0x9e6b222a71644484b6e9eb67bd8400128e0c3fb8",
+    "swapVMWrapperRuntimeBytes": 20753,
+    "swapVMWrapperRuntimeCodeHash": "0x48a4f8e17399085d2e236516a180fb43c0bdda2733884e8602aafb0f8b191c80",
+    "swapVMWrapperSourceHash": "0x756ea27181799061c89cf0a7ec0641cd046b7b0666dabbc4f25ea7c9e04de8c9",
+    "router": "0xd9f214dc9abb3cdaec89ab01c68d722caa98e279",
+    "executionGuard": "0x60C172463D3d3207aF5aeA48E6BEE13e95F93f6F",
+    "aquaApp": "0x9E6b222a71644484b6E9eb67bD8400128e0c3fb8",
+    "constructor": {
+      "aqua": "0x499943e74fb0ce105688beee8ef2abec5d936d31",
+      "weth": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+      "owner": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+    },
+    "tokens": {
+      "usdc": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+      "weth": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+    }
+  },
+  "reviewedProgram": {
+    "pair": "USDC/WETH",
+    "direction": "WETH -> USDC",
+    "orderDataBytes": 129,
+    "program": "0x9040000000000000000000000000000000000000000000000000000000e8d4a5100100000000000000000000000000000000000000000000001e8a78d547d05c8140530100",
+    "programHash": "0xf611f8af9d3a9970c2c4a841a2ada35d266cb71d1d54f2f669e6cd105ef083a5",
+    "instructions": [
+      {
+        "opcode": "0x90",
+        "name": "StaticBalances",
+        "length": 64,
+        "balanceA": "1000000000001",
+        "balanceB": "563380281690141000000",
+        "scale": "1000000",
+        "outputSafetyUnit": 1
+      },
+      {
+        "opcode": "0x53",
+        "name": "LimitSwap",
+        "length": 1,
+        "directionByte": "0x00"
+      }
+    ],
+    "takerDataBytes": 59,
+    "takerFlags": "0x0051",
+    "makerTraits": "0x44400000003c003c002800280000000000000000000000000000000000000000"
+  },
+  "customFundedSpaces": [
+    {
+      "name": "MVP-002 one",
+      "treasuryVault": "0x624365125A2a60f24bc1CA7Dea5357bCFB5D9C82",
+      "strategyHash": "0xf262a0becd2fc3703e224ec869c43e145608afda004007eff60581865aec73ab",
+      "initial": {
+        "usdc": "24000000000",
+        "weth": "4000000000000000000"
+      },
+      "finalAquaRawBalances": {
+        "usdc": "20462000000",
+        "weth": "6000000000000000000"
+      },
+      "delta": {
+        "usdc": "-3538000000",
+        "weth": "2000000000000000000"
+      }
+    },
+    {
+      "name": "MVP-002 two",
+      "treasuryVault": "0x441A4C092ee7CB1406Dc6aAc69a5a5a6008F38ec",
+      "strategyHash": "0x34bda6e86f37611b1018a41d1d68b9639a8f02949e4000da7b078c6df57e9f94",
+      "initial": {
+        "usdc": "46000000000",
+        "weth": "6000000000000000000"
+      },
+      "finalAquaRawBalances": {
+        "usdc": "42458000000",
+        "weth": "8000000000000000000"
+      },
+      "delta": {
+        "usdc": "-3542000000",
+        "weth": "2000000000000000000"
+      }
+    }
+  ],
+  "executions": [
+    {
+      "transaction": "0xa0581a48ee0b045f0e549df5f8528f3cebe4ab20fd9f6e740b6c28f23c64e035",
+      "block": 25500031,
+      "routerSelector": "0xa9aedf0c",
+      "orderHash": "0xf262a0becd2fc3703e224ec869c43e145608afda004007eff60581865aec73ab",
+      "amountIn": "2000000000000000000",
+      "amountOut": "3550000000",
+      "feeLegs": {
+        "trader": "3534000000",
+        "solver": "2000000",
+        "protocol": "2000000",
+        "treasuryReturnedToAqua": "12000000",
+        "total": "16000000"
+      },
+      "proposalHash": "0xfd0d1e70fcd52d0458c249faa09cda3297176efd0085c7135d1cd6bd96caccb9"
+    },
+    {
+      "transaction": "0x81ce63c6dc6cb1ebe37e8057699bd530cb69157fcb09b2f832230671ef14222d",
+      "block": 25500033,
+      "routerSelector": "0xa9aedf0c",
+      "orderHash": "0x34bda6e86f37611b1018a41d1d68b9639a8f02949e4000da7b078c6df57e9f94",
+      "amountIn": "2000000000000000000",
+      "amountOut": "3550000000",
+      "feeLegs": {
+        "trader": "3538000000",
+        "solver": "2000000",
+        "protocol": "2000000",
+        "treasuryReturnedToAqua": "8000000",
+        "total": "12000000"
+      },
+      "proposalHash": "0xb9318a503552502e0da183a76dabba5e123cb2ea0e737cfd8b29ac9f7aa4c378"
+    }
+  ],
+  "bypassTest": {
+    "method": "eth_call",
+    "from": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+    "target": "0x9e6b222a71644484b6e9eb67bd8400128e0c3fb8",
+    "attempts": 2,
+    "rejected": true,
+    "errorSelector": "0x48582b61",
+    "error": "UnauthorizedSwapVMExecution()"
+  },
+  "graph": {
+    "hasIndexingErrors": false,
+    "indexedBlock": 25500042,
+    "spaceInitialized": 2,
+    "tradeExecuted": 2,
+    "feesRouted": 2,
+    "policyMutations": 13,
+    "activityOutage": "503 GRAPH_ACTIVITY_UNAVAILABLE; successful query after Graph Node restart"
+  },
+  "checks": {
+    "upstreamIdentityAndForkBytecode": "passed",
+    "officialWrapperBuild": "passed",
+    "quoteExecutionParity": "passed",
+    "realVMAndAquaTrace": "passed",
+    "upstreamSwapVMExecutedReceipts": 2,
+    "customFundedSpaces": 2,
+    "singleTransactionSpaceCreation": "passed",
+    "fiveLegAccounting": "passed",
+    "optionSpaceFeeCurvePreserved": "passed",
+    "directCallBypass": "passed",
+    "graphReconciliationAndRestart": "passed"
+  },
+  "tests": {
+    "foundry": "forge test: 133 passed, 0 failed",
+    "guard": "AurkaSwapVMExecutionGuardTest: 4 passed, 0 failed",
+    "services": "@aurka/services vitest: 116 passed, 0 failed",
+    "servicesTypecheck": "passed"
+  },
+  "runner": {
+    "command": "pnpm integration:fork-swapvm",
+    "realForkEvidence": "packages/services/scripts/fork-swapvm-e2e.mjs",
+    "walletEvidence": "packages/services/scripts/fork-spaces-e2e.mjs",
+    "temporaryRun": "/tmp/task013-evidence-final5/release.json"
+  },
+  "limitations": [
+    "The reviewed executable template currently supports only sorted USDC/WETH and WETH-to-USDC on the real path.",
+    "The recorded fork uses public Anvil accounts and fork-only token funding; no production key or live mainnet transaction was used.",
+    "AurkaDirectSwapVM remains available only as an explicit fixture/reference regression path."
+  ]
+}

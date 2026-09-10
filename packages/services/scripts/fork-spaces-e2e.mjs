@@ -81,7 +81,12 @@ async function pageFor(index, width) {
         data: tx.data,
         value: BigInt(tx.value ?? 0),
       });
-      transactions.push({ owner: accounts[index].address, hash, to: tx.to });
+      transactions.push({
+        owner: accounts[index].address,
+        hash,
+        to: tx.to,
+        data: tx.data,
+      });
       return hash;
     }
     if (

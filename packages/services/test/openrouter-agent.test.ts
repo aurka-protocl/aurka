@@ -22,14 +22,18 @@ function toolCall(id: string, name: string, args: Record<string, unknown>) {
   };
 }
 
-function completion(toolCalls: readonly unknown[]) {
+function completion(
+  toolCalls: readonly unknown[],
+  content: string | null = null,
+  finishReason = "tool_calls",
+) {
   return new Response(
     JSON.stringify({
       model: "test-model",
       choices: [
         {
-          finish_reason: "tool_calls",
-          message: { role: "assistant", content: null, tool_calls: toolCalls },
+          finish_reason: finishReason,
+          message: { role: "assistant", content, tool_calls: toolCalls },
         },
       ],
     }),
@@ -38,6 +42,89 @@ function completion(toolCalls: readonly unknown[]) {
 }
 
 describe("OpenRouter trade agent", () => {
+  it("clarifies an ambiguous rules request without calling the provider", async () => {
+    const service = new AurkaService();
+    const fetchImpl = vi.fn();
+    const agent = new OpenRouterAgent(service, {
+      apiKey: "test-key",
+      fetchImpl,
+    });
+
+    try {
+      await expect(
+        agent.propose({
+          ...request,
+          message: "I want fdits rules?",
+        }),
+      ).resolves.toMatchObject({
+        status: "CLARIFICATION",
+        reason: "Do you want to view this Space's current rules or edit them?",
+        nextAction:
+          "I can explain the current rules; edits go through the owner-only Space settings.",
+      });
+      expect(fetchImpl).not.toHaveBeenCalled();
+    } finally {
+      service.close();
+    }
+  });
+
+  it("answers a read-only rules question from the selected Space", async () => {
+    const service = new AurkaService();
+    const fetchImpl = vi.fn();
+    const agent = new OpenRouterAgent(service, {
+      model: "test-model",
+      fetchImpl,
+    });
+
+    try {
+      await expect(
+        agent.propose({
+          ...request,
+          message: "Explain this Space's current rules.",
+          spaceId: FIXTURE_POSITION_ID,
+        }),
+      ).resolves.toMatchObject({
+        status: "READ_ONLY_ANSWER",
+        selectedSpace: { id: FIXTURE_POSITION_ID },
+        rules: {
+          chainId: 31337,
+          state: "ACTIVE",
+          assets: expect.arrayContaining([
+            expect.objectContaining({ symbol: "WETH" }),
+          ]),
+        },
+      });
+      expect(fetchImpl).not.toHaveBeenCalled();
+    } finally {
+      service.close();
+    }
+  });
+
+  it("routes rule edits to owner settings without signing or provider access", async () => {
+    const service = new AurkaService();
+    const fetchImpl = vi.fn();
+    const agent = new OpenRouterAgent(service, {
+      apiKey: "test-key",
+      fetchImpl,
+    });
+
+    try {
+      await expect(
+        agent.propose({
+          ...request,
+          message: "Edit this Space's rules.",
+          spaceId: FIXTURE_POSITION_ID,
+        }),
+      ).resolves.toMatchObject({
+        status: "UNSUPPORTED_ACTION",
+        settingsPath: "/spaces/position%3Acanonical/settings",
+      });
+      expect(fetchImpl).not.toHaveBeenCalled();
+    } finally {
+      service.close();
+    }
+  });
+
   it("requires actual discovery, quote, and simulation tools before a card", async () => {
     const responses = [
       [toolCall("1", "discover_spaces", {})],
@@ -108,7 +195,7 @@ describe("OpenRouter trade agent", () => {
       const missing = new OpenRouterAgent(service, { model: "test-model" });
       await expect(missing.propose(request)).resolves.toMatchObject({
         status: "UNAVAILABLE",
-        reason: "Agent unavailable",
+        code: "MISSING_CONFIGURATION",
         toolTrace: [],
       });
 
@@ -122,7 +209,33 @@ describe("OpenRouter trade agent", () => {
       const failed = new OpenRouterAgent(service, options);
       await expect(failed.propose(request)).resolves.toMatchObject({
         status: "UNAVAILABLE",
-        reason: "Agent unavailable",
+        code: "PROVIDER_OUTAGE",
+      });
+
+      const unauthorized = new OpenRouterAgent(service, {
+        apiKey: "test-key",
+        model: "test-model",
+        fetchImpl: vi.fn(
+          async () => new Response("unauthorized", { status: 401 }),
+        ),
+      });
+      await expect(unauthorized.propose(request)).resolves.toMatchObject({
+        status: "UNAVAILABLE",
+        code: "AUTHENTICATION_REJECTED",
+        retryable: false,
+      });
+
+      const rateLimited = new OpenRouterAgent(service, {
+        apiKey: "test-key",
+        model: "test-model",
+        fetchImpl: vi.fn(
+          async () => new Response("rate limited", { status: 429 }),
+        ),
+      });
+      await expect(rateLimited.propose(request)).resolves.toMatchObject({
+        status: "UNAVAILABLE",
+        code: "RATE_LIMITED",
+        retryable: true,
       });
     } finally {
       service.close();
@@ -157,12 +270,101 @@ describe("OpenRouter trade agent", () => {
     try {
       await expect(agent.propose(request)).resolves.toMatchObject({
         status: "BLOCKED",
+        code: "TRADE_RULE_REJECTED",
         reason: "Unsupported fixture direction",
         toolTrace: [
           { tool: "discover_spaces", status: "SUCCEEDED" },
           { tool: "read_space_conditions", status: "SUCCEEDED" },
           { tool: "request_deterministic_quote", status: "FAILED" },
         ],
+      });
+    } finally {
+      service.close();
+    }
+  });
+
+  it("reports no eligible Spaces as a deliberate blocked result", async () => {
+    const service = new AurkaService({ seedFixture: false });
+    const agent = new OpenRouterAgent(service);
+
+    try {
+      await expect(
+        agent.propose({
+          ...request,
+          message: "Explain this Space's current rules.",
+        }),
+      ).resolves.toMatchObject({
+        status: "BLOCKED",
+        code: "NO_ELIGIBLE_SPACES",
+      });
+    } finally {
+      service.close();
+    }
+  });
+
+  it("turns a useful model prose response into clarification", async () => {
+    const service = new AurkaService();
+    const agent = new OpenRouterAgent(service, {
+      apiKey: "test-key",
+      model: "test-model",
+      fetchImpl: vi.fn(async () =>
+        completion([], "Which token amount and direction should I use?"),
+      ),
+    });
+
+    try {
+      await expect(agent.propose(request)).resolves.toMatchObject({
+        status: "CLARIFICATION",
+        reason: "Which token amount and direction should I use?",
+      });
+    } finally {
+      service.close();
+    }
+  });
+
+  it("distinguishes malformed model output from a deterministic trade rejection", async () => {
+    const service = new AurkaService();
+    const malformedCall = {
+      id: "2",
+      type: "function",
+      function: {
+        name: "request_deterministic_quote",
+        arguments: "{",
+      },
+    };
+    const responses = [[toolCall("1", "discover_spaces", {})], [malformedCall]];
+    const agent = new OpenRouterAgent(service, {
+      apiKey: "test-key",
+      model: "test-model",
+      fetchImpl: vi.fn(async () => completion(responses.shift() ?? [])),
+    });
+
+    try {
+      await expect(agent.propose(request)).resolves.toMatchObject({
+        status: "UNAVAILABLE",
+        code: "MALFORMED_RESPONSE",
+      });
+    } finally {
+      service.close();
+    }
+  });
+
+  it("reports tool budget exhaustion separately from provider failure", async () => {
+    const service = new AurkaService();
+    const agent = new OpenRouterAgent(service, {
+      apiKey: "test-key",
+      model: "test-model",
+      maxToolCalls: 1,
+      fetchImpl: vi.fn(async () =>
+        completion([toolCall("1", "discover_spaces", {})]),
+      ),
+    });
+
+    try {
+      await expect(agent.propose(request)).resolves.toMatchObject({
+        status: "UNAVAILABLE",
+        code: "TOOL_BUDGET_EXHAUSTED",
+        retryable: true,
       });
     } finally {
       service.close();
@@ -189,13 +391,13 @@ describe("OpenRouter trade agent", () => {
       const first = agent.propose(request);
       await new Promise((resolve) => setImmediate(resolve));
       await expect(agent.propose(request)).resolves.toMatchObject({
-        status: "BLOCKED",
-        reason: "The agent request limit is reached. Try again shortly.",
+        status: "UNAVAILABLE",
+        code: "CONCURRENCY_LIMIT",
       });
       release();
       await expect(first).resolves.toMatchObject({
         status: "UNAVAILABLE",
-        reason: "Agent unavailable",
+        code: "MALFORMED_RESPONSE",
       });
     } finally {
       release();
@@ -232,7 +434,7 @@ describe("OpenRouter trade agent", () => {
       controller.abort();
       await expect(result).resolves.toMatchObject({
         status: "UNAVAILABLE",
-        reason: "Agent unavailable",
+        code: "TIMEOUT",
       });
       expect(providerSignal?.aborted).toBe(true);
     } finally {

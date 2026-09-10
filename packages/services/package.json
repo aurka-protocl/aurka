@@ -24,12 +24,12 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json && mkdir -p dist/drizzle && cp -R drizzle/. dist/drizzle/",
     "clean": "rm -rf dist coverage",
-    "db:migrate": "tsx src/cli.ts migrate",
-    "db:check": "tsx src/cli.ts check",
+    "db:migrate": "node --env-file-if-exists=../../.env --import tsx src/cli.ts migrate",
+    "db:check": "node --env-file-if-exists=../../.env --import tsx src/cli.ts check",
     "generate:router-fixture": "pnpm build && node scripts/generate-router-calldata-fixture.mjs",
     "integration:local-settlement": "pnpm --dir ../.. integration:local-settlement",
     "integration:graph-node": "pnpm --dir ../.. integration:graph-node",
-    "start": "tsx src/cli.ts serve",
+    "start": "node --env-file-if-exists=../../.env --import tsx src/cli.ts serve",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },

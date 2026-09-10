@@ -10,6 +10,7 @@ export default tseslint.config(
       "packages/graph/subgraph/generated/**",
       "packages/graph/subgraph/build/**",
       "packages/graph/subgraph/src/graph-mapping.ts",
+      "contracts/vendor/**",
     ],
   },
   eslint.configs.recommended,

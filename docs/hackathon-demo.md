@@ -92,9 +92,21 @@ simulation state, explanation, and a sanitized tool trace. It is labeled
 the verified amount, token direction, and Space into the existing manual flow;
 Bob must request a fresh quote, review current state, sign the EIP-712 intent,
 and approve the wallet transaction. Account, chain, policy, capacity, price, or
-expiry changes invalidate the review. Missing credentials, timeout, malformed
-provider output, cancellation, or upstream failure renders “Agent unavailable”
-and leaves manual trading available.
+expiry changes invalidate the review.
+
+The assistant also has explicit non-trade outcomes. An unclear request gets a
+clarification with example prompts; “explain this Space’s current rules” reads
+the current service snapshot without changing anything; and rule edits link to
+the owner-only Space settings. A deterministic rejection includes a safe reason
+and next action. Provider failures use stable support codes such as
+`MISSING_CONFIGURATION`, `AUTHENTICATION_REJECTED`, `RATE_LIMITED`, `TIMEOUT`,
+`PROVIDER_OUTAGE`, and `TOOL_BUDGET_EXHAUSTED`; the browser never receives
+secrets or raw upstream errors. Manual trading remains available for every
+assistant outcome.
+
+The service start and migration scripts load the root `.env` when present. Keep
+the OpenRouter key server-only; never paste it into the browser or a `VITE_*`
+variable.
 
 OpenRouter’s current tool-calling exchange is the documented chat-completions
 loop: a tool-call assistant message is followed by tool results and another
@@ -111,28 +123,34 @@ USDC/WETH direction, per-trade cap, cumulative integer-token budget, maximum
 trade count, slippage limit, and short expiry. His EIP-712 signature authorizes
 that exact session. The address is not Bob's browser wallet and is not Alice's
 Space owner; it must be funded independently with only the displayed demo
-budget. Bob must separately approve the exact missing token allowance to the
-settlement router. Those one-time funding/approval transactions are visible and
-are never delegated to the agent.
+budget. Bob then reviews and signs the one-time control authorization for the
+agent wallet to approve exactly the missing input-token allowance to the
+settlement router. The funding and approval transactions are visible and are
+never delegated to Bob's browser wallet.
 
 After authorization, “Start one bounded worker tick” uses the same OpenRouter
 tool loop and deterministic solver described above, but passes the dedicated
 agent address as trader. AURKA reserves the integer budget atomically, refreshes
 the wallet policy, balances, allowance, quote, capacity, price, chain, and
 nonce, re-encodes and simulates the exact router calldata, and then asks Privy
-to sign/broadcast. The browser is not prompted for each authorized trade. A
-Privy policy restricts the relevant Ethereum typed-data domain and router/value
-target; AURKA owns session limits and exact nested calldata checks; the
-settlement contracts remain authoritative. A receipt timeout or provider
-ambiguity pauses reconciliation and never triggers a duplicate send.
+to sign the transaction. In `sign-and-broadcast` mode the canonical fork RPC
+broadcasts Privy's signed RLP. The browser is not prompted for each authorized
+trade. The delegated Privy policy restricts the typed-data domain, router/value
+target, and an input-token `approve` by function, router spender, and amount
+cap; the wallet's separate owner policy restricts recovery transfers to Bob.
+AURKA owns session limits and exact nested calldata checks; the settlement
+contracts remain authoritative. A receipt timeout or provider ambiguity pauses
+reconciliation and never triggers a duplicate send.
 
 Bob can see the agent address, wallet/policy status, remaining budget, expiry,
 last proposal, and actual transaction hash in Trade/Activity. Stop disables
 local signing before requesting the operator-owned Privy revoke. A transaction
 already broadcast may still confirm; the UI reconciles it. The “Recover reviewed
 test funds to Bob” control is available after Stop, expiry, or exhaustion: Bob
-signs exact input/output token amounts and the separate owner/operator recovery
-module executes them. Recovery pauses if a submitted trade still lacks a
+selects one token and signs one exact amount per recovery operation, and the
+separate owner/operator recovery module executes it. The owner policy permits
+only reviewed token transfers to Bob and the same sign-and-broadcast route is
+used for the local fork. Recovery pauses if a submitted trade still lacks a
 receipt; the delegated signer never receives transfer or withdrawal permission.
 
 The live proof is not present in this checkout. The isolated demo fork is
@@ -141,15 +159,27 @@ reach it. Run the sanitized check and provide a supported custom-network/live
 route before funding anything:
 
 ```sh
-pnpm privy:delegated
+pnpm privy:delegated                 # loads .env if present; read-only check
+node --env-file=.env packages/wallet/scripts/privy-delegated-wallet.mjs check
 pnpm privy:delegated template
 PRIVY_DELEGATED_PROVISION=true pnpm privy:delegated provision
+pnpm privy:delegated deny-test
 ```
+
+The check requires the server-only `PRIVY_APP_ID` name (not
+`NEXT_PUBLIC_PRIVY_APP_ID`), both P-256 authorization keys, the two key-quorum
+IDs, the wallet and policy IDs, and the reviewed chain/router/token/cap/expiry
+values. It verifies key-quorum membership, threshold, SDK resource readback,
+exact policy attachments and allowed methods without printing credentials. In
+this checkout TASK99-009 found those resource inputs missing, so funding and all
+live signing/revocation/recovery steps were not run. See
+`.aurkadev/reviews/TASK99-009-report.md` and
+`docs/evidence/task99-009-live-privy.json` for the sanitized result.
 
 The required live wallet/policy readback, remote denial check, real Privy
 signature, funded agent, and confirmed receipt belong in
-`.aurkadev/reviews/TASK99-008-report.md`; this remains a bounded implementation
-and manual-evidence checklist, not a production-funds claim.
+`.aurkadev/reviews/TASK99-009-report.md`; TASK99-008 remains the bounded
+implementation report, and neither report makes a production-funds claim.
 
 ## Three-minute script
 

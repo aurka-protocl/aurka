@@ -65,12 +65,13 @@ settlement returns a fill. No live oracle is deployed.
 
 `AurkaSwapVMRouter` is the only Phase 4 execution surface in this milestone. It
 verifies trader/solver EIP-712 objects, requires an explicitly activated
-position-direction epoch, checks the current Aqua virtual-balance snapshot,
-executes the immutable `ISwapVM` direct adapter for `AURKA_DIRECT_PAIR_V1`,
-routes exact output-token amounts, and reloads all Aqua balances before emitting
-`TradeExecuted`. Local `MockAqua`, `MockPriceOracle`, and `MockERC20` fixtures
-are deterministic; official upstream versions and the interface fingerprints are
-recorded in [`integrations.md`](./integrations.md).
+position-direction epoch, checks the current Aqua virtual-balance snapshot, and
+uses `executeWithSwapVM` to call the pinned upstream VM order with packed maker
+and taker data. It routes exact output-token amounts, reloads all Aqua balances,
+and emits `TradeExecuted`. `execute` plus `AurkaDirectSwapVM` remain the
+explicit fixture/reference path. Local `MockAqua`, `MockPriceOracle`, and
+`MockERC20` fixtures are deterministic; upstream versions and interface
+fingerprints are recorded in [`integrations.md`](./integrations.md).
 
 `OptionSpaceFee` uses `1e18` fixed-point utilization and the bounded
 interval-average curve in ADR 0035. The policy enforces a maximum total fee of

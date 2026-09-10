@@ -2,8 +2,6 @@
 pragma solidity 0.8.28;
 
 /// @notice The view/execution boundary of the official SwapVM router.
-/// @dev MakerTraits is represented by its ABI type, uint256, to avoid importing
-///      the external implementation into deterministic local builds.
 interface ISwapVM {
     struct Order {
         address maker;

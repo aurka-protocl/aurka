@@ -32,6 +32,30 @@ function errorMessage(error: unknown): string {
   return "Router eth_call reverted";
 }
 
+function traceMessage(trace: unknown): string | undefined {
+  if (!trace || typeof trace !== "object") return undefined;
+  const calls: Array<Record<string, unknown>> = [];
+  const visit = (node: unknown): void => {
+    if (!node || typeof node !== "object") return;
+    const call = node as Record<string, unknown>;
+    calls.push(call);
+    if (Array.isArray(call.calls)) call.calls.forEach(visit);
+  };
+  visit(trace);
+  const summary = calls
+    .map((call) => {
+      const to = typeof call.to === "string" ? call.to : "?";
+      const input =
+        typeof call.input === "string" ? call.input.slice(0, 10) : "?";
+      const error = typeof call.error === "string" ? ` ${call.error}` : "";
+      const output =
+        typeof call.output === "string" ? ` ${call.output.slice(0, 74)}` : "";
+      return `${to} ${input}${error}${output}`;
+    })
+    .join("; ");
+  return summary.length === 0 ? undefined : summary.slice(0, 400);
+}
+
 /**
  * Exact router boundary. A missing trader signature is expected while a
  * proposal is being quoted, so `simulate` performs the deterministic
@@ -102,10 +126,27 @@ export class Eip1193RouterSimulator implements RouterSimulator {
         gasEstimate: 0n,
       };
     } catch (error) {
+      let trace: string | undefined;
+      try {
+        trace = traceMessage(
+          await this.transport.request({
+            method: "debug_traceCall",
+            params: [
+              call,
+              `0x${snapshot.snapshotBlock.toString(16)}`,
+              { tracer: "callTracer" },
+            ],
+          }),
+        );
+      } catch {
+        // A production RPC may not expose debug tracing; the original
+        // eth_call error remains the authoritative simulation result.
+      }
+      const reason = `${errorMessage(error)}${trace ? ` [trace ${trace}]` : ""}`;
       return {
         status: "REVERTED",
         gasEstimate: 0n,
-        reason: errorMessage(error),
+        reason: reason.slice(0, 500),
       };
     }
   }
@@ -144,7 +185,13 @@ export class JsonRpcHttpTransport implements Eip1193Transport {
       error?: { message?: string };
     };
     if (body.jsonrpc !== "2.0") throw new Error("Malformed JSON-RPC response");
-    if (body.error) throw new Error(body.error.message ?? "RPC request failed");
+    if (body.error) {
+      const detail =
+        typeof (body.error as { data?: unknown }).data === "string"
+          ? `: ${(body.error as { data: string }).data}`
+          : "";
+      throw new Error(`${body.error.message ?? "RPC request failed"}${detail}`);
+    }
     if (!Object.prototype.hasOwnProperty.call(body, "result"))
       throw new Error("Malformed JSON-RPC response: missing result");
     return body.result;

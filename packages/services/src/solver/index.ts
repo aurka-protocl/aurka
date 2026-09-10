@@ -6,3 +6,4 @@ export * from "./proposals.js";
 export * from "./rpc.js";
 export * from "./signing.js";
 export * from "./types.js";
+export * from "./upstream.js";

@@ -64,18 +64,19 @@ provider is a live balance or oracle source.
 
 ## Reproducible system verification
 
-The TASK99-006 release rehearsal uses a pinned Ethereum mainnet fork, real Aqua
-and Chainlink reads, ordinary isolated test wallets, and a same-fork Graph Node
-stack:
+The TASK99-013 SwapVM rehearsal uses a pinned Ethereum mainnet fork, real Aqua,
+Chainlink reads, and ordinary isolated test wallets:
 
 ```bash
-pnpm integration:fork-real
+pnpm integration:fork-swapvm
 ```
 
-It runs the two-Space wallet journey, checks exact approval/setup counts,
-Graph-backed confirmed Activity, and Graph outage/restart recovery. Set
-`AURKA_RELEASE_EVIDENCE_DIR` to retain its sanitized release JSON and wallet
-evidence; otherwise the runner cleans its temporary resources.
+It runs two custom-funded Spaces through the atomic factory and executes the
+actual upstream VM program. Set `AURKA_RELEASE_EVIDENCE_DIR` to retain its
+sanitized receipts/traces and dependency evidence. The older
+`pnpm integration:fork-real` command remains the Graph/release reference
+rehearsal. Set `AURKA_RELEASE_EVIDENCE_DIR` to retain its sanitized release JSON
+and wallet evidence; otherwise the runner cleans its temporary resources.
 
 The deterministic system checks are credential-free and use disposable local
 resources:

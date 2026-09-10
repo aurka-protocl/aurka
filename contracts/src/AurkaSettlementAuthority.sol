@@ -93,6 +93,10 @@ contract AurkaSettlementAuthority {
     RiskModeRegistry public immutable riskRegistry;
     IAqua public immutable aqua;
     address public immutable router;
+    /// @notice Aqua app address whose virtual balances form the portfolio.
+    /// @dev The legacy adapter uses the AURKA entry router; the pinned
+    /// upstream VM path uses its own app address.
+    address public immutable aquaApp;
 
     error InvalidAddress();
     error PolicyStateMismatch();
@@ -106,16 +110,18 @@ contract AurkaSettlementAuthority {
         AurkaPolicyRegistry policyRegistry_,
         RiskModeRegistry riskRegistry_,
         IAqua aqua_,
-        address router_
+        address router_,
+        address aquaApp_
     ) {
         if (
             address(policyRegistry_) == address(0) || address(riskRegistry_) == address(0)
-                || address(aqua_) == address(0) || router_ == address(0)
+                || address(aqua_) == address(0) || router_ == address(0) || aquaApp_ == address(0)
         ) revert InvalidAddress();
         policyRegistry = policyRegistry_;
         riskRegistry = riskRegistry_;
         aqua = aqua_;
         router = router_;
+        aquaApp = aquaApp_;
     }
 
     modifier onlyRouter() {
@@ -182,7 +188,7 @@ contract AurkaSettlementAuthority {
                     || active.minimumWeightBps > active.maximumWeightBps
             ) revert PolicyStateMismatch();
             (uint248 balance, uint8 tokensCount) =
-                aqua.rawBalances(policy.treasury, router, strategyHash, tokens[i]);
+                aqua.rawBalances(policy.treasury, aquaApp, strategyHash, tokens[i]);
             // Aqua returns the number of tokens in the strategy, not a
             // per-token presence flag. Require the complete managed asset
             // set so a partial or differently-shaped strategy cannot be

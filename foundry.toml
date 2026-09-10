@@ -13,6 +13,12 @@ optimizer_runs = 200
 via_ir = true
 bytecode_hash = "none"
 cbor_metadata = false
+remappings = [
+    "@aurka-swap-vm/=contracts/vendor/swap-vm/contracts/",
+    "@1inch/aqua/=contracts/vendor/aqua/",
+    "@1inch/solidity-utils/=contracts/vendor/solidity-utils/",
+    "@openzeppelin/contracts/=contracts/vendor/openzeppelin-contracts/contracts/",
+]
 
 [profile.default.fuzz]
 runs = 512

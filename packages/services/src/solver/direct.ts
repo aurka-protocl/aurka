@@ -17,7 +17,9 @@ import {
   hashDirectProgram,
   hashIntent,
   hashProposal,
+  encodeDirectProgram,
 } from "./hash.js";
+import { buildUpstreamSwapVMData, hashUpstreamCalldata } from "./upstream.js";
 import {
   asDirectSettlementInput,
   type ProposalSigner,
@@ -152,6 +154,28 @@ export class DirectSolver {
         "Output fee legs exceed the committed output amount",
       );
     const intentHash = hashIntent(intent, snapshot);
+    const directProgramFields = {
+      policyId: intent.policyId,
+      positionIdHash: intent.positionIdHash,
+      trader: intent.trader,
+      inputToken: intent.traderInputToken,
+      outputToken: intent.traderOutputToken,
+      strategyHash: snapshot.aquaStrategyHash,
+      inputAmount: rawAmounts.traderInputAmount,
+      traderOutputAmount,
+      solverFeeAmount,
+      protocolFeeAmount,
+      inputValue: fill.executedValue,
+      traderOutputValue: fill.traderOutputValue,
+      treasuryOutputValue: fill.treasuryOutputValue,
+      capacityEpochId: fill.capacityEpochId,
+      intentHash,
+    } as const;
+    const directProgram = `0x${Array.from(
+      encodeDirectProgram(directProgramFields),
+      (value) => value.toString(16).padStart(2, "0"),
+    ).join("")}`;
+    const directProgramHash = hashDirectProgram(directProgramFields);
     const proposalWithoutSignature = atomicSettlementProposalSchema.parse({
       intentHash,
       solver: this.signer?.address ?? ZERO_ADDRESS,
@@ -193,38 +217,31 @@ export class DirectSolver {
         : { bindingAsset: fill.bindingAsset }),
       expectedPostStateHash: hashAssetStates(fill.finalPortfolio.assets),
       aquaStrategyHash: snapshot.aquaStrategyHash,
-      swapVMCalldataHash: hashDirectProgram({
-        policyId: intent.policyId,
-        positionIdHash: intent.positionIdHash,
-        trader: intent.trader,
-        inputToken: intent.traderInputToken,
-        outputToken: intent.traderOutputToken,
-        strategyHash: snapshot.aquaStrategyHash,
-        inputAmount: rawAmounts.traderInputAmount,
-        traderOutputAmount,
-        solverFeeAmount,
-        protocolFeeAmount,
-        inputValue: fill.executedValue,
-        traderOutputValue: fill.traderOutputValue,
-        treasuryOutputValue: fill.treasuryOutputValue,
-        capacityEpochId: fill.capacityEpochId,
-        intentHash,
-      }),
+      swapVMCalldataHash: directProgramHash,
       deadline: Math.min(
         intent.deadline,
         snapshot.priceProtection.nowSeconds + 60,
       ),
     });
-    const proposalHash = hashProposal(proposalWithoutSignature, snapshot);
+    const upstream = snapshot.swapVMGuard
+      ? buildUpstreamSwapVMData(intent, proposalWithoutSignature, snapshot)
+      : undefined;
+    const proposalWithCalldata = atomicSettlementProposalSchema.parse({
+      ...proposalWithoutSignature,
+      swapVMCalldataHash: upstream
+        ? hashUpstreamCalldata(directProgram, upstream)
+        : proposalWithoutSignature.swapVMCalldataHash,
+    });
+    const proposalHash = hashProposal(proposalWithCalldata, snapshot);
     const signature = this.signer
       ? await this.signer.signProposal(
-          proposalWithoutSignature,
+          proposalWithCalldata,
           proposalHash,
           snapshot,
         )
       : undefined;
     const proposal = atomicSettlementProposalSchema.parse({
-      ...proposalWithoutSignature,
+      ...proposalWithCalldata,
       ...(signature === undefined ? {} : { signature }),
     });
     const simulation = await this.simulator.simulate(

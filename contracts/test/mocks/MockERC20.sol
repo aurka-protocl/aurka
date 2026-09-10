@@ -37,6 +37,13 @@ contract MockERC20 is IERC20Minimal {
         return true;
     }
 
+    function transfer(address to, uint256 amount) external returns (bool) {
+        require(_balances[msg.sender] >= amount, "balance");
+        _balances[msg.sender] -= amount;
+        _balances[to] += amount;
+        return true;
+    }
+
     function transferFrom(address from, address to, uint256 amount) external returns (bool) {
         if (transferFromReverts) revert("mock transferFrom reverted");
         if (transferFromReturnsFalse) return false;

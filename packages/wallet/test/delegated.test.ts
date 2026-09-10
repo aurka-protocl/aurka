@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { privateKeyToAccount } from "viem/accounts";
 
 import {
   PrivyDelegatedExecutionAdapter,
@@ -32,7 +33,13 @@ function action(overrides: Partial<DelegatedExecutionAction> = {}) {
 function adapter(
   rpcValue: (method: string) => unknown = (method) =>
     method === "eth_chainId" ? "0x7a69" : "0x0",
+  options: {
+    readonly broadcastMode?: "privy" | "sign-and-broadcast";
+    readonly walletAddress?: string;
+    readonly signAccount?: ReturnType<typeof privateKeyToAccount>;
+  } = {},
 ) {
+  const walletAddress = options.walletAddress ?? AGENT;
   return new PrivyDelegatedExecutionAdapter({
     client: {
       wallets: () => ({
@@ -41,6 +48,25 @@ function adapter(
             encoding: "hex",
             signature: `0x${"00".repeat(65)}`,
           }),
+          signTransaction: async (_walletId, input) => {
+            const transaction = input.params as {
+              transaction: Record<string, string>;
+            };
+            return {
+              encoding: "rlp",
+              signed_transaction: options.signAccount
+                ? await options.signAccount.signTransaction({
+                    to: transaction.transaction.to! as `0x${string}`,
+                    value: BigInt(transaction.transaction.value!),
+                    data: transaction.transaction.data! as `0x${string}`,
+                    nonce: Number(BigInt(transaction.transaction.nonce!)),
+                    gas: BigInt(transaction.transaction.gas_limit!),
+                    gasPrice: BigInt(transaction.transaction.gas_price!),
+                    chainId: Number(BigInt(transaction.transaction.chain_id!)),
+                  })
+                : `0x02${"00".repeat(65)}`,
+            };
+          },
           sendTransaction: async () => ({
             caip2: "eip155:31337",
             hash: `0x${"88".repeat(32)}`,
@@ -50,7 +76,7 @@ function adapter(
     },
     policy: async () => ({
       walletId: "delegated-wallet",
-      walletAddress: AGENT,
+      walletAddress,
       signerAddress: AGENT,
       policyId: "delegated-policy",
       chainId: 31_337,
@@ -64,13 +90,16 @@ function adapter(
       fingerprint: FINGERPRINT,
       allowedMethods: [
         "eth_call",
-        "eth_sendTransaction",
+        ...(options.broadcastMode === "sign-and-broadcast"
+          ? ["eth_signTransaction" as const]
+          : ["eth_sendTransaction" as const]),
         "eth_signTypedData_v4",
       ],
     }),
     rpc: { request: async (method) => rpcValue(method) },
     authorization: async () => ({}) as never,
     revokeRemote: async () => undefined,
+    ...(options.broadcastMode ? { broadcastMode: options.broadcastMode } : {}),
     now: () => 100,
   });
 }
@@ -121,5 +150,38 @@ describe("delegated Privy execution boundary", () => {
       ),
     ).rejects.toThrow("RPC chain mismatch");
     expect(calls).toBe(1);
+  });
+
+  it("signs and broadcasts the exact agent-token approval through the local RPC route", async () => {
+    const account = privateKeyToAccount(`0x${"01".repeat(32)}`);
+    const value = adapter(
+      (method) => {
+        if (method === "eth_chainId") return "0x7a69";
+        if (method === "eth_getBalance") return "0x1";
+        if (method === "eth_getTransactionCount") return "0x0";
+        if (method === "eth_estimateGas") return "0x5208";
+        if (method === "eth_gasPrice") return "0x1";
+        if (method === "eth_sendRawTransaction") return `0x${"88".repeat(32)}`;
+        return "0x0";
+      },
+      {
+        broadcastMode: "sign-and-broadcast",
+        walletAddress: account.address,
+        signAccount: account,
+      },
+    );
+    await expect(
+      value.approveToken!(
+        {
+          chainId: 31_337,
+          token: INPUT,
+          spender: ROUTER,
+          amount: "10",
+          expiresAt: 200,
+          policyFingerprint: FINGERPRINT,
+        },
+        {} as never,
+      ),
+    ).resolves.toEqual({ transactionHash: `0x${"88".repeat(32)}` });
   });
 });

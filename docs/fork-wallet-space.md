@@ -182,9 +182,10 @@ forge test --match-contract 'AurkaPolicyRegistryTest|AurkaSwapVMRouterTest|Direc
   `ChainlinkPriceOracle` reads the pinned ETH/USD and USDC/USD rounds. The
   adapter normalizes those 8-decimal answers to the whole settlement units used
   by this MVP and fingerprints both raw and normalized values.
-  `AurkaDirectSwapVM` is the narrow AURKA execution adapter; upstream SwapVM is
-  not claimed. `FixtureProposalSigner` remains the public test solver. The
-  manifest labels every fixture and real dependency.
+  `AurkaUpstreamAquaSwapVMRouter` executes the pinned `StaticBalances` plus
+  `LimitSwap` program in real mode; `AurkaDirectSwapVM` is retained only as the
+  explicitly labelled fixture/reference path. `FixtureProposalSigner` remains
+  the public test solver. The manifest labels every fixture and real dependency.
 - New user Spaces use the typed factory entry point and the two fork tokens. The
   predefined demo Spaces retain their seeded fixture allocations. The factory
   keeps owner governance on each policy and finalized vault; it has no owner

@@ -241,6 +241,7 @@ export class LocalChainSnapshotProvider {
       this.space.policyId,
     ]);
     const fee = chainPolicy.fee;
+    const aquaApp = await read(pinnedClient, router, "aquaApp", []);
     const managedAssets = [];
     const prices = [];
     const balances = [];
@@ -261,7 +262,7 @@ export class LocalChainSnapshotProvider {
       ]);
       const balanceRaw = await read(pinnedClient, aqua, "rawBalances", [
         chainPolicy.treasury,
-        router.address,
+        aquaApp,
         this.space.strategyHash,
         tokenAddress,
       ]);
@@ -405,6 +406,7 @@ export class LocalChainSnapshotProvider {
       priceProtection,
       snapshotBlock: block.number,
       aquaStrategyHash: this.space.strategyHash,
+      aquaApp,
       balancesHash,
       rawAmountsForValue: (traderInputValue, treasuryOutputValue) => ({
         traderInputAmount: valueToRaw(traderInputValue, inputAsset),

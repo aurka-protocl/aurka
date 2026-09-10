@@ -3,7 +3,9 @@ import {
   decodeFunctionData,
   encodeFunctionData,
   hashTypedData,
+  parseTransaction,
   recoverAddress,
+  recoverTransactionAddress,
   type Hex,
 } from "viem";
 import { z } from "zod";
@@ -37,7 +39,12 @@ export const delegatedExecutionPolicySchema = z
     fingerprint: bytes32Schema,
     allowedMethods: z
       .array(
-        z.enum(["eth_call", "eth_sendTransaction", "eth_signTypedData_v4"]),
+        z.enum([
+          "eth_call",
+          "eth_sendTransaction",
+          "eth_signTransaction",
+          "eth_signTypedData_v4",
+        ]),
       )
       .min(1),
   })
@@ -65,6 +72,19 @@ export const delegatedExecutionActionSchema = z
 export type DelegatedExecutionAction = z.infer<
   typeof delegatedExecutionActionSchema
 >;
+
+const erc20ApproveAbi = [
+  {
+    type: "function",
+    name: "approve",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "spender", type: "address" },
+      { name: "amount", type: "uint256" },
+    ],
+    outputs: [{ name: "", type: "bool" }],
+  },
+] as const;
 
 export type DelegatedExecutionReceipt = {
   readonly transactionHash: string;
@@ -95,6 +115,17 @@ export interface DelegatedWalletAdapter {
   getReceipt(
     transactionHash: string,
   ): Promise<DelegatedExecutionReceipt | null>;
+  approveToken?(
+    input: {
+      readonly chainId: number;
+      readonly token: string;
+      readonly spender: string;
+      readonly amount: string;
+      readonly expiresAt: number;
+      readonly policyFingerprint: string;
+    },
+    context: PrivyAuthorizationContext,
+  ): Promise<{ readonly transactionHash: string }>;
   revoke(): Promise<void>;
   /**
    * Recovery is deliberately separate from the delegated signer. The
@@ -106,6 +137,7 @@ export interface DelegatedWalletAdapter {
     readonly ownerAddress: string;
     readonly destination: string;
     readonly assets: readonly DelegatedRecoveryAsset[];
+    readonly authorizationHash: string;
   }): Promise<{ readonly transactionHash?: string }>;
 }
 
@@ -137,6 +169,10 @@ export interface DelegatedPrivyNodeClient {
         walletId: string,
         input: Record<string, unknown>,
       ): Promise<unknown>;
+      signTransaction(
+        walletId: string,
+        input: Record<string, unknown>,
+      ): Promise<unknown>;
       sendTransaction(
         walletId: string,
         input: Record<string, unknown>,
@@ -154,7 +190,7 @@ export interface DelegatedPrivyAdapterOptions {
   readonly policy: () => Promise<DelegatedExecutionPolicy>;
   readonly rpc: DelegatedChainRpc;
   readonly authorization: (
-    operation: "signTypedData" | "eth_sendTransaction",
+    operation: "signTypedData" | "eth_sendTransaction" | "signTransaction",
     request: Record<string, unknown>,
   ) => Promise<PrivyAuthorizationContext>;
   readonly revokeRemote: () => Promise<void>;
@@ -163,7 +199,9 @@ export interface DelegatedPrivyAdapterOptions {
     readonly ownerAddress: string;
     readonly destination: string;
     readonly assets: readonly DelegatedRecoveryAsset[];
+    readonly authorizationHash: string;
   }) => Promise<{ readonly transactionHash?: string } | void>;
+  readonly broadcastMode?: "privy" | "sign-and-broadcast";
   readonly now?: () => number;
 }
 
@@ -183,7 +221,11 @@ function asQuantity(value: unknown, label: string): bigint {
 
 function methodAllowed(
   policy: DelegatedExecutionPolicy,
-  method: "eth_call" | "eth_sendTransaction" | "eth_signTypedData_v4",
+  method:
+    | "eth_call"
+    | "eth_sendTransaction"
+    | "eth_signTransaction"
+    | "eth_signTypedData_v4",
 ): void {
   if (!policy.allowedMethods.includes(method))
     throw new Error(`Delegated Privy policy does not allow ${method}`);
@@ -303,6 +345,28 @@ async function readTokenCall(
     await rpc.request("eth_call", [{ to: token, data }, "latest"]),
     "token call result",
   );
+}
+
+async function transactionForSigning(
+  rpc: DelegatedChainRpc,
+  transaction: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const [gas, gasPrice] = await Promise.all([
+    rpc.request("eth_estimateGas", [
+      {
+        from: transaction.from,
+        to: transaction.to,
+        data: transaction.data,
+        value: transaction.value,
+      },
+    ]),
+    rpc.request("eth_gasPrice", []),
+  ]);
+  return {
+    ...transaction,
+    gas_limit: hex(asQuantity(gas, "transaction gas limit")),
+    gas_price: hex(asQuantity(gasPrice, "transaction gas price")),
+  };
 }
 
 async function readWalletBalances(
@@ -513,6 +577,213 @@ export class PrivyDelegatedExecutionAdapter implements DelegatedWalletAdapter {
     );
   }
 
+  private async signAndBroadcast(
+    policy: DelegatedExecutionPolicy,
+    transaction: Record<string, unknown>,
+    context: PrivyAuthorizationContext,
+    idempotencyKey: string,
+  ): Promise<string> {
+    const authorized = await this.options.authorization("signTransaction", {
+      params: { transaction },
+      authorization_context: context,
+    });
+    let signed: unknown;
+    try {
+      signed = await this.options.client
+        .wallets()
+        .ethereum()
+        .signTransaction(policy.walletId, {
+          params: { transaction },
+          authorization_context: authorized,
+          idempotency_key: idempotencyKey,
+        });
+    } catch {
+      throw new DelegatedBroadcastUnknownError(
+        "Privy transaction-signing status is unknown",
+      );
+    }
+    const value = signed as {
+      encoding?: unknown;
+      signed_transaction?: unknown;
+    };
+    if (
+      value.encoding !== "rlp" ||
+      typeof value.signed_transaction !== "string" ||
+      !/^0x[0-9a-fA-F]+$/.test(value.signed_transaction)
+    )
+      throw new DelegatedBroadcastUnknownError(
+        "Privy returned no trustworthy signed transaction",
+      );
+    let signer: string;
+    let parsed: ReturnType<typeof parseTransaction>;
+    try {
+      signer = await recoverTransactionAddress({
+        serializedTransaction: value.signed_transaction as never,
+      });
+      parsed = parseTransaction(value.signed_transaction as Hex);
+    } catch {
+      throw new DelegatedBroadcastUnknownError(
+        "Privy returned an invalid or changed signed transaction",
+      );
+    }
+    if (signer.toLowerCase() !== policy.walletAddress.toLowerCase())
+      throw new Error("Privy signed transaction has the wrong sender");
+    const requestedTo = transaction.to;
+    const requestedData = transaction.data;
+    const requestedValue = transaction.value;
+    const requestedNonce = transaction.nonce;
+    const requestedChainId = transaction.chain_id;
+    const requestedGas = transaction.gas_limit;
+    const requestedGasPrice = transaction.gas_price;
+    if (
+      typeof requestedTo !== "string" ||
+      typeof requestedData !== "string" ||
+      typeof requestedValue !== "string" ||
+      typeof requestedNonce !== "string" ||
+      typeof requestedChainId !== "string" ||
+      typeof requestedGas !== "string" ||
+      typeof requestedGasPrice !== "string" ||
+      parsed.to?.toLowerCase() !== requestedTo.toLowerCase() ||
+      (parsed.data ?? "0x").toLowerCase() !== requestedData.toLowerCase() ||
+      (parsed.value ?? 0n) !== BigInt(requestedValue) ||
+      parsed.nonce !== Number(BigInt(requestedNonce)) ||
+      parsed.chainId !== Number(BigInt(requestedChainId)) ||
+      parsed.gas !== BigInt(requestedGas) ||
+      parsed.gasPrice !== BigInt(requestedGasPrice)
+    )
+      throw new Error("Privy changed the reviewed transaction while signing");
+    try {
+      const broadcast = await this.options.rpc.request(
+        "eth_sendRawTransaction",
+        [value.signed_transaction],
+      );
+      return asHex(broadcast, "broadcast transaction hash");
+    } catch {
+      throw new DelegatedBroadcastUnknownError(
+        "Privy-signed transaction broadcast status is unknown",
+      );
+    }
+  }
+
+  async approveToken(
+    input: {
+      readonly chainId: number;
+      readonly token: string;
+      readonly spender: string;
+      readonly amount: string;
+      readonly expiresAt: number;
+      readonly policyFingerprint: string;
+    },
+    context: PrivyAuthorizationContext,
+  ): Promise<{ readonly transactionHash: string }> {
+    const policy = delegatedExecutionPolicySchema.parse(
+      await this.options.policy(),
+    );
+    assertPolicy(policy, this.now());
+    methodAllowed(policy, "eth_call");
+    if (this.options.broadcastMode === "sign-and-broadcast")
+      methodAllowed(policy, "eth_signTransaction");
+    else methodAllowed(policy, "eth_sendTransaction");
+    if (
+      input.chainId !== policy.chainId ||
+      input.token.toLowerCase() !== policy.inputToken.toLowerCase() ||
+      input.spender.toLowerCase() !== policy.router.toLowerCase() ||
+      input.policyFingerprint.toLowerCase() !== policy.fingerprint.toLowerCase()
+    )
+      throw new Error(
+        "Delegated token approval does not match the current policy",
+      );
+    if (this.now() >= input.expiresAt || input.expiresAt > policy.validUntil)
+      throw new Error("Delegated token approval is expired");
+    if (BigInt(input.amount) > BigInt(policy.maximumInputAmount))
+      throw new Error("Delegated token approval cap exceeded");
+    const chain = asQuantity(
+      await this.options.rpc.request("eth_chainId", []),
+      "chain ID",
+    );
+    if (chain !== BigInt(policy.chainId))
+      throw new Error("Delegated RPC chain mismatch");
+    const nativeBalance = asQuantity(
+      await this.options.rpc.request("eth_getBalance", [
+        policy.walletAddress,
+        "latest",
+      ]),
+      "native balance",
+    );
+    if (nativeBalance === 0n)
+      throw new Error("Delegated wallet has no native gas balance");
+    const data = encodeFunctionData({
+      abi: erc20ApproveAbi,
+      functionName: "approve",
+      args: [policy.router as `0x${string}`, BigInt(input.amount)],
+    });
+    const nonce = asQuantity(
+      await this.options.rpc.request("eth_getTransactionCount", [
+        policy.walletAddress,
+        "pending",
+      ]),
+      "transaction nonce",
+    );
+    const transaction = {
+      from: policy.walletAddress,
+      to: policy.inputToken,
+      data,
+      value: "0x0",
+      nonce: hex(nonce),
+      chain_id: hex(BigInt(policy.chainId)),
+    };
+    const simulation = await this.options.rpc.request("eth_call", [
+      transaction,
+      "latest",
+    ]);
+    asHex(simulation, "delegated approval simulation result");
+    const latest = delegatedExecutionPolicySchema.parse(
+      await this.options.policy(),
+    );
+    assertPolicy(latest, this.now());
+    if (latest.fingerprint.toLowerCase() !== policy.fingerprint.toLowerCase())
+      throw new Error("Delegated policy changed during approval");
+    if (this.options.broadcastMode === "sign-and-broadcast")
+      return {
+        transactionHash: await this.signAndBroadcast(
+          policy,
+          await transactionForSigning(this.options.rpc, transaction),
+          context,
+          `aurka-d-approval:${policy.walletId}:${input.amount}`,
+        ),
+      };
+    const authorized = await this.options.authorization("eth_sendTransaction", {
+      params: { transaction },
+      authorization_context: context,
+    });
+    let result: unknown;
+    try {
+      result = await this.options.client
+        .wallets()
+        .ethereum()
+        .sendTransaction(policy.walletId, {
+          caip2: `eip155:${policy.chainId}`,
+          params: { transaction },
+          authorization_context: authorized,
+          idempotency_key: `aurka-d-approval:${policy.walletId}:${input.amount}`,
+        });
+    } catch {
+      throw new DelegatedBroadcastUnknownError(
+        "Privy token approval broadcast status is unknown",
+      );
+    }
+    const value = result as { caip2?: unknown; hash?: unknown };
+    if (
+      value.caip2 !== `eip155:${policy.chainId}` ||
+      typeof value.hash !== "string" ||
+      !/^0x[0-9a-fA-F]{64}$/.test(value.hash)
+    )
+      throw new DelegatedBroadcastUnknownError(
+        "Privy accepted the token approval but returned no trustworthy hash",
+      );
+    return { transactionHash: value.hash };
+  }
+
   async simulateAndSend(
     raw: DelegatedExecutionAction,
     context: PrivyAuthorizationContext,
@@ -526,7 +797,9 @@ export class PrivyDelegatedExecutionAdapter implements DelegatedWalletAdapter {
     );
     assertAction(action, policy, this.now());
     methodAllowed(policy, "eth_call");
-    methodAllowed(policy, "eth_sendTransaction");
+    if (this.options.broadcastMode === "sign-and-broadcast")
+      methodAllowed(policy, "eth_signTransaction");
+    else methodAllowed(policy, "eth_sendTransaction");
     const chain = asQuantity(
       await this.options.rpc.request("eth_chainId", []),
       "chain ID",
@@ -580,35 +853,49 @@ export class PrivyDelegatedExecutionAdapter implements DelegatedWalletAdapter {
     assertAction(action, latest, this.now());
     if (latest.fingerprint.toLowerCase() !== policy.fingerprint.toLowerCase())
       throw new Error("Delegated policy changed during simulation");
-    const authorized = await this.options.authorization("eth_sendTransaction", {
-      params: { transaction },
-      authorization_context: context,
-    });
-    let result: unknown;
-    try {
-      result = await this.options.client
-        .wallets()
-        .ethereum()
-        .sendTransaction(policy.walletId, {
-          caip2: `eip155:${policy.chainId}`,
-          params: { transaction },
-          authorization_context: authorized,
-          idempotency_key: `aurka-d:${action.intentHash.slice(2, 18)}${action.proposalHash.slice(2, 18)}`,
-        });
-    } catch {
-      throw new DelegatedBroadcastUnknownError();
-    }
-    const value = result as { caip2?: unknown; hash?: unknown };
-    if (
-      value.caip2 !== `eip155:${policy.chainId}` ||
-      typeof value.hash !== "string" ||
-      !/^0x[0-9a-fA-F]{64}$/.test(value.hash)
-    )
-      throw new DelegatedBroadcastUnknownError(
-        "Privy accepted the delegated transaction but returned no trustworthy hash",
+    let transactionHash: string;
+    if (this.options.broadcastMode === "sign-and-broadcast") {
+      transactionHash = await this.signAndBroadcast(
+        policy,
+        await transactionForSigning(this.options.rpc, transaction),
+        context,
+        `aurka-d-sign:${action.intentHash.slice(2, 18)}${action.proposalHash.slice(2, 18)}`,
       );
+    } else {
+      const authorized = await this.options.authorization(
+        "eth_sendTransaction",
+        {
+          params: { transaction },
+          authorization_context: context,
+        },
+      );
+      let result: unknown;
+      try {
+        result = await this.options.client
+          .wallets()
+          .ethereum()
+          .sendTransaction(policy.walletId, {
+            caip2: `eip155:${policy.chainId}`,
+            params: { transaction },
+            authorization_context: authorized,
+            idempotency_key: `aurka-d:${action.intentHash.slice(2, 18)}${action.proposalHash.slice(2, 18)}`,
+          });
+      } catch {
+        throw new DelegatedBroadcastUnknownError();
+      }
+      const value = result as { caip2?: unknown; hash?: unknown };
+      if (
+        value.caip2 !== `eip155:${policy.chainId}` ||
+        typeof value.hash !== "string" ||
+        !/^0x[0-9a-fA-F]{64}$/.test(value.hash)
+      )
+        throw new DelegatedBroadcastUnknownError(
+          "Privy accepted the delegated transaction but returned no trustworthy hash",
+        );
+      transactionHash = value.hash;
+    }
     return {
-      transactionHash: value.hash,
+      transactionHash,
       policyFingerprint: policy.fingerprint,
     };
   }
@@ -648,6 +935,7 @@ export class PrivyDelegatedExecutionAdapter implements DelegatedWalletAdapter {
     readonly ownerAddress: string;
     readonly destination: string;
     readonly assets: readonly DelegatedRecoveryAsset[];
+    readonly authorizationHash: string;
   }): Promise<{ readonly transactionHash?: string }> {
     if (!this.options.recoverRemote)
       throw new Error("Owner recovery is not configured");

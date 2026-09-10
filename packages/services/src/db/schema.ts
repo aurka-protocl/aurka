@@ -385,6 +385,7 @@ export const delegatedSessions = sqliteTable(
     planJson: text("plan_json").notNull(),
     walletJson: text("wallet_json").notNull(),
     authorizedAt: createdAt("authorized_at"),
+    authorityGeneration: integer("authority_generation").notNull().default(0),
     consumedInputAmount: text("consumed_input_amount").notNull(),
     tradeCount: integer("trade_count").notNull(),
     lastProposalHash: text("last_proposal_hash"),
@@ -421,6 +422,50 @@ export const delegatedTrades = sqliteTable(
     uniqueIndex("delegated_trades_idempotency_idx").on(table.idempotencyKey),
     index("delegated_trades_session_idx").on(table.sessionId, table.createdAt),
     index("delegated_trades_status_idx").on(table.status, table.updatedAt),
+  ],
+);
+
+/** A recovery authorization is consumed before invoking the owner/operator
+ * callback. Keeping it separate from the session means a replay remains
+ * rejected after a process restart and a callback timeout cannot be mistaken
+ * for permission to send a second transfer. */
+export const delegatedRecoveries = sqliteTable(
+  "delegated_recoveries",
+  {
+    authorizationHash: text("authorization_hash").primaryKey(),
+    sessionId: text("session_id").notNull(),
+    ownerAddress: text("owner_address").notNull(),
+    destination: text("destination").notNull(),
+    assetsJson: text("assets_json").notNull(),
+    status: text("status").notNull(),
+    transactionHash: text("transaction_hash"),
+    error: text("error"),
+    createdAt: createdAt(),
+    updatedAt: createdAt("updated_at"),
+  },
+  (table) => [
+    index("delegated_recoveries_session_idx").on(
+      table.sessionId,
+      table.createdAt,
+    ),
+    index("delegated_recoveries_status_idx").on(table.status, table.updatedAt),
+  ],
+);
+
+/** One-time owner-signed control authorizations. */
+export const delegatedControlAuthorizations = sqliteTable(
+  "delegated_control_authorizations",
+  {
+    authorizationHash: text("authorization_hash").primaryKey(),
+    sessionId: text("session_id").notNull(),
+    ownerAddress: text("owner_address").notNull(),
+    action: text("action").notNull(),
+    nonce: text("nonce").notNull(),
+    expiresAt: integer("expires_at").notNull(),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    uniqueIndex("delegated_control_nonce_idx").on(table.sessionId, table.nonce),
   ],
 );
 
@@ -543,6 +588,8 @@ export const schema = {
   agentIdentities,
   delegatedSessions,
   delegatedTrades,
+  delegatedRecoveries,
+  delegatedControlAuthorizations,
   indexingCheckpoints,
   indexingHeaders,
   chainEvents,

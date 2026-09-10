@@ -41,8 +41,8 @@ import {
   agentProposalResponseSchema,
   agentStatusSchema,
   delegatedAuthorizationSchema,
+  delegatedControlRequestSchema,
   delegatedRecoveryRequestSchema,
-  delegatedSessionIdRequestSchema,
   delegatedSessionResponseSchema,
   delegatedStartRequestSchema,
   delegatedStatusSchema,
@@ -338,13 +338,19 @@ export function openApi(): Record<string, unknown> {
     [
       "/v1/delegated/sessions/{id}/stop",
       "post",
-      delegatedSessionIdRequestSchema,
+      delegatedControlRequestSchema,
       delegatedSessionResponseSchema,
     ],
     [
       "/v1/delegated/sessions/{id}/reconcile",
       "post",
-      delegatedSessionIdRequestSchema,
+      delegatedControlRequestSchema,
+      delegatedSessionResponseSchema,
+    ],
+    [
+      "/v1/delegated/sessions/{id}/approve",
+      "post",
+      delegatedControlRequestSchema,
       delegatedSessionResponseSchema,
     ],
     [
@@ -711,7 +717,11 @@ async function handle(
         payload,
         async () => ({
           statusCode: 200,
-          data: await delegated.start(sessionId, input.message),
+          data: await delegated.start(
+            sessionId,
+            input.message,
+            input.authorization,
+          ),
         }),
       );
       sendSuccess(
@@ -723,12 +733,13 @@ async function handle(
       );
       return;
     }
-    const delegatedStopMatch = path.match(
-      /^\/v1\/delegated\/sessions\/([^/]+)\/(stop|reconcile)$/,
+    const delegatedControlMatch = path.match(
+      /^\/v1\/delegated\/sessions\/([^/]+)\/(approve|stop|reconcile)$/,
     );
-    if (method === "POST" && delegatedStopMatch) {
-      const sessionId = decodeURIComponent(delegatedStopMatch[1]!);
-      const operation = delegatedStopMatch[2];
+    if (method === "POST" && delegatedControlMatch) {
+      const input = delegatedControlRequestSchema.parse(payload);
+      const sessionId = decodeURIComponent(delegatedControlMatch[1]!);
+      const operation = delegatedControlMatch[2];
       const result = await withIdempotency(
         service,
         request,
@@ -737,9 +748,11 @@ async function handle(
         async () => ({
           statusCode: 200,
           data:
-            operation === "stop"
-              ? await delegated.stop(sessionId)
-              : await delegated.reconcile(sessionId),
+            operation === "approve"
+              ? await delegated.approve(sessionId, input.authorization)
+              : operation === "stop"
+                ? await delegated.stop(sessionId, input.authorization)
+                : await delegated.reconcile(sessionId, input.authorization),
         }),
       );
       sendSuccess(

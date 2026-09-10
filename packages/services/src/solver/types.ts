@@ -39,6 +39,8 @@ export interface SolverSnapshot {
   readonly priceProtection: SettlementPriceProtection;
   readonly snapshotBlock: bigint;
   readonly aquaStrategyHash: string;
+  /** Present only when the final fork composition uses pinned upstream VM. */
+  readonly swapVMGuard?: string;
   readonly balancesHash: string;
   /** Converts value units into committed raw token amounts for the quote. */
   readonly rawAmountsForValue?: (

@@ -52,6 +52,8 @@ import {
   chainEvents,
   executions,
   agentIdentities,
+  delegatedControlAuthorizations,
+  delegatedRecoveries,
   delegatedSessions,
   delegatedTrades,
   idempotencyKeys,
@@ -81,6 +83,27 @@ import { hashBytes } from "../solver/hash.js";
 const json = (value: unknown): string => JSON.stringify(value);
 const parse = <T>(value: string): T => JSON.parse(value) as T;
 const now = (): number => Math.floor(Date.now() / 1000);
+
+export type DelegatedRecoveryRecord = {
+  readonly authorizationHash: string;
+  readonly sessionId: string;
+  readonly ownerAddress: string;
+  readonly destination: string;
+  readonly assetsJson: string;
+  readonly status:
+    "PENDING" | "SUBMITTED" | "CONFIRMED" | "REVERTED" | "UNKNOWN";
+  readonly transactionHash?: string;
+  readonly error?: string;
+};
+
+export type DelegatedControlAuthorizationRecord = {
+  readonly authorizationHash: string;
+  readonly sessionId: string;
+  readonly ownerAddress: string;
+  readonly action: string;
+  readonly nonce: string;
+  readonly expiresAt: number;
+};
 
 interface ActivityCursor {
   readonly timestamp: number;
@@ -1011,6 +1034,7 @@ export class ServiceRepository {
         planJson: json(session.plan),
         walletJson: json(session.wallet),
         authorizedAt: session.authorizedAt,
+        authorityGeneration: session.authorityGeneration,
         consumedInputAmount: session.consumedInputAmount,
         tradeCount: session.tradeCount,
         lastProposalHash: session.lastProposalHash ?? null,
@@ -1029,6 +1053,7 @@ export class ServiceRepository {
           planJson: json(session.plan),
           walletJson: json(session.wallet),
           authorizedAt: session.authorizedAt,
+          authorityGeneration: session.authorityGeneration,
           consumedInputAmount: session.consumedInputAmount,
           tradeCount: session.tradeCount,
           lastProposalHash: session.lastProposalHash ?? null,
@@ -1074,6 +1099,7 @@ export class ServiceRepository {
       wallet: parse(row.walletJson),
       state: row.state,
       authorizedAt: row.authorizedAt,
+      authorityGeneration: row.authorityGeneration,
       consumedInputAmount: row.consumedInputAmount,
       tradeCount: row.tradeCount,
       remainingInputBudget: (
@@ -1095,6 +1121,209 @@ export class ServiceRepository {
       updatedAt: row.updatedAt,
       trades,
     });
+  }
+
+  /** Atomically invalidate all work that captured an older authority epoch. */
+  stopDelegatedSession(id: string, lastResult: string): DelegatedSession {
+    this.db.transaction((tx) => {
+      const row = tx
+        .select({ state: delegatedSessions.state })
+        .from(delegatedSessions)
+        .where(eq(delegatedSessions.id, id))
+        .get();
+      if (!row) throw new Error("Delegated session was not found");
+      if (row.state === "STOPPED") return;
+      tx.update(delegatedSessions)
+        .set({
+          state: "STOPPED",
+          authorityGeneration: sql`${delegatedSessions.authorityGeneration} + 1`,
+          lastResult,
+          updatedAt: now(),
+        })
+        .where(eq(delegatedSessions.id, id))
+        .run();
+    });
+    return this.getDelegatedSession(id)!;
+  }
+
+  updateDelegatedSessionIfGeneration(
+    id: string,
+    authorityGeneration: number,
+    update: Partial<
+      Pick<
+        DelegatedSession,
+        | "state"
+        | "lastProposalHash"
+        | "lastTransactionHash"
+        | "lastRecoveryTransactionHash"
+        | "lastResult"
+      >
+    >,
+  ): boolean {
+    const result = this.db
+      .update(delegatedSessions)
+      .set({
+        ...(update.state === undefined ? {} : { state: update.state }),
+        ...(update.lastProposalHash === undefined
+          ? {}
+          : { lastProposalHash: update.lastProposalHash }),
+        ...(update.lastTransactionHash === undefined
+          ? {}
+          : { lastTransactionHash: update.lastTransactionHash }),
+        ...(update.lastRecoveryTransactionHash === undefined
+          ? {}
+          : {
+              lastRecoveryTransactionHash: update.lastRecoveryTransactionHash,
+            }),
+        ...(update.lastResult === undefined
+          ? {}
+          : { lastResult: update.lastResult }),
+        updatedAt: now(),
+      })
+      .where(
+        and(
+          eq(delegatedSessions.id, id),
+          eq(delegatedSessions.authorityGeneration, authorityGeneration),
+        ),
+      )
+      .run();
+    return result.changes === 1;
+  }
+
+  consumeDelegatedControlAuthorization(input: {
+    readonly authorizationHash: string;
+    readonly sessionId: string;
+    readonly ownerAddress: string;
+    readonly action: string;
+    readonly nonce: string;
+    readonly expiresAt: number;
+  }): boolean {
+    const result = this.db
+      .insert(delegatedControlAuthorizations)
+      .values({ ...input, createdAt: now() })
+      .onConflictDoNothing()
+      .run();
+    return result.changes === 1;
+  }
+
+  getDelegatedRecovery(
+    authorizationHash: string,
+  ): DelegatedRecoveryRecord | undefined {
+    const row = this.db
+      .select()
+      .from(delegatedRecoveries)
+      .where(eq(delegatedRecoveries.authorizationHash, authorizationHash))
+      .get();
+    return row ? this.delegatedRecoveryFromRow(row) : undefined;
+  }
+
+  reserveDelegatedRecovery(input: {
+    readonly authorizationHash: string;
+    readonly sessionId: string;
+    readonly ownerAddress: string;
+    readonly destination: string;
+    readonly assetsJson: string;
+  }): DelegatedRecoveryRecord {
+    return this.db.transaction((tx) => {
+      tx.insert(delegatedRecoveries)
+        .values({
+          ...input,
+          status: "PENDING",
+          createdAt: now(),
+          updatedAt: now(),
+        })
+        .onConflictDoNothing()
+        .run();
+      const row = tx
+        .select()
+        .from(delegatedRecoveries)
+        .where(
+          eq(delegatedRecoveries.authorizationHash, input.authorizationHash),
+        )
+        .get();
+      if (!row) throw new Error("Delegated recovery reservation was not saved");
+      return this.delegatedRecoveryFromRow(row);
+    });
+  }
+
+  /** Claim a newly reserved recovery before invoking an external owner path.
+   * UNKNOWN is intentional: a process crash after this write must require
+   * reconciliation instead of allowing a second transfer. */
+  claimDelegatedRecovery(authorizationHash: string): boolean {
+    const result = this.db
+      .update(delegatedRecoveries)
+      .set({
+        status: "UNKNOWN",
+        error: "Owner recovery execution is in progress",
+        updatedAt: now(),
+      })
+      .where(
+        and(
+          eq(delegatedRecoveries.authorizationHash, authorizationHash),
+          eq(delegatedRecoveries.status, "PENDING"),
+        ),
+      )
+      .run();
+    return result.changes === 1;
+  }
+
+  updateDelegatedRecovery(
+    authorizationHash: string,
+    update: {
+      readonly status: DelegatedRecoveryRecord["status"];
+      readonly transactionHash?: string;
+      readonly error?: string;
+    },
+  ): DelegatedRecoveryRecord {
+    this.db
+      .update(delegatedRecoveries)
+      .set({
+        status: update.status,
+        transactionHash: update.transactionHash ?? null,
+        error: update.error ?? null,
+        updatedAt: now(),
+      })
+      .where(eq(delegatedRecoveries.authorizationHash, authorizationHash))
+      .run();
+    const row = this.db
+      .select()
+      .from(delegatedRecoveries)
+      .where(eq(delegatedRecoveries.authorizationHash, authorizationHash))
+      .get();
+    if (!row) throw new Error("Delegated recovery was not found");
+    return this.delegatedRecoveryFromRow(row);
+  }
+
+  listDelegatedRecoveries(sessionId: string): DelegatedRecoveryRecord[] {
+    return this.db
+      .select()
+      .from(delegatedRecoveries)
+      .where(eq(delegatedRecoveries.sessionId, sessionId))
+      .orderBy(desc(delegatedRecoveries.createdAt))
+      .all()
+      .map((row) => this.delegatedRecoveryFromRow(row));
+  }
+
+  private delegatedRecoveryFromRow(
+    row: typeof delegatedRecoveries.$inferSelect,
+  ): DelegatedRecoveryRecord {
+    const status = row.status as DelegatedRecoveryRecord["status"];
+    if (
+      !["PENDING", "SUBMITTED", "CONFIRMED", "REVERTED", "UNKNOWN"].includes(
+        status,
+      )
+    )
+      throw new Error("Malformed delegated recovery status");
+    return {
+      authorizationHash: row.authorizationHash,
+      sessionId: row.sessionId,
+      ownerAddress: row.ownerAddress,
+      destination: row.destination,
+      assetsJson: row.assetsJson,
+      status,
+      ...(row.transactionHash ? { transactionHash: row.transactionHash } : {}),
+      ...(row.error ? { error: row.error } : {}),
+    };
   }
 
   getDelegatedSession(id: string): DelegatedSession | undefined {

@@ -11,6 +11,7 @@ import { DirectSettlement } from "./libraries/DirectSettlement.sol";
 import { OptionSpaceFee } from "./libraries/OptionSpaceFee.sol";
 import { PortfolioBounds } from "./libraries/PortfolioBounds.sol";
 import { PriceProtection } from "./libraries/PriceProtection.sol";
+import { AurkaSwapVMExecutionGuard } from "./AurkaSwapVMExecutionGuard.sol";
 
 /// @title AURKA direct Aqua settlement router
 /// @notice Atomic, single-route settlement for one signed trader intent.
@@ -87,6 +88,15 @@ contract AurkaSwapVMRouter {
         uint256 consumedValue;
     }
 
+    struct SwapVMExecution {
+        address maker;
+        address trader;
+        address tokenIn;
+        address tokenOut;
+        uint256 amountIn;
+        uint256 amountOut;
+    }
+
     struct Validation {
         bytes32 intentHash;
         bytes32 proposalHash;
@@ -104,6 +114,8 @@ contract AurkaSwapVMRouter {
     RiskModeRegistry public immutable riskRegistry;
     IAqua public immutable aqua;
     ISwapVM public immutable swapVM;
+    address public immutable aquaApp;
+    address public immutable swapVMGuard;
     AurkaSettlementAuthority public immutable settlementAuthority;
 
     mapping(address trader => mapping(uint256 nonce => bool used)) public usedIntentNonces;
@@ -113,6 +125,7 @@ contract AurkaSwapVMRouter {
     mapping(bytes32 positionAndDirection => mapping(address token => uint256 expectedBalance))
         private _epochBalances;
     mapping(bytes32 positionAndDirection => bytes32 authorityHash) private _epochAuthorityHashes;
+    mapping(bytes32 orderHash => SwapVMExecution execution) private _swapVMExecutions;
     uint256 private _lock = 1;
 
     error AquaBalanceMismatch(address token, uint256 expected, uint256 actual);
@@ -148,6 +161,8 @@ contract AurkaSwapVMRouter {
     error StrategyNotAuthorized();
     error CapacityBaselineMismatch(uint256 expected, uint256 actual);
     error SwapVMExecutionMismatch();
+    error SwapVMCalldataMismatch();
+    error SwapVMDirectCall();
 
     event CapacityEpochActivated(
         bytes32 indexed policyId,
@@ -194,6 +209,17 @@ contract AurkaSwapVMRouter {
         bytes32 expectedPostStateHash
     );
 
+    event UpstreamSwapVMExecuted(
+        bytes32 indexed orderHash,
+        bytes32 indexed proposalHash,
+        address indexed maker,
+        address tokenIn,
+        address tokenOut,
+        uint256 amountIn,
+        uint256 amountOut,
+        bytes32 programHash
+    );
+
     modifier nonReentrant() {
         if (_lock != 1) revert Reentrancy();
         _lock = 2;
@@ -216,8 +242,36 @@ contract AurkaSwapVMRouter {
         riskRegistry = riskRegistry_;
         aqua = aqua_;
         swapVM = swapVM_;
+        address app = address(this);
+        (bool isUpstream, bytes memory marker) =
+            address(swapVM_).staticcall(abi.encodeWithSignature("aurkaUpstreamSwapVM()"));
+        if (isUpstream && marker.length >= 32 && abi.decode(marker, (bool))) {
+            app = address(swapVM_);
+        }
+        aquaApp = app;
+        swapVMGuard = address(new AurkaSwapVMExecutionGuard(address(this), address(swapVM_)));
         settlementAuthority =
-            new AurkaSettlementAuthority(policyRegistry_, riskRegistry_, aqua_, address(this));
+            new AurkaSettlementAuthority(policyRegistry_, riskRegistry_, aqua_, address(this), app);
+    }
+
+    /// @notice Called only by the maker hook embedded in an upstream order.
+    /// @dev The context exists only during a signed, non-reentrant AURKA call.
+    function validateSwapVMExecution(
+        bytes32 orderHash,
+        address maker,
+        address taker,
+        address tokenIn,
+        address tokenOut,
+        uint256 amountIn,
+        uint256 amountOut
+    ) external view {
+        if (msg.sender != swapVMGuard) revert SwapVMDirectCall();
+        SwapVMExecution memory execution = _swapVMExecutions[orderHash];
+        if (
+            execution.maker != maker || execution.trader == address(0) || taker != address(this)
+                || execution.tokenIn != tokenIn || execution.tokenOut != tokenOut
+                || execution.amountIn != amountIn || execution.amountOut != amountOut
+        ) revert SwapVMDirectCall();
     }
 
     /// @notice EIP-712 domain used by both signed object types.
@@ -435,7 +489,8 @@ contract AurkaSwapVMRouter {
             assets,
             epoch,
             priceInput,
-            directProgram
+            directProgram,
+            false
         );
         _executeSwapVM(
             validation.policy.treasury,
@@ -445,6 +500,67 @@ contract AurkaSwapVMRouter {
             priceInput.traderOutputAmount
         );
 
+        return _finalizeExecution(intent, proposal, epoch, priceInput, validation, false);
+    }
+
+    /// @notice Executes the same signed AURKA validation through the pinned
+    /// upstream VM and its real Aqua transfer implementation.
+    /// @dev `directProgram` is the signed AURKA accounting proof. The separate
+    /// order/taker bytes are hashed into Proposal.swapVMCalldataHash and are
+    /// checked before the VM call. The legacy `execute` entry remains available
+    /// as an explicit reference path until this path is accepted.
+    function executeWithSwapVM(
+        Intent calldata intent,
+        bytes calldata intentSignature,
+        Proposal calldata proposal,
+        bytes calldata proposalSignature,
+        PortfolioBounds.AssetState[] calldata assets,
+        DirectSettlement.CapacityEpoch calldata epoch,
+        PriceProtection.SettlementInput calldata priceInput,
+        bytes calldata directProgram,
+        uint256 makerTraits,
+        bytes calldata orderData,
+        bytes calldata takerTraitsAndData
+    )
+        external
+        nonReentrant
+        returns (bytes32 intentHash, bytes32 proposalHash, uint256 executedValue)
+    {
+        if (
+            keccak256(abi.encode(directProgram, makerTraits, orderData, takerTraitsAndData))
+                != proposal.swapVMCalldataHash
+        ) revert SwapVMCalldataMismatch();
+        Validation memory validation = _validate(
+            intent,
+            intentSignature,
+            proposal,
+            proposalSignature,
+            assets,
+            epoch,
+            priceInput,
+            directProgram,
+            true
+        );
+        _executeUpstreamSwapVM(
+            validation.policy.treasury,
+            intent,
+            proposal,
+            priceInput,
+            makerTraits,
+            orderData,
+            takerTraitsAndData
+        );
+        return _finalizeExecution(intent, proposal, epoch, priceInput, validation, true);
+    }
+
+    function _finalizeExecution(
+        Intent calldata intent,
+        Proposal calldata proposal,
+        DirectSettlement.CapacityEpoch calldata epoch,
+        PriceProtection.SettlementInput calldata priceInput,
+        Validation memory validation,
+        bool upstreamSettled
+    ) private returns (bytes32 intentHash, bytes32 proposalHash, uint256 executedValue) {
         bytes32 key =
             _directionKey(intent.positionIdHash, intent.traderInputToken, intent.traderOutputToken);
         CapacityState storage state = _capacity[key];
@@ -460,7 +576,7 @@ contract AurkaSwapVMRouter {
         }
         state.consumedValue = proposal.consumedAfter;
 
-        _settleTokens(intent, proposal, validation.policy.treasury);
+        if (!upstreamSettled) _settleTokens(intent, proposal, validation.policy.treasury);
         _assertFinalAquaBalances(
             validation.policy.treasury,
             proposal.aquaStrategyHash,
@@ -528,7 +644,8 @@ contract AurkaSwapVMRouter {
         PortfolioBounds.AssetState[] calldata assets,
         DirectSettlement.CapacityEpoch calldata epoch,
         PriceProtection.SettlementInput calldata priceInput,
-        bytes calldata directProgram
+        bytes calldata directProgram,
+        bool upstreamProgram
     ) private view returns (Validation memory validation) {
         if (intent.trader == address(0) || intent.intentId == bytes32(0)) revert InvalidAddress();
         if (intent.traderInputToken == intent.traderOutputToken) revert InvalidAddress();
@@ -629,7 +746,7 @@ contract AurkaSwapVMRouter {
 
         settlementAuthority.validateDirectProgram(
             directProgram,
-            proposal.swapVMCalldataHash,
+            upstreamProgram ? keccak256(directProgram) : proposal.swapVMCalldataHash,
             intent.policyId,
             intent.positionIdHash,
             intent.trader,
@@ -865,6 +982,188 @@ contract AurkaSwapVMRouter {
         ) revert SwapVMExecutionMismatch();
     }
 
+    function _executeUpstreamSwapVM(
+        address treasury,
+        Intent calldata intent,
+        Proposal calldata proposal,
+        PriceProtection.SettlementInput calldata priceInput,
+        uint256 makerTraits,
+        bytes calldata orderData,
+        bytes calldata takerTraitsAndData
+    ) private {
+        if (aquaApp != address(swapVM)) revert SwapVMExecutionMismatch();
+        _validateUpstreamOrder(
+            intent, proposal, priceInput, makerTraits, orderData, takerTraitsAndData
+        );
+        ISwapVM.Order memory order =
+            ISwapVM.Order({ maker: treasury, traits: makerTraits, data: orderData });
+        bytes32 orderHash = swapVM.hash(order);
+        if (orderHash != proposal.aquaStrategyHash) revert StrategyNotAuthorized();
+        uint256 vmAmountOut = _expectedUpstreamAmountOut(proposal, priceInput);
+        (uint256 quotedIn, uint256 quotedOut, bytes32 quotedOrderHash) =
+            swapVM.quote(order, proposal.traderInputAmount, takerTraitsAndData);
+        if (
+            quotedOrderHash != orderHash || quotedIn != proposal.traderInputAmount
+                || quotedOut != vmAmountOut
+        ) revert SwapVMExecutionMismatch();
+
+        IERC20Minimal inputToken = IERC20Minimal(intent.traderInputToken);
+        IERC20Minimal outputToken = IERC20Minimal(intent.traderOutputToken);
+        uint256 inputBefore = inputToken.balanceOf(address(this));
+        uint256 outputBefore = outputToken.balanceOf(address(this));
+        _transferFrom(inputToken, intent.trader, address(this), proposal.traderInputAmount);
+        _approve(inputToken, address(swapVM), proposal.traderInputAmount);
+        _swapVMExecutions[orderHash] = SwapVMExecution({
+            maker: treasury,
+            trader: intent.trader,
+            tokenIn: intent.traderInputToken,
+            tokenOut: intent.traderOutputToken,
+            amountIn: proposal.traderInputAmount,
+            amountOut: vmAmountOut
+        });
+        (uint256 amountIn, uint256 amountOut, bytes32 returnedOrderHash) =
+            swapVM.swap(order, proposal.traderInputAmount, takerTraitsAndData);
+        delete _swapVMExecutions[orderHash];
+        _approve(inputToken, address(swapVM), 0);
+        if (
+            returnedOrderHash != orderHash || amountIn != proposal.traderInputAmount
+                || amountOut != vmAmountOut || inputToken.balanceOf(address(this)) != inputBefore
+                || outputToken.balanceOf(address(this)) != outputBefore + amountOut
+        ) revert SwapVMExecutionMismatch();
+
+        _transferExact(outputToken, intent.trader, proposal.traderOutputAmount);
+        _transferExact(outputToken, proposal.solver, proposal.solverFeeAmount);
+        _transferExact(
+            outputToken,
+            policyRegistry.feeConfiguration(intent.policyId).protocolFeeRecipient,
+            proposal.protocolFeeAmount
+        );
+        if (vmAmountOut < priceInput.traderOutputAmount) revert SwapVMExecutionMismatch();
+        uint256 treasuryFeeAmount = vmAmountOut - priceInput.traderOutputAmount;
+        if (outputToken.balanceOf(address(this)) != outputBefore + treasuryFeeAmount) {
+            revert TokenBalanceMismatch(
+                intent.traderOutputToken,
+                outputBefore + treasuryFeeAmount,
+                outputToken.balanceOf(address(this))
+            );
+        }
+        if (treasuryFeeAmount > 0) {
+            _approve(outputToken, address(aqua), treasuryFeeAmount);
+            aqua.push(treasury, aquaApp, orderHash, intent.traderOutputToken, treasuryFeeAmount);
+            _approve(outputToken, address(aqua), 0);
+        }
+        if (outputToken.balanceOf(address(this)) != outputBefore) {
+            revert TokenBalanceMismatch(
+                intent.traderOutputToken, outputBefore, outputToken.balanceOf(address(this))
+            );
+        }
+        emit UpstreamSwapVMExecuted(
+            orderHash,
+            hashProposal(proposal),
+            treasury,
+            intent.traderInputToken,
+            intent.traderOutputToken,
+            amountIn,
+            amountOut,
+            keccak256(orderData)
+        );
+    }
+
+    function _expectedUpstreamAmountOut(
+        Proposal calldata proposal,
+        PriceProtection.SettlementInput calldata priceInput
+    ) private pure returns (uint256) {
+        uint256 numerator = proposal.traderInputValue
+            * 10 ** uint256(priceInput.traderOutputDecimals)
+            * 10 ** uint256(priceInput.traderOutputExecutionPrice.priceDecimals);
+        uint256 denominator = priceInput.traderOutputExecutionPrice.price;
+        return numerator == 0 ? 0 : (numerator - 1) / denominator + 1;
+    }
+
+    function _validateUpstreamOrder(
+        Intent calldata intent,
+        Proposal calldata proposal,
+        PriceProtection.SettlementInput calldata priceInput,
+        uint256 makerTraits,
+        bytes calldata orderData,
+        bytes calldata takerTraitsAndData
+    ) private view {
+        // Reviewed template: sorted USDC/WETH pair, a maker pre-transfer-out
+        // guard, StaticBalances (0x90), and the upstream LimitSwap (0x53).
+        if (orderData.length != 129 || takerTraitsAndData.length != 59) {
+            revert SwapVMExecutionMismatch();
+        }
+        address tokenA = _addressAt(orderData, 0);
+        address tokenB = _addressAt(orderData, 20);
+        if (
+            tokenA >= tokenB
+                || !(
+                    (tokenA == intent.traderInputToken && tokenB == intent.traderOutputToken)
+                        || (tokenA == intent.traderOutputToken && tokenB == intent.traderInputToken)
+                ) || _addressAt(orderData, 40) != swapVMGuard
+        ) revert SwapVMExecutionMismatch();
+        uint256 expectedTraits = (1 << 254) | (1 << 250) | (1 << 246) | (uint256(60) << 208)
+            | (uint256(60) << 192) | (uint256(40) << 176) | (uint256(40) << 160);
+        if (makerTraits != expectedTraits) revert SwapVMExecutionMismatch();
+        if (
+            _byteAt(orderData, 60) != 0x90 || _byteAt(orderData, 61) != 0x40
+                || _byteAt(orderData, 126) != 0x53 || _byteAt(orderData, 127) != 0x01
+                || _byteAt(orderData, 128) != (intent.traderInputToken == tokenA ? 0x80 : 0x00)
+        ) revert SwapVMExecutionMismatch();
+
+        uint16 flags = _uint16At(takerTraitsAndData, 20);
+        uint16 expectedFlags =
+            0x0051 | (intent.traderInputToken == tokenA ? uint16(0x0080) : uint16(0));
+        if (flags != expectedFlags) revert SwapVMExecutionMismatch();
+        for (uint256 i; i < 8; ++i) {
+            if (_uint16At(takerTraitsAndData, i * 2) != 37) revert SwapVMExecutionMismatch();
+        }
+        if (
+            _uint16At(takerTraitsAndData, 16) != 32 || _uint16At(takerTraitsAndData, 18) != 32
+                || _uint256At(takerTraitsAndData, 22)
+                    != _expectedUpstreamAmountOut(proposal, priceInput)
+                || _uint40At(takerTraitsAndData, 54) != proposal.deadline
+        ) revert SwapVMExecutionMismatch();
+    }
+
+    function _transferExact(IERC20Minimal token, address to, uint256 amount) private {
+        uint256 beforeBalance = token.balanceOf(to);
+        if (!token.transfer(to, amount)) revert TokenTransferFailed(address(token));
+        if (token.balanceOf(to) != beforeBalance + amount) {
+            revert TokenBalanceMismatch(address(token), beforeBalance + amount, token.balanceOf(to));
+        }
+    }
+
+    function _addressAt(bytes calldata data, uint256 offset) private pure returns (address value) {
+        assembly ("memory-safe") {
+            value := shr(96, calldataload(add(data.offset, offset)))
+        }
+    }
+
+    function _byteAt(bytes calldata data, uint256 offset) private pure returns (uint8 value) {
+        assembly ("memory-safe") {
+            value := byte(0, calldataload(add(data.offset, offset)))
+        }
+    }
+
+    function _uint16At(bytes calldata data, uint256 offset) private pure returns (uint16 value) {
+        assembly ("memory-safe") {
+            value := shr(240, calldataload(add(data.offset, offset)))
+        }
+    }
+
+    function _uint40At(bytes calldata data, uint256 offset) private pure returns (uint40 value) {
+        assembly ("memory-safe") {
+            value := shr(216, calldataload(add(data.offset, offset)))
+        }
+    }
+
+    function _uint256At(bytes calldata data, uint256 offset) private pure returns (uint256 value) {
+        assembly ("memory-safe") {
+            value := calldataload(add(data.offset, offset))
+        }
+    }
+
     function _settleTokens(Intent calldata intent, Proposal calldata proposal, address treasury)
         private
     {
@@ -880,7 +1179,7 @@ contract AurkaSwapVMRouter {
         _approve(inputToken, address(aqua), proposal.traderInputAmount);
         aqua.push(
             treasury,
-            address(this),
+            aquaApp,
             proposal.aquaStrategyHash,
             intent.traderInputToken,
             proposal.traderInputAmount
@@ -943,7 +1242,7 @@ contract AurkaSwapVMRouter {
         uint256 outputAmount
     ) private view {
         for (uint256 i; i < tokens.length; ++i) {
-            (uint248 actual,) = aqua.rawBalances(treasury, address(this), strategyHash, tokens[i]);
+            (uint248 actual,) = aqua.rawBalances(treasury, aquaApp, strategyHash, tokens[i]);
             uint256 expected = balancesBefore[i];
             if (tokens[i] == inputToken) expected += inputAmount;
             if (tokens[i] == outputToken) {

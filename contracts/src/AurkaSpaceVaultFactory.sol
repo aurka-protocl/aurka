@@ -15,6 +15,10 @@ interface ISpaceCapacityInitializer {
     ) external returns (bytes32 capacityEpochId, uint256 capacityBaseline);
 }
 
+interface ISettlementApp {
+    function aquaApp() external view returns (address);
+}
+
 /// @notice Single owner entry point for the owner-managed Space lifecycle.
 /// @dev Funding and Aqua registration are performed through the isolated vault
 ///      so Aqua records the vault as maker rather than the factory.
@@ -176,7 +180,7 @@ contract AurkaSpaceVaultFactory {
         amounts[0] = params.usdcAmount;
         amounts[1] = params.wethAmount;
         bytes32 shippedStrategyHash = AurkaSpaceVault(vault).initializeAquaStrategy(
-            aqua, router, params.strategy, tokens, amounts
+            aqua, ISettlementApp(router).aquaApp(), params.strategy, tokens, amounts
         );
         if (shippedStrategyHash != params.strategyHash) revert InvalidInitialization();
 

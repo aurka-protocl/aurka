@@ -32,6 +32,9 @@ import {
   createApiServer,
   listenApiServer,
   ChainEventIndexer,
+  OpenRouterAgent,
+  openRouterAgentOptionsFromEnv,
+  createDelegatedSessionServiceFromEnv,
 } from "../dist/index.js";
 import {
   calculateDirectSettlement,
@@ -86,9 +89,9 @@ const FORK_BLOCK = Number(
 );
 const USDC = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
 const WETH = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
-// Official 1inch Aqua deployment on Ethereum mainnet. The local AURKA
-// router remains the app; the upstream SwapVM router is intentionally not
-// substituted for it because AURKA's direct program is a separate adapter.
+// Official 1inch Aqua deployment on Ethereum mainnet. Real mode uses the
+// pinned upstream VM as the Aqua app; fixture mode keeps the direct adapter
+// as an explicit regression/reference deployment.
 const REAL_AQUA = "0x499943e74fb0ce105688beee8ef2abec5d936d31";
 const CHAINLINK_ETH_USD = "0x5f4ec3df9cbd43714fe2740f5e3616155c5b8419";
 const CHAINLINK_USDC_USD = "0x8fFfFfd4AfB6115b954Bd326cbe7B4BA576818f6";
@@ -104,6 +107,54 @@ const REAL_AQUA_ABI = parseAbi([
   "function pull(address,bytes32,address,uint256,address)",
   "function push(address,address,bytes32,address,uint256)",
 ]);
+
+const UPSTREAM_SWAPVM_COMMIT = "afd99c408b4ed610027f4426c6f98650acac9f5f";
+const UPSTREAM_AQUA_COMMIT = "9c5c42e5840e8741fba3597c48456c9510212b66";
+
+function word(value) {
+  return BigInt(value).toString(16).padStart(64, "0");
+}
+
+function addressWord(value) {
+  return value.slice(2).toLowerCase().padStart(64, "0");
+}
+
+function tupleValue(value, index, name) {
+  return value && typeof value === "object" && name in value
+    ? value[name]
+    : value?.[index];
+}
+
+function upstreamStrategy(maker, guard, prices, scale) {
+  const inputPrice = prices.weth;
+  const outputPrice = prices.usdc;
+  const inputUnit =
+    (10n ** 18n * 10n ** BigInt(inputPrice.priceDecimals) - 1n) /
+      inputPrice.price +
+    1n;
+  const outputUnit =
+    (10n ** 6n * 10n ** BigInt(outputPrice.priceDecimals) - 1n) /
+      outputPrice.price +
+    1n;
+  const program = `0x9040${word(outputUnit * scale + 1n)}${word(inputUnit * scale)}530100`;
+  const traits =
+    (1n << 254n) |
+    (1n << 250n) |
+    (1n << 246n) |
+    (60n << 208n) |
+    (60n << 192n) |
+    (40n << 176n) |
+    (40n << 160n);
+  const orderData = `0x${addressWord(USDC).slice(24)}${addressWord(WETH).slice(24)}${addressWord(guard).slice(24)}${program.slice(2)}`;
+  const strategy = `0x${word(32)}${addressWord(maker)}${word(traits)}${word(96)}${word(orderData.length / 2 - 1)}${orderData.slice(2).padEnd(Math.ceil((orderData.length - 2) / 64) * 64, "0")}`;
+  return {
+    strategy,
+    strategyHash: keccak256(strategy),
+    traits,
+    orderData,
+    program,
+  };
+}
 // Public Anvil test derivation only. Never consume DEPLOYER_PRIVATE_KEY.
 const MNEMONIC = "test test test test test test test test test test test junk";
 const stringify = (value) =>
@@ -638,13 +689,44 @@ async function main() {
             0,
           ])
         : await deploy(wallet, client, "MockPriceOracle");
-    const swapVM = await deploy(wallet, client, "AurkaDirectSwapVM");
+    const alice = accounts[0].address;
+    const swapVM = await deploy(
+      wallet,
+      client,
+      INTEGRATION_MODE === "real"
+        ? "AurkaUpstreamAquaSwapVMRouter"
+        : "AurkaDirectSwapVM",
+      INTEGRATION_MODE === "real" ? [aqua.address, WETH, alice] : [],
+    );
     const router = await deploy(wallet, client, "AurkaSwapVMRouter", [
       policyRegistry.address,
       riskRegistry.address,
       aqua.address,
       swapVM.address,
     ]);
+    const aquaApp = await read(client, router, "aquaApp", []);
+    const swapVMGuard =
+      INTEGRATION_MODE === "real"
+        ? await read(client, router, "swapVMGuard", [])
+        : undefined;
+    let upstreamPrimary;
+    let upstreamSecondary;
+    if (INTEGRATION_MODE === "real") {
+      const usdcPriceRaw = await read(client, oracle, "getPrice", [USDC]);
+      const wethPriceRaw = await read(client, oracle, "getPrice", [WETH]);
+      const prices = {
+        usdc: {
+          price: BigInt(tupleValue(usdcPriceRaw, 0, "price")),
+          priceDecimals: Number(tupleValue(usdcPriceRaw, 1, "priceDecimals")),
+        },
+        weth: {
+          price: BigInt(tupleValue(wethPriceRaw, 0, "price")),
+          priceDecimals: Number(tupleValue(wethPriceRaw, 1, "priceDecimals")),
+        },
+      };
+      upstreamPrimary = upstreamStrategy(alice, swapVMGuard, prices, 1n);
+      upstreamSecondary = upstreamStrategy(alice, swapVMGuard, prices, 2n);
+    }
     const vaultFactory = await deploy(
       wallet,
       client,
@@ -659,7 +741,6 @@ async function main() {
         ? "AURKA real fork contracts deployed; registering strategies in upstream Aqua."
         : "AURKA fixture fork contracts deployed; seeding fixture balances.",
     );
-    const alice = accounts[0].address;
     await write(wallet, client, policyRegistry, "createPolicy", [
       POLICY_ID,
       alice,
@@ -693,7 +774,7 @@ async function main() {
     await write(wallet, client, policyRegistry, "setSettlementConfiguration", [
       POLICY_ID,
       POSITION_ID_HASH,
-      STRATEGY_HASH,
+      upstreamPrimary?.strategyHash ?? STRATEGY_HASH,
       oracle.address,
     ]);
     await write(wallet, client, policyRegistry, "setPriceProtection", [
@@ -734,7 +815,7 @@ async function main() {
     await write(wallet, client, policyRegistry, "setSettlementConfiguration", [
       SECOND_SPACE.policyId,
       SECOND_SPACE.positionIdHash,
-      SECOND_SPACE.strategyHash,
+      upstreamSecondary?.strategyHash ?? SECOND_SPACE.strategyHash,
       oracle.address,
     ]);
     await write(wallet, client, policyRegistry, "setPriceProtection", [
@@ -808,18 +889,32 @@ async function main() {
     // These are runner-only seed presets for the two pre-created demo Spaces.
     // User-created Spaces take their funding from the signed draft and the
     // lifecycle planner; these values are not runtime requirements.
-    const strategies = [
-      [
-        stringToHex("strategy:local-settlement-e2e"),
-        STRATEGY_HASH,
-        [70000n * 1000000n, 10n * 10n ** 18n],
-      ],
-      [
-        stringToHex("strategy:local-settlement-e2e-secondary"),
-        SECOND_SPACE.strategyHash,
-        [35000n * 1000000n, 5n * 10n ** 18n],
-      ],
-    ];
+    const strategies =
+      INTEGRATION_MODE === "real"
+        ? [
+            [
+              upstreamPrimary.strategy,
+              upstreamPrimary.strategyHash,
+              [70000n * 1000000n, 10n * 10n ** 18n],
+            ],
+            [
+              upstreamSecondary.strategy,
+              upstreamSecondary.strategyHash,
+              [35000n * 1000000n, 5n * 10n ** 18n],
+            ],
+          ]
+        : [
+            [
+              stringToHex("strategy:local-settlement-e2e"),
+              STRATEGY_HASH,
+              [70000n * 1000000n, 10n * 10n ** 18n],
+            ],
+            [
+              stringToHex("strategy:local-settlement-e2e-secondary"),
+              SECOND_SPACE.strategyHash,
+              [35000n * 1000000n, 5n * 10n ** 18n],
+            ],
+          ];
     if (INTEGRATION_MODE === "real") {
       for (const [strategy, expectedHash, amounts] of strategies) {
         for (const [token, amount] of [
@@ -835,7 +930,7 @@ async function main() {
           );
         }
         const hash = await write(wallet, client, aqua, "ship", [
-          router.address,
+          aquaApp,
           strategy,
           [USDC, WETH],
           amounts,
@@ -861,6 +956,27 @@ async function main() {
           ]);
     }
     // Alice explicitly enables allowance and epoch from her browser wallet.
+    const swapVMRuntime = await client.getCode({ address: swapVM.address });
+    const upstreamWrapper =
+      INTEGRATION_MODE === "real"
+        ? {
+            address: swapVM.address,
+            runtimeBytes: (swapVMRuntime.length - 2) / 2,
+            runtimeCodeHash: keccak256(swapVMRuntime),
+            sourceHash: keccak256(
+              stringToHex(
+                readFileSync(
+                  path.join(
+                    ROOT,
+                    "contracts/upstream/AurkaUpstreamAquaSwapVMRouter.sol",
+                  ),
+                  "utf8",
+                ),
+              ),
+            ),
+            constructor: { aqua: aqua.address, weth: WETH, owner: alice },
+          }
+        : undefined;
     manifest = {
       mode: "fork",
       integrationMode: INTEGRATION_MODE,
@@ -874,7 +990,7 @@ async function main() {
       protocolRecipient: accounts[2].address,
       policyId: POLICY_ID,
       positionIdHash: POSITION_ID_HASH,
-      strategyHash: STRATEGY_HASH,
+      strategyHash: upstreamPrimary?.strategyHash ?? STRATEGY_HASH,
       usdc: USDC,
       weth: WETH,
       policyRegistry: policyRegistry.address,
@@ -882,6 +998,13 @@ async function main() {
       aqua: aqua.address,
       oracle: oracle.address,
       swapVM: swapVM.address,
+      upstreamWrapper,
+      aquaApp,
+      swapVMGuard,
+      swapVMUpstreamCommit:
+        INTEGRATION_MODE === "real" ? UPSTREAM_SWAPVM_COMMIT : undefined,
+      aquaUpstreamCommit:
+        INTEGRATION_MODE === "real" ? UPSTREAM_AQUA_COMMIT : undefined,
       router: router.address,
       vaultFactory: vaultFactory.address,
       vaultFactoryVersion: 2,
@@ -910,7 +1033,9 @@ async function main() {
           }
         : { status: "not-configured" },
       executionEngine:
-        "AURKA_DIRECT_PAIR_V1 (AurkaDirectSwapVM adapter; upstream SwapVM not used)",
+        INTEGRATION_MODE === "real"
+          ? "AURKA_UPSTREAM_LIMIT_SWAP_V1"
+          : "AURKA_DIRECT_PAIR_V1 (AurkaDirectSwapVM reference adapter)",
       integrationEvidence,
       mocks:
         INTEGRATION_MODE === "real"
@@ -923,8 +1048,20 @@ async function main() {
       funding:
         "Fork-only USDC holder impersonation and WETH deposit; dedicated public Anvil accounts 0/1",
       spaces: [
-        { ...DEFAULT_SPACE, name: "Team inventory" },
-        { ...SECOND_SPACE, name: "Research inventory" },
+        {
+          ...DEFAULT_SPACE,
+          name: "Team inventory",
+          strategyHash:
+            upstreamPrimary?.strategyHash ?? DEFAULT_SPACE.strategyHash,
+          strategy: upstreamPrimary?.strategy ?? DEFAULT_SPACE.strategy,
+        },
+        {
+          ...SECOND_SPACE,
+          name: "Research inventory",
+          strategyHash:
+            upstreamSecondary?.strategyHash ?? SECOND_SPACE.strategyHash,
+          strategy: upstreamSecondary?.strategy ?? SECOND_SPACE.strategy,
+        },
       ],
     };
     writeFileSync(manifestFile, stringify(manifest));
@@ -1023,6 +1160,9 @@ async function main() {
     }
     async currentSnapshot() {
       const snapshot = await super.currentSnapshot();
+      if (manifest.executionEngine === "AURKA_UPSTREAM_LIMIT_SWAP_V1") {
+        snapshot.swapVMGuard = manifest.swapVMGuard;
+      }
       const active = await client.readContract({
         ...contracts.router,
         functionName: "capacityState",
@@ -1268,7 +1408,9 @@ async function main() {
   }
   for (const space of spaceDefinitions)
     if (providers.has(space.positionId)) await refresh(space.positionId);
-  api = createApiServer({ service });
+  const agent = new OpenRouterAgent(service, openRouterAgentOptionsFromEnv());
+  const delegated = await createDelegatedSessionServiceFromEnv(service, agent);
+  api = createApiServer({ service, agent, delegated });
   await listenApiServer(api, 0, "127.0.0.1");
   const apiPort = api.server.address().port;
   const tx = (contract, functionName, args) => ({
@@ -1580,7 +1722,7 @@ async function main() {
     } catch (error) {
       console.error(
         "Fork request failed:",
-        error.shortMessage ?? error.message,
+        error.stack ?? error.shortMessage ?? error.message,
       );
       if (response.headersSent) {
         response.destroy();
@@ -1637,13 +1779,13 @@ async function main() {
     });
   }
   console.log(
-    `Fork ready: AURKA app http://127.0.0.1:${APP_PORT}/spaces · API http://127.0.0.1:${API_PORT} · manifest ${path.join(DIR, "manifest.json")}. ${INTEGRATION_MODE === "real" ? "Real Aqua + Chainlink prices; AURKA direct execution adapter; test funds." : "Fixture-only Aqua and prices; test funds."}`,
+    `Fork ready: AURKA app http://127.0.0.1:${APP_PORT}/spaces · API http://127.0.0.1:${API_PORT} · manifest ${path.join(DIR, "manifest.json")}. ${INTEGRATION_MODE === "real" ? "Real Aqua + Chainlink prices + pinned upstream SwapVM; test funds." : "Fixture-only Aqua and prices; test funds."}`,
   );
 }
 process.once("SIGINT", () => void stop());
 process.once("SIGTERM", () => void stop());
 main().catch(async (error) => {
-  console.error(error.shortMessage ?? error.message);
+  console.error(error.stack ?? error.shortMessage ?? error.message);
   await stop();
   process.exitCode = 1;
 });

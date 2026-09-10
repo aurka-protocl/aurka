@@ -24,6 +24,16 @@ export const delegatedSessionStateSchema = z.enum([
 ]);
 export type DelegatedSessionState = z.infer<typeof delegatedSessionStateSchema>;
 
+export const delegatedControlActionSchema = z.enum([
+  "APPROVE",
+  "START",
+  "STOP",
+  "RECONCILE",
+]);
+export type DelegatedControlAction = z.infer<
+  typeof delegatedControlActionSchema
+>;
+
 export const delegatedTradeStateSchema = z.enum([
   "RESERVED",
   "SIGNING",
@@ -133,6 +143,7 @@ export const delegatedSessionSchema = z
     wallet: delegatedWalletIdentitySchema,
     state: delegatedSessionStateSchema,
     authorizedAt: unixTimestampSchema,
+    authorityGeneration: z.number().int().nonnegative().safe(),
     consumedInputAmount: uint256StringSchema,
     tradeCount: z.number().int().nonnegative().max(10),
     remainingInputBudget: uint256StringSchema,
@@ -155,13 +166,26 @@ export const delegatedStatusSchema = z
 export type DelegatedStatus = z.infer<typeof delegatedStatusSchema>;
 
 export const delegatedStartRequestSchema = z
-  .object({ message: z.string().trim().min(1).max(1_000) })
+  .object({
+    message: z.string().trim().min(1).max(1_000),
+    authorization: z.lazy(() => delegatedControlAuthorizationSchema),
+    idempotencyKey: z.string().min(24).max(128).optional(),
+  })
   .strict();
 export type DelegatedStartRequest = z.infer<typeof delegatedStartRequestSchema>;
 
-export const delegatedSessionIdRequestSchema = z
-  .object({ idempotencyKey: z.string().min(24).max(128).optional() })
+export const delegatedControlRequestSchema = z
+  .object({
+    authorization: z.lazy(() => delegatedControlAuthorizationSchema),
+    idempotencyKey: z.string().min(24).max(128).optional(),
+  })
   .strict();
+export type DelegatedControlRequest = z.infer<
+  typeof delegatedControlRequestSchema
+>;
+
+/** @deprecated Use delegatedControlRequestSchema. */
+export const delegatedSessionIdRequestSchema = delegatedControlRequestSchema;
 
 export const delegatedSessionResponseSchema = delegatedSessionSchema;
 
@@ -175,7 +199,10 @@ export type DelegatedRecoveryAsset = z.infer<
 export const delegatedRecoveryRequestSchema = z
   .object({
     destination: addressSchema,
-    assets: z.array(delegatedRecoveryAssetSchema).min(1).max(2),
+    // Recovery is one durable transfer per signed authorization. A second
+    // token gets its own nonce/hash and receipt, so retries cannot partially
+    // replay a two-transfer request.
+    assets: z.array(delegatedRecoveryAssetSchema).length(1),
     recoveryNonce: bytes32Schema,
     signature: z.string().regex(/^0x[0-9a-fA-F]{130}$/),
     idempotencyKey: z.string().min(24).max(128).optional(),
@@ -183,6 +210,23 @@ export const delegatedRecoveryRequestSchema = z
   .strict();
 export type DelegatedRecoveryRequest = z.infer<
   typeof delegatedRecoveryRequestSchema
+>;
+
+export const delegatedControlAuthorizationSchema = z
+  .object({
+    sessionId: bytes32Schema,
+    ownerAddress: addressSchema,
+    agentWallet: addressSchema,
+    chainId: chainIdSchema,
+    action: delegatedControlActionSchema,
+    requestHash: bytes32Schema,
+    nonce: bytes32Schema,
+    expiresAt: unixTimestampSchema,
+    signature: signatureSchema,
+  })
+  .strict();
+export type DelegatedControlAuthorization = z.infer<
+  typeof delegatedControlAuthorizationSchema
 >;
 
 export type DelegationTypedData = {
@@ -225,6 +269,10 @@ function canonical(value: unknown): string {
 
 function hashText(value: string): string {
   return `0x${Array.from(keccak_256(Uint8Array.from(value, (character) => character.charCodeAt(0))), (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+}
+
+export function delegatedControlRequestHash(message: string): string {
+  return hashText(`AURKA_DELEGATED_CONTROL_REQUEST_V1:${message}`);
 }
 
 export function delegatedPlanCommitment(plan: DelegatedSessionPlan): string {
@@ -275,6 +323,55 @@ export function delegatedSessionId(
   return hashText(
     `AURKA_DELEGATED_SESSION_V1:${delegatedPlanCommitment(plan)}:${agentWallet.toLowerCase()}`,
   );
+}
+
+export function delegatedControlTypedData(
+  plan: DelegatedSessionPlan,
+  sessionId: string,
+  agentWallet: string,
+  action: DelegatedControlAction,
+  requestHash: string,
+  nonce: string,
+  expiresAt: number,
+) {
+  const value = delegatedSessionPlanSchema.parse(plan);
+  bytes32Schema.parse(sessionId);
+  addressSchema.parse(agentWallet);
+  bytes32Schema.parse(requestHash);
+  bytes32Schema.parse(nonce);
+  const parsedAction = delegatedControlActionSchema.parse(action);
+  unixTimestampSchema.parse(expiresAt);
+  return {
+    domain: {
+      name: "AURKA Delegated Agent" as const,
+      version: "1" as const,
+      chainId: value.chainId,
+      verifyingContract: agentWallet,
+    },
+    types: {
+      ControlAuthorization: [
+        { name: "sessionId", type: "bytes32" },
+        { name: "owner", type: "address" },
+        { name: "agentWallet", type: "address" },
+        { name: "chainId", type: "uint256" },
+        { name: "action", type: "string" },
+        { name: "requestHash", type: "bytes32" },
+        { name: "nonce", type: "bytes32" },
+        { name: "expiresAt", type: "uint256" },
+      ],
+    },
+    primaryType: "ControlAuthorization" as const,
+    message: {
+      sessionId,
+      owner: value.ownerAddress,
+      agentWallet,
+      chainId: value.chainId,
+      action: parsedAction,
+      requestHash,
+      nonce,
+      expiresAt,
+    },
+  } as const;
 }
 
 export function delegatedRecoveryTypedData(

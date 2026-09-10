@@ -23,6 +23,8 @@ import {
   createWalletClient,
   defineChain,
   http,
+  keccak256,
+  stringToHex,
 } from "viem";
 import { mnemonicToAccount } from "viem/accounts";
 
@@ -191,6 +193,11 @@ async function read(publicClient, contract, functionName, args) {
 }
 
 function receiptLogs(logs, routerAddress) {
+  const upstreamExecutionTopic = keccak256(
+    stringToHex(
+      "UpstreamSwapVMExecuted(bytes32,bytes32,address,address,address,uint256,uint256,bytes32)",
+    ),
+  ).toLowerCase();
   const names = new Map(
     ["CapacityEpochActivated", "FeesRouted", "TradeExecuted"].map((name) => [
       protocolEventTopic(name).toLowerCase(),
@@ -200,8 +207,10 @@ function receiptLogs(logs, routerAddress) {
   return logs
     .filter((log) => log.address.toLowerCase() === routerAddress.toLowerCase())
     .map((log) => {
-      const name = names.get(log.topics[0]?.toLowerCase());
-      check(name, "Receipt contains an unknown router event");
+      const topic = log.topics[0]?.toLowerCase();
+      if (topic === upstreamExecutionTopic) return undefined;
+      const name = names.get(topic);
+      check(name, "Receipt contains an unknown indexed router event");
       return {
         chainId: CHAIN_ID,
         contract: routerAddress,
@@ -216,7 +225,8 @@ function receiptLogs(logs, routerAddress) {
         observedAt: 0,
         removed: false,
       };
-    });
+    })
+    .filter((log) => log !== undefined);
 }
 
 async function blockObservedLogs(publicClient, logs) {

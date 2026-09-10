@@ -1,0 +1,12 @@
+[submodule "contracts/vendor/swap-vm"]
+	path = contracts/vendor/swap-vm
+	url = https://github.com/1inch/swap-vm.git
+[submodule "contracts/vendor/aqua"]
+	path = contracts/vendor/aqua
+	url = https://github.com/1inch/aqua.git
+[submodule "contracts/vendor/solidity-utils"]
+	path = contracts/vendor/solidity-utils
+	url = https://github.com/1inch/solidity-utils.git
+[submodule "contracts/vendor/openzeppelin-contracts"]
+	path = contracts/vendor/openzeppelin-contracts
+	url = https://github.com/OpenZeppelin/openzeppelin-contracts.git

@@ -1,0 +1,124 @@
+{
+  "task": "TASK99-009",
+  "date": "2026-09-10",
+  "status": "blocked",
+  "complete": false,
+  "configurationCheck": {
+    "commands": [
+      "node --env-file=.env packages/wallet/scripts/privy-delegated-wallet.mjs check",
+      "pnpm privy:delegated"
+    ],
+    "exitCode": 0,
+    "configured": false,
+    "missing": [
+      "PRIVY_APP_ID",
+      "PRIVY_DELEGATED_POLICY_ID",
+      "PRIVY_DELEGATED_RECOVERY_POLICY_ID",
+      "PRIVY_DELEGATED_ROUTER",
+      "PRIVY_DELEGATED_INPUT_TOKEN",
+      "PRIVY_DELEGATED_OUTPUT_TOKEN",
+      "PRIVY_DELEGATED_MAX_INPUT_AMOUNT",
+      "PRIVY_DELEGATED_MAX_RECOVERY_AMOUNT",
+      "PRIVY_DELEGATED_POLICY_VALID_UNTIL",
+      "PRIVY_DELEGATED_OWNER_ADDRESS",
+      "PRIVY_DELEGATED_SIGNER_ADDRESS",
+      "PRIVY_DELEGATED_WALLET_ID"
+    ],
+    "contactedPrivy": false,
+    "secretValuesPrinted": false
+  },
+  "authorizationKeyCheck": {
+    "configuredVariables": [
+      "PRIVY_DELEGATED_AUTHORIZATION_PRIVATE_KEY",
+      "PRIVY_DELEGATED_OWNER_AUTHORIZATION_PRIVATE_KEY"
+    ],
+    "localFormatProbe": "both values were unreadable as PEM or raw base64 PKCS#8 P-256",
+    "quorumMembership": "not run",
+    "threshold": "not run",
+    "keyMaterialRecorded": false
+  },
+  "sdkAndPolicyVerification": {
+    "installedSdk": "@privy-io/node@0.34.0",
+    "sdkServices": ["wallets()", "policies()", "keyQuorums()"],
+    "readback": "not run because configuration check stopped first",
+    "exactAttachmentEnforcement": "implemented and covered by mock regression tests",
+    "unexpectedAllowMethodEnforcement": "implemented and covered by mock regression tests",
+    "alternateMethodDenial": "implemented in deny-test; live denial not run"
+  },
+  "policyTemplate": {
+    "command": "pnpm privy:delegated template",
+    "executionRuleCount": 3,
+    "executionMethods": ["eth_signTypedData_v4", "eth_signTransaction"],
+    "executionTargets": [
+      "configured router",
+      "configured input token for approve"
+    ],
+    "ownerRecoveryRuleCount": 2,
+    "ownerRecoveryTargets": [
+      "configured input token",
+      "configured output token"
+    ],
+    "ownerRecoveryDestination": "configured owner address",
+    "attachmentPlan": {
+      "walletBasePolicy": "owner recovery only",
+      "additionalSignerOverride": "delegated execution only"
+    }
+  },
+  "liveAcceptance": {
+    "walletPolicyReadback": "NOT_RUN",
+    "customSpaceFunding": "NOT_RUN_BY_TASK99_009",
+    "privyWalletFunding": "NOT_RUN",
+    "consent": "NOT_RUN",
+    "approval": "NOT_RUN",
+    "openRouterDiscoveryQuoteSimulation": "NOT_RUN_BY_TASK99_009",
+    "privySigning": "NOT_RUN",
+    "settlement": "NOT_RUN",
+    "policyDenial": "NOT_RUN",
+    "stopRevocation": "NOT_RUN",
+    "ownerRecovery": "NOT_RUN",
+    "restartReconciliation": "NOT_RUN",
+    "normalBrowserExtension": "NOT_RUN"
+  },
+  "privyArtifacts": {
+    "walletId": null,
+    "executionPolicyId": null,
+    "ownerRecoveryPolicyId": null,
+    "tradeHashes": [],
+    "recoveryHashes": [],
+    "receiptHashes": []
+  },
+  "relatedPriorEvidence": {
+    "source": ".aurkadev/reviews/TASK99-007-report.md",
+    "classification": "separate prior real-fork evidence; not Privy evidence",
+    "model": "openrouter/free",
+    "toolTrace": [
+      "discover_spaces",
+      "read_space_conditions",
+      "request_deterministic_quote",
+      "simulate_proposal"
+    ],
+    "result": "READY"
+  },
+  "verificationCommands": {
+    "nodeSyntax": "passed",
+    "walletTests": "passed: 4 files / 12 tests",
+    "walletTypecheck": "passed",
+    "servicesDelegatedTest": "passed: 10 files / 106 tests",
+    "workspaceTypecheck": "passed",
+    "build": "passed",
+    "lint": "passed",
+    "formatAndDiffCheck": "passed"
+  },
+  "remainingActions": [
+    "Supply PRIVY_APP_ID and valid server-only credentials.",
+    "Supply valid raw base64 PKCS#8 P-256 keys and the intended owner/signer quorum IDs.",
+    "Supply the dedicated wallet, both policy IDs, and chain/router/token/cap/expiry/owner/signer inputs.",
+    "Provide a Privy-reachable isolated fork/custom-network route and fresh manifest.",
+    "Run the live funded signing, receipt, denial, Stop/revoke, recovery, restart, and browser-extension journey."
+  ],
+  "limitations": [
+    "No Privy API request, wallet creation, funding, signing, broadcast, revocation, or recovery was performed.",
+    "No public-chain or paid infrastructure action was performed.",
+    "Mock tests and prior injected-wallet/local-fork evidence are not normal browser-extension or Privy proof."
+  ]
+}

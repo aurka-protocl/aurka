@@ -148,6 +148,8 @@ async function main() {
     writeFileSync(processPidFile, `${service.child.pid}\n${app.child.pid}\n`);
   let browser;
   const result = { status: "passed", routes: [], checks: [] };
+  const artifactDirectory = process.env.AURKA_ARTIFACT_DIR;
+  if (artifactDirectory) mkdirSync(artifactDirectory, { recursive: true });
   try {
     const appUrl = `http://127.0.0.1:${appPort}`;
     await waitForHttp(
@@ -310,6 +312,34 @@ async function main() {
       .waitFor();
     result.checks.push("Space parameter propagated to a successful quote");
 
+    const agentPrompt = page.getByRole("textbox", {
+      name: "Ask the live trade assistant",
+    });
+    await agentPrompt.fill("I want fdits rules?");
+    await page.getByRole("button", { name: "Ask agent", exact: true }).click();
+    await page
+      .getByRole("status")
+      .filter({ hasText: "Let's narrow that down" })
+      .waitFor();
+    if (artifactDirectory)
+      await page.screenshot({
+        path: path.join(artifactDirectory, "agent-clarification-desktop.png"),
+        fullPage: true,
+      });
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    await agentPrompt.fill("Explain this Space's current rules");
+    await page.getByRole("button", { name: "Ask agent", exact: true }).click();
+    await page.getByRole("region", { name: "Space rules answer" }).waitFor();
+    if (artifactDirectory)
+      await page.screenshot({
+        path: path.join(artifactDirectory, "agent-rules-mobile.png"),
+        fullPage: true,
+      });
+    result.checks.push(
+      "ambiguous assistant prompt clarifies and selected-Space rules render on desktop/mobile",
+    );
+
     await page.goto(
       `${appUrl}/activity?spaceId=${spaceId}&type=RULE_CHANGE&status=CONFIRMED`,
       { waitUntil: "networkidle" },
@@ -373,9 +403,7 @@ async function main() {
     if (processPidFile) rmSync(processPidFile, { force: true });
   }
   if (result.status === "passed") console.log(JSON.stringify(result, null, 2));
-  const artifactDirectory = process.env.AURKA_ARTIFACT_DIR;
   if (artifactDirectory) {
-    mkdirSync(artifactDirectory, { recursive: true });
     writeFileSync(
       path.join(artifactDirectory, "browser-smoke.json"),
       `${JSON.stringify(result, null, 2)}\n`,
