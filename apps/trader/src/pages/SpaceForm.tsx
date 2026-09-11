@@ -13,6 +13,7 @@ import {
 import { apiBaseUrl, appMode, supportedChainId } from "../config";
 import { activateForkSpace, SetupRecoveryError } from "../domain/space-setup";
 import { spaceUrl } from "../domain/spaces";
+import { setupProgressLabel, userFacingError } from "../ui";
 import { useWallet } from "../wallet";
 
 const client = new AurkaClient({ baseUrl: apiBaseUrl });
@@ -116,7 +117,10 @@ function fieldClass(): string {
 }
 
 function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : "Space change failed";
+  return userFacingError(
+    error,
+    "Space change failed. Review the details and try again.",
+  );
 }
 
 export default function SpaceForm({
@@ -308,9 +312,9 @@ export default function SpaceForm({
       setSaved(result.space);
       setMessage(
         result.space.identity.state === "DRAFT"
-          ? "Draft saved. No deployment or activation has been claimed."
+          ? "Draft saved. Trading is not active yet."
           : appMode === "fork"
-            ? "Name and draft saved. Apply rules onchain to change trading policy."
+            ? "Draft saved. Confirm the next owner approval to apply the rules."
             : "Space changes confirmed.",
       );
       if (!existing)
@@ -355,7 +359,7 @@ export default function SpaceForm({
           wallet.address,
           wallet.provider,
           (progress) => {
-            setMessage(progress);
+            setMessage(setupProgressLabel(progress));
             if (/awaiting wallet approval/i.test(progress))
               setSetupState("awaiting-signature");
             else if (/submitted|waiting for confirmation/i.test(progress))
@@ -366,7 +370,7 @@ export default function SpaceForm({
         );
         setSaved(space);
         setSetupState("confirmed");
-        setMessage("Space activation verified onchain.");
+        setMessage("Space setup confirmed on the test network.");
         navigate(spaceUrl(space.identity.id, "settings"), { replace: true });
         return;
       }
@@ -396,12 +400,18 @@ export default function SpaceForm({
         setSetupState(
           requestError.state === "pending" ? "submitted" : requestError.state,
         );
-        setSetupDetails(requestError.message);
+        setSetupDetails(
+          requestError.state === "pending"
+            ? "The wallet request was sent and is awaiting network confirmation."
+            : requestError.state === "fork-mismatch"
+              ? "The wallet and service are using different test-network instances."
+              : "The network did not confirm this setup request. Review the Space details before retrying.",
+        );
         setError(
           requestError.state === "pending"
             ? "Setup is submitted and still awaiting confirmation."
             : requestError.state === "fork-mismatch"
-              ? "The wallet and setup service are using different fork instances."
+              ? "The wallet and service are using different test-network instances."
               : "Setup needs verification before another transaction can be approved.",
         );
       } else setError(errorMessage(requestError));
@@ -429,8 +439,8 @@ export default function SpaceForm({
         </p>
         <h1 className="mt-2 text-3xl font-semibold text-white">{title}</h1>
         <p className="mt-2 text-slate-400">
-          Owner-authorized changes are signed for this Space, chain, and exact
-          reviewed draft.
+          Set the assets, allocation ranges, starting funding, and maximum trade
+          before the owner approves the Space.
         </p>
       </div>
 
@@ -498,25 +508,30 @@ export default function SpaceForm({
                 maxLength={100}
               />
             </label>
-            <dl className="grid gap-3 text-sm sm:grid-cols-2">
-              <div>
-                <dt className="text-slate-500">Stable Space ID</dt>
-                <dd className="mt-1 break-all text-slate-200">{draft.id}</dd>
-              </div>
-              <div>
-                <dt className="text-slate-500">Owner/controller</dt>
-                <dd className="mt-1 break-all text-slate-200">
-                  {draft.ownerAddress}
-                </dd>
-              </div>
-            </dl>
+            <details className="text-sm text-slate-400">
+              <summary className="cursor-pointer">
+                Space identity details
+              </summary>
+              <dl className="mt-3 grid gap-3 sm:grid-cols-2">
+                <div>
+                  <dt className="text-slate-500">Space ID</dt>
+                  <dd className="mt-1 break-all text-slate-200">{draft.id}</dd>
+                </div>
+                <div>
+                  <dt className="text-slate-500">Owner wallet</dt>
+                  <dd className="mt-1 break-all text-slate-200">
+                    {draft.ownerAddress}
+                  </dd>
+                </div>
+              </dl>
+            </details>
           </div>
         )}
         {step === 2 && (
           <div className="space-y-4">
             <p className="text-sm text-slate-400">
-              Choose from assets supported by this environment. The current
-              local trading pair requires USDC and WETH.
+              Choose the assets this Space can hold and trade. USDC and WETH are
+              required for the current trading pair.
             </p>
             {assets.map((asset) => {
               const selected = draft.assets.some(
@@ -544,9 +559,8 @@ export default function SpaceForm({
         {step === 3 && (
           <div className="space-y-4">
             <p className="text-sm text-slate-400">
-              Ranges are integer basis points: 100 bps equals 1%. The server
-              checks duplicate assets and feasibility before accepting the
-              signed draft.
+              Set the minimum and maximum allocation for each asset. 100 basis
+              points equals 1%; the Space is checked before approval.
             </p>
             {assets
               .filter((asset) =>
@@ -606,10 +620,8 @@ export default function SpaceForm({
                 Starting funding
               </p>
               <p className="mt-1 text-xs leading-5 text-slate-500">
-                Both supported assets must be funded with positive amounts.
-                Decimal input is converted to exact token units; excess
-                precision, unavailable balances and bounds that cannot hold this
-                allocation are rejected before signing.
+                Add a positive starting balance for each supported asset. Your
+                wallet balance and token precision are checked before approval.
               </p>
             </div>
             <div className="grid gap-3 sm:grid-cols-2">
@@ -654,7 +666,7 @@ export default function SpaceForm({
                 : "connect the owner wallet to read ETH"}
             </p>
             <label className="block text-sm text-slate-300">
-              Maximum transaction value (value units)
+              Maximum trade value (normalized settlement units)
               <input
                 className={fieldClass()}
                 inputMode="numeric"
@@ -665,11 +677,9 @@ export default function SpaceForm({
               />
               <span className="mt-2 block text-xs text-slate-500">
                 {appMode === "fork"
-                  ? "This fork accepts 1–1000000000"
-                  : "This local demo accepts 1000–1000000000"}{" "}
-                value units. Required gas is paid by the owner wallet; after
-                approvals the service shows the current exact estimate before
-                the final setup approval.
+                  ? "This test network accepts 1–1,000,000,000"
+                  : "This local demo accepts 1,000–1,000,000,000"}{" "}
+                normalized settlement units. Gas is paid by the owner wallet.
               </span>
             </label>
           </div>
@@ -683,16 +693,16 @@ export default function SpaceForm({
             >
               <Check className="h-4 w-4" aria-hidden="true" />
               {setupState === "idle" || setupState === "awaiting-signature"
-                ? "Ready for owner signature"
+                ? "Ready for owner approval"
                 : setupState === "submitted"
-                  ? "Setup submitted — awaiting confirmation"
+                  ? "Waiting for network confirmation"
                   : setupState === "confirmation-unavailable"
-                    ? "Confirmation unavailable"
+                    ? "Confirmation needs attention"
                     : setupState === "fork-mismatch"
-                      ? "Fork context changed"
+                      ? "Network context changed"
                       : setupState === "action-required"
-                        ? "Setup action required"
-                        : "Setup confirmed"}
+                        ? "Review required"
+                        : "Space ready"}
             </div>
             <dl className="grid gap-3 text-sm sm:grid-cols-2">
               <div>
@@ -712,7 +722,7 @@ export default function SpaceForm({
               <div>
                 <dt className="text-slate-500">Per-trade limit</dt>
                 <dd className="mt-1 text-white">
-                  {draft.maximumTransactionValue} value units
+                  {draft.maximumTransactionValue} normalized settlement units
                 </dd>
               </div>
               <div>
@@ -724,18 +734,18 @@ export default function SpaceForm({
             </dl>
             {setupDetails && (
               <details className="text-sm text-slate-400">
-                <summary>Setup evidence</summary>
+                <summary>Transaction details</summary>
                 <p className="mt-2 break-words">{setupDetails}</p>
               </details>
             )}
             <p className="text-sm leading-6 text-slate-400">
               {appMode === "fork"
                 ? setupState === "submitted"
-                  ? "Your wallet transaction is recorded locally and will not be sent again while confirmation is pending. Check again to continue verification."
+                  ? "Your wallet request is waiting for confirmation. Check again before trying another request."
                   : setupState === "confirmation-unavailable"
-                    ? "The wallet or configured fork could not confirm the submitted hash. Check again first; retry is offered only after the server proves that the step had no effect."
-                    : "Save your draft before activation. This local fork creation uses up to two exact token approvals for the amounts above to the reviewed factory spender, followed by exactly one wallet transaction that creates, funds, configures, and authorizes the Space through the configured Aqua integration. Trading starts only after server verification."
-                : "Saving creates a durable draft. Activation or a rule change requires another exact signature; a rejected wallet request leaves the previous state unchanged."}
+                    ? "The network could not confirm the request. Check again first; retry is offered only after it is safe."
+                    : "Review the amounts above and approve the wallet requests. Your Space becomes tradable only after the network confirms setup."
+                : "Saving creates a durable draft. Activation or a rule change requires another owner approval; a rejected wallet request leaves the previous state unchanged."}
             </p>
           </div>
         )}
@@ -817,13 +827,13 @@ export default function SpaceForm({
                     ? saved?.identity.state === "ACTIVE" ||
                       saved?.identity.state === "REACTIVATION_REQUIRED" ||
                       saved?.identity.state === "PAUSED"
-                      ? "Apply rules onchain"
+                      ? "Apply rules"
                       : "Create Space"
                     : existing?.identity.state === "ACTIVE" ||
                         existing?.identity.state === "REACTIVATION_REQUIRED" ||
                         existing?.identity.state === "PAUSED"
                       ? "Save changes"
-                      : "Deploy / activate"}
+                      : "Create / activate"}
                 </button>
               )}
             </>
@@ -870,8 +880,8 @@ export function SpaceOwnerControls({
         onChanged?.(next);
         setMessage(
           operation === "PAUSE"
-            ? "Trading paused onchain."
-            : "Trading resumed and required authorization was verified.",
+            ? "Trading paused on the test network."
+            : "Trading resumed after network confirmation.",
         );
         return;
       }
@@ -906,8 +916,7 @@ export function SpaceOwnerControls({
       <div>
         <h3 className="font-medium text-white">Trading controls</h3>
         <p className="mt-1 text-sm leading-6 text-slate-400">
-          Pause and resume are policy changes. Each action needs a fresh
-          signature from the recorded owner and increments the policy nonce.
+          Pause or resume trading with a fresh approval from the recorded owner.
         </p>
       </div>
       {error && (
@@ -942,7 +951,7 @@ export function SpaceOwnerControls({
       </button>
       {!isOwner && (
         <p className="text-xs text-amber-300">
-          Connect the recorded owner to use this control.
+          Connect the recorded owner wallet to use this control.
         </p>
       )}
     </div>

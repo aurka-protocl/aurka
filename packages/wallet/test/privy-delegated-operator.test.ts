@@ -97,6 +97,26 @@ const TRANSFER_ABI = [
     outputs: [{ name: "", type: "bool" }],
   },
 ];
+const ROUTER_ABI = [
+  {
+    type: "function",
+    name: "executeWithSwapVM",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "intent", type: "tuple" },
+      { name: "intentSignature", type: "bytes" },
+      { name: "proposal", type: "tuple" },
+      { name: "proposalSignature", type: "bytes" },
+      { name: "assets", type: "tuple[]" },
+      { name: "epoch", type: "tuple" },
+      { name: "priceInput", type: "tuple" },
+      { name: "directProgram", type: "bytes" },
+      { name: "makerTraits", type: "uint256" },
+      { name: "orderData", type: "bytes" },
+      { name: "takerTraitsAndData", type: "bytes" },
+    ],
+  },
+];
 
 function transactionConditions(to: string) {
   return [
@@ -145,6 +165,17 @@ function exactApprovalRule() {
       condition("function_name", APPROVE_ABI, "eq", "approve"),
       condition("approve.spender", APPROVE_ABI, "eq", ROUTER),
       condition("approve.amount", APPROVE_ABI, "lte", "100"),
+    ],
+  };
+}
+
+function exactRouterRule() {
+  return {
+    action: "ALLOW",
+    method: "eth_signTransaction",
+    conditions: [
+      ...transactionConditions(ROUTER),
+      condition("function_name", ROUTER_ABI, "eq", "executeWithSwapVM"),
     ],
   };
 }
@@ -222,7 +253,7 @@ describe("bundled delegated operator composition", () => {
         {
           action: "ALLOW",
           method: "eth_signTransaction",
-          conditions: transactionConditions(ROUTER),
+          conditions: exactRouterRule().conditions,
         },
         exactApprovalRule(),
       ],

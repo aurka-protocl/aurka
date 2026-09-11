@@ -10,9 +10,11 @@ import Spaces from "./pages/Spaces";
 import { SpaceHoldings, SpaceOverview, SpaceSettings } from "./pages/Space";
 import Trade from "./pages/Trade";
 import History from "./pages/History";
+import Status from "./pages/Status";
 import SpaceForm from "./pages/SpaceForm";
 import { WalletProvider } from "./wallet";
 import { spaceAdapter, spaceUrl } from "./domain/spaces";
+import { userFacingError } from "./ui";
 import { useEffect, useState } from "react";
 
 function LegacySpaceRedirect({
@@ -37,9 +39,7 @@ function LegacySpaceRedirect({
       .catch((requestError: unknown) => {
         if (active)
           setError(
-            requestError instanceof Error
-              ? requestError.message
-              : "The Space could not be loaded",
+            userFacingError(requestError, "The Space could not be loaded"),
           );
       });
     return () => {
@@ -84,6 +84,7 @@ function AppRoutes() {
           <Route path="/trade" element={<Trade />} />
           <Route path="/trade/:spaceId" element={<Trade />} />
           <Route path="/activity" element={<History />} />
+          <Route path="/about" element={<Status />} />
 
           {/* Legacy URLs remain valid but immediately hand off to canonical concepts. */}
           <Route path="/swap" element={<Navigate to="/trade" replace />} />

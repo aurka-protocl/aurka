@@ -5,6 +5,12 @@ must never be pointed at a personal wallet or a production RPC signer. The demo
 proves owner-selected USDC/WETH funding, deterministic portfolio rules, an
 OpenRouter tool-calling proposal, and explicit browser-wallet approval.
 
+For the reviewable persistent-host configuration, access boundaries, backup and
+rollback procedure, see [Hosted demo runbook](hosted-demo.md). Submission copy,
+event requirements, evidence links, and limitations are in the
+[ETHOnline submission packet](ethonline-submission.md). A local run is not a
+hosted deployment claim.
+
 ## Start one persistent environment
 
 Prerequisites are Node 23.3, pnpm, Foundry, and an Ethereum archive RPC able to
@@ -207,6 +213,40 @@ implementation report, and neither report makes a production-funds claim.
    conservation.
 
 ## Recovery and evidence
+
+If a fixed-price Space reports `PRICING_NEEDS_RENEWAL`, there is no renewal
+button and no agent execution path. The owner/operator must pause the old
+policy, read the raw Aqua balances, dock the old vault maker strategy, verify
+that the virtual balances are closed, withdraw those exact raw token amounts to
+the recorded owner, and create a new Space. The fork gateway exposes only
+unsigned, manifest-driven owner transactions for this operator step:
+
+```sh
+AURKA_API="${AURKA_API:-http://127.0.0.1:8797}"
+curl "$AURKA_API/fork/owner?action=state&spaceId=space:price-recovery-old"
+curl "$AURKA_API/fork/owner?action=pause&spaceId=space:price-recovery-old"
+curl "$AURKA_API/fork/owner?action=dock&spaceId=space:price-recovery-old"
+# Use the exact raw balances from the state response; these calls return
+# unsigned vault.withdraw transactions for the Space owner to approve.
+curl "$AURKA_API/fork/owner?action=withdraw&spaceId=space:price-recovery-old&token=USDC&amount=<raw-USDC>"
+curl "$AURKA_API/fork/owner?action=withdraw&spaceId=space:price-recovery-old&token=WETH&amount=<raw-WETH>"
+```
+
+For the complete disposable proof—including a current-price replacement Space,
+restart/retry checks, and one fresh trade—run this from the repository root:
+
+```sh
+AURKA_RECOVERY_EVIDENCE_FILE="$PWD/docs/evidence/task1009-003-space-price-recovery.json" \
+  pnpm integration:fork-price-recovery
+```
+
+The runner uses a fresh temporary Anvil directory and free ports, with
+`AURKA_FORK_INTEGRATION=fixture-upstream`: `MockPriceOracle` and `MockAqua` make
+the changed price deterministic while the pinned upstream SwapVM wrapper and
+normalized strategy hash remain in the path. It does not reset `.fork-space` or
+claim a live Chainlink update. Successful output ends with
+`TASK1009-003 price recovery passed`; a stale quote/execute request returns
+`PRICING_RENEWAL_REQUIRED`, and the replacement trade confirms normally.
 
 If a wallet rejects or leaves a transaction pending, reload the same app and use
 the setup “Check again” action. Saved hashes are scoped to owner, chain, Space,

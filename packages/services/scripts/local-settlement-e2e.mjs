@@ -11,7 +11,13 @@ import {
 /* global URL, clearTimeout, console, process, setTimeout */
 
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { once } from "node:events";
@@ -62,13 +68,19 @@ const artifactNames = [
 ];
 
 function artifact(name) {
+  const outputDirectory =
+    name === "AurkaUpstreamAquaSwapVMRouter" ? "out-upstream" : "out";
   const file = path.join(
     ROOT,
     "contracts",
-    "out",
+    outputDirectory,
     `${name}.sol`,
     `${name}.json`,
   );
+  if (!existsSync(file))
+    throw new Error(
+      `${name} artifact is missing; run pnpm contracts:build-upstream before the real SwapVM flow`,
+    );
   const value = JSON.parse(readFileSync(file, "utf8"));
   return {
     abi: value.abi,

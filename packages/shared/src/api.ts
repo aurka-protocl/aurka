@@ -305,6 +305,7 @@ const agentBlockedCodeSchema = z.enum([
   "INVALID_TRADE_REQUEST",
   "SIMULATION_REJECTED",
   "SPACE_UNAVAILABLE",
+  "PRICING_RENEWAL_REQUIRED",
 ]);
 
 const agentRuleAssetSchema = z

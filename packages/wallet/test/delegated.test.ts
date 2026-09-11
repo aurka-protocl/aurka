@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { keccak256 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 
 import {
@@ -183,5 +184,89 @@ describe("delegated Privy execution boundary", () => {
         {} as never,
       ),
     ).resolves.toEqual({ transactionHash: `0x${"88".repeat(32)}` });
+  });
+
+  it("does not confirm a receipt unless its transaction, block, and settlement boundary are canonical", async () => {
+    const account = privateKeyToAccount(`0x${"03".repeat(32)}`);
+    const signed = await account.signTransaction({
+      to: INPUT as `0x${string}`,
+      data: "0x",
+      value: 0n,
+      nonce: 0,
+      gas: 21_000n,
+      gasPrice: 1n,
+      chainId: 31_337,
+    });
+    const transactionHash = keccak256(signed);
+    const blockHash = `0x${"99".repeat(32)}`;
+    const value = adapter((method) => {
+      if (method === "eth_getTransactionReceipt")
+        return {
+          transactionHash,
+          blockNumber: "0x2",
+          blockHash,
+          status: "0x1",
+          logs: [],
+        };
+      if (method === "eth_chainId") return "0x7a69";
+      if (method === "eth_getTransactionByHash")
+        return {
+          hash: transactionHash,
+          blockHash,
+          blockNumber: "0x2",
+          from: account.address,
+          to: INPUT,
+          input: "0x",
+          value: "0x0",
+          chainId: "0x7a69",
+        };
+      if (method === "eth_getBlockByHash")
+        return { hash: blockHash, number: "0x2" };
+      throw new Error(`unexpected RPC method ${method}`);
+    });
+    await expect(
+      value.getReceipt(transactionHash, {
+        chainId: 31_337,
+        from: account.address,
+        to: INPUT,
+        data: "0x",
+        value: "0",
+      }),
+    ).resolves.toMatchObject({ transactionHash, blockHash });
+
+    const replacement = adapter((method) => {
+      if (method === "eth_getTransactionReceipt")
+        return {
+          transactionHash,
+          blockNumber: "0x2",
+          blockHash,
+          status: "0x1",
+          logs: [],
+        };
+      if (method === "eth_chainId") return "0x7a69";
+      if (method === "eth_getTransactionByHash")
+        return {
+          hash: transactionHash,
+          blockHash: `0x${"aa".repeat(32)}`,
+          blockNumber: "0x2",
+          from: account.address,
+          to: INPUT,
+          input: "0x",
+          value: "0x0",
+          chainId: "0x7a69",
+        };
+      if (method === "eth_getBlockByHash")
+        return { hash: blockHash, number: "0x2" };
+      throw new Error(`unexpected RPC method ${method}`);
+    });
+    await expect(
+      replacement.getReceipt(transactionHash, {
+        chainId: 31_337,
+        from: account.address,
+        to: INPUT,
+        data: "0x",
+        value: "0",
+      }),
+    ).rejects.toThrow("Canonical transaction");
   });
 });

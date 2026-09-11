@@ -1,0 +1,122 @@
+{
+  "task": "TASK1009-002",
+  "date": "2026-09-10",
+  "status": "BLOCKED_LIVE_ACCEPTANCE",
+  "complete": false,
+  "configurationCheck": {
+    "commands": [
+      "node --env-file-if-exists=.env packages/wallet/scripts/privy-delegated-wallet.mjs check",
+      "pnpm privy:delegated check"
+    ],
+    "exitCode": 0,
+    "configured": false,
+    "missingResourceNames": [
+      "PRIVY_DELEGATED_POLICY_ID",
+      "PRIVY_DELEGATED_RECOVERY_POLICY_ID",
+      "PRIVY_DELEGATED_ROUTER",
+      "PRIVY_DELEGATED_INPUT_TOKEN",
+      "PRIVY_DELEGATED_OUTPUT_TOKEN",
+      "PRIVY_DELEGATED_MAX_INPUT_AMOUNT",
+      "PRIVY_DELEGATED_MAX_RECOVERY_AMOUNT",
+      "PRIVY_DELEGATED_POLICY_VALID_UNTIL",
+      "PRIVY_DELEGATED_OWNER_ADDRESS",
+      "PRIVY_DELEGATED_SIGNER_ADDRESS",
+      "PRIVY_DELEGATED_WALLET_ID"
+    ],
+    "presentVariableNamesOnly": [
+      "PRIVY_APP_ID",
+      "PRIVY_APP_SECRET",
+      "PRIVY_DELEGATED_OWNER_ID",
+      "PRIVY_DELEGATED_SIGNER_ID",
+      "PRIVY_DELEGATED_AUTHORIZATION_PRIVATE_KEY",
+      "PRIVY_DELEGATED_OWNER_AUTHORIZATION_PRIVATE_KEY",
+      "OPENROUTER_API_KEY",
+      "OPENROUTER_MODEL"
+    ],
+    "contactedPrivy": false,
+    "secretValuesPrinted": false,
+    "resourceMutationAttempted": false
+  },
+  "keyQuorumReadback": {
+    "attempted": true,
+    "contactedPrivy": true,
+    "result": "PASS",
+    "owner": {
+      "threshold": 1,
+      "registeredKeyCount": 1,
+      "configuredKeyCount": 1,
+      "thresholdSatisfied": true
+    },
+    "signer": {
+      "threshold": 1,
+      "registeredKeyCount": 1,
+      "configuredKeyCount": 1,
+      "thresholdSatisfied": true
+    },
+    "keyValuesPrinted": false,
+    "quorumCorrespondenceVerified": true
+  },
+  "walletDiscovery": {
+    "attempted": true,
+    "contactedPrivy": true,
+    "walletCount": 0,
+    "result": "PASS_NO_DEDICATED_WALLET_FOUND"
+  },
+  "versions": {
+    "privyNode": "@privy-io/node@0.34.0",
+    "browserExtension": "NOT_RUN",
+    "browser": "NOT_RUN"
+  },
+  "final001Manifest": {
+    "integrationMode": "real",
+    "chainId": 31337,
+    "upstreamChainId": 1,
+    "forkBlock": 25500000,
+    "executionEngine": "AURKA_UPSTREAM_LIMIT_SWAP_V1",
+    "router": "0xd9f214dc9abb3cdaec89ab01c68d722caa98e279",
+    "aqua": "0x499943e74fb0ce105688beee8ef2abec5d936d31",
+    "swapVM": "0x9e6b222a71644484b6e9eb67bd8400128e0c3fb8",
+    "routerSelector": "0xa9aedf0c",
+    "upstreamCommit": "afd99c408b4ed610027f4426c6f98650acac9f5f",
+    "aquaCommit": "9c5c42e5840e8741fba3597c48456c9510212b66",
+    "wrapperRuntimeCodeHash": "0xa78ded2b187ffbeb99e20a1cb491f606502f0e475ef2f66680d9f5dd66e1524e"
+  },
+  "acceptance": {
+    "walletPolicyReadback": "PARTIAL_PASS_QUORUMS_PASS_WALLET_COUNT_ZERO",
+    "browserConsentAndAllowance": "NOT_RUN",
+    "openRouterDiscoveryQuoteSimulation": "NOT_RUN",
+    "privySigningAndTrade": "NOT_RUN",
+    "policyDenial": "NOT_RUN",
+    "stopAndRemoteRevoke": "NOT_RUN",
+    "ownerRecovery": "NOT_RUN",
+    "recoveryReplay": "NOT_RUN",
+    "pendingSubmission": "PASS_LOCAL_ONLY",
+    "regressionChecks": "PASS"
+  },
+  "localChecks": {
+    "walletTests": "PASS: 4 files / 14 tests",
+    "servicesTests": "PASS: 11 files / 117 tests",
+    "workspaceTypecheck": "PASS",
+    "workspaceBuild": "PASS",
+    "lint": "PASS",
+    "formatCheck": "PASS",
+    "scriptSyntax": "PASS"
+  },
+  "modelToolTrace": [],
+  "modelToolTraceStatus": "NOT_RUN_NO_AUTHORIZED_LIVE_TARGET",
+  "transactionHashes": [],
+  "recoveryHashes": [],
+  "remainingActions": [
+    "Provision or identify the exact dedicated wallet and both reviewed policy IDs.",
+    "Verify the existing owner/signer quorum correspondence and thresholds.",
+    "Authorize fork-only funding, native gas, and signer revocation for the lifecycle test.",
+    "Authorize an explicit OpenRouter model/spend boundary if a live model call is required.",
+    "Run normal browser-extension consent, one bounded trade, denial, Stop/revoke, restart, and owner recovery.",
+    "Record sanitized policy fingerprints, model/tool trace, receipt hashes, balances, and remaining gas."
+  ],
+  "limitations": [
+    "No Privy API request, wallet or policy mutation, signing, broadcast, revocation, or recovery was performed.",
+    "No OpenRouter request was made and no model response was fabricated.",
+    "No keys, secrets, authorization material, or credentialed URLs are included."
+  ]
+}

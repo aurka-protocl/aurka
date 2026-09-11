@@ -70,6 +70,23 @@ contract AurkaSpaceVault {
         _call(token, abi.encodeWithSignature("transfer(address,uint256)", recipient, amount));
     }
 
+    /// @notice Closes this vault's Aqua strategy before an owner-led recovery.
+    /// @dev Aqua records the vault as maker because this call originates here;
+    ///      the owner can then withdraw the exact underlying token balances.
+    function dockAquaStrategy(
+        address aqua,
+        address app,
+        bytes32 strategyHash,
+        address[] calldata tokens
+    ) external {
+        if (msg.sender != owner) revert NotOwner();
+        if (
+            initializationFinalized == false || aqua == address(0) || app == address(0)
+                || strategyHash == bytes32(0) || tokens.length == 0
+        ) revert InvalidStrategy();
+        IAqua(aqua).dock(app, strategyHash, tokens);
+    }
+
     function _call(address token, bytes memory data) private {
         (bool success, bytes memory result) = token.call(data);
         if (

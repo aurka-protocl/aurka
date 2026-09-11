@@ -37,6 +37,9 @@ jobs:
       - name: Check formatting
         run: forge fmt --check
 
+      - name: Build pinned upstream artifacts
+        run: node contracts/script/build-upstream.mjs
+
       - name: Build
         run: forge build --sizes
 

@@ -28,6 +28,7 @@ import {
   ServiceError,
   ServiceDatabase,
   FixtureProposalSigner,
+  buildUpstreamSwapVMStrategy,
   JsonRpcHttpTransport,
   createApiServer,
   listenApiServer,
@@ -73,6 +74,10 @@ const RPC = `http://127.0.0.1:${RPC_PORT}`;
 const FORK_BIND_HOST = process.env.AURKA_FORK_BIND_HOST ?? "127.0.0.1";
 const API_PORT = Number(process.env.AURKA_FORK_API_PORT ?? 8797);
 const APP_PORT = Number(process.env.AURKA_FORK_APP_PORT ?? 3011);
+const PUBLIC_RPC_URL = process.env.AURKA_FORK_PUBLIC_RPC_URL;
+const PUBLIC_API_URL = process.env.AURKA_FORK_PUBLIC_API_URL;
+const PUBLIC_APP_URL = process.env.AURKA_FORK_PUBLIC_APP_URL;
+const SKIP_APP = process.env.AURKA_FORK_SKIP_APP === "true";
 const FORK_REQUEST_TIMEOUT_MS = Math.max(
   30_000,
   Number(process.env.OPENROUTER_TIMEOUT_MS ?? 15_000) + 5_000,
@@ -81,8 +86,16 @@ const FORK_REQUEST_TIMEOUT_MS = Math.max(
 const GRAPH_ENDPOINT = process.env.AURKA_GRAPH_ENDPOINT;
 const GRAPH_ENDPOINT_FILE = process.env.AURKA_GRAPH_ENDPOINT_FILE;
 const INTEGRATION_MODE = process.env.AURKA_FORK_INTEGRATION ?? "real";
-if (INTEGRATION_MODE !== "real" && INTEGRATION_MODE !== "fixture")
-  throw new Error('AURKA_FORK_INTEGRATION must be "real" or "fixture".');
+const UPSTREAM_MODE =
+  INTEGRATION_MODE === "real" || INTEGRATION_MODE === "fixture-upstream";
+if (
+  INTEGRATION_MODE !== "real" &&
+  INTEGRATION_MODE !== "fixture" &&
+  INTEGRATION_MODE !== "fixture-upstream"
+)
+  throw new Error(
+    'AURKA_FORK_INTEGRATION must be "real", "fixture", or "fixture-upstream".',
+  );
 const FORK_BLOCK = Number(
   process.env.AURKA_FORK_BLOCK ??
     (INTEGRATION_MODE === "real" ? 25500000 : 22400000),
@@ -619,7 +632,7 @@ async function main() {
       stateFile,
       "--state-interval",
       "5",
-      ...(INTEGRATION_MODE === "fixture" ? ["--block-time", "1"] : []),
+      ...(INTEGRATION_MODE !== "real" ? ["--block-time", "1"] : []),
     ],
     { cwd: ROOT, stdio: "ignore" },
   );
@@ -648,7 +661,7 @@ async function main() {
   // time would falsely make a historical oracle round appear fresh.
   const currentTime = Math.floor(Date.now() / 1000);
   if (
-    INTEGRATION_MODE === "fixture" &&
+    INTEGRATION_MODE !== "real" &&
     Number((await client.getBlock()).timestamp) < currentTime
   ) {
     await client.request({
@@ -693,10 +706,8 @@ async function main() {
     const swapVM = await deploy(
       wallet,
       client,
-      INTEGRATION_MODE === "real"
-        ? "AurkaUpstreamAquaSwapVMRouter"
-        : "AurkaDirectSwapVM",
-      INTEGRATION_MODE === "real" ? [aqua.address, WETH, alice] : [],
+      UPSTREAM_MODE ? "AurkaUpstreamAquaSwapVMRouter" : "AurkaDirectSwapVM",
+      UPSTREAM_MODE ? [aqua.address, WETH, alice] : [],
     );
     const router = await deploy(wallet, client, "AurkaSwapVMRouter", [
       policyRegistry.address,
@@ -705,13 +716,26 @@ async function main() {
       swapVM.address,
     ]);
     const aquaApp = await read(client, router, "aquaApp", []);
-    const swapVMGuard =
-      INTEGRATION_MODE === "real"
-        ? await read(client, router, "swapVMGuard", [])
-        : undefined;
+    const swapVMGuard = UPSTREAM_MODE
+      ? await read(client, router, "swapVMGuard", [])
+      : undefined;
+    if (INTEGRATION_MODE !== "real") {
+      const block = await client.getBlock();
+      for (const [token, price, byte] of [
+        [USDC, 1n, "11"],
+        [WETH, 3200n, "22"],
+      ])
+        await write(wallet, client, oracle, "setPrice", [
+          token,
+          price,
+          0,
+          block.timestamp,
+          `0x${byte.repeat(32)}`,
+        ]);
+    }
     let upstreamPrimary;
     let upstreamSecondary;
-    if (INTEGRATION_MODE === "real") {
+    if (UPSTREAM_MODE) {
       const usdcPriceRaw = await read(client, oracle, "getPrice", [USDC]);
       const wethPriceRaw = await read(client, oracle, "getPrice", [WETH]);
       const prices = {
@@ -739,7 +763,9 @@ async function main() {
     console.log(
       INTEGRATION_MODE === "real"
         ? "AURKA real fork contracts deployed; registering strategies in upstream Aqua."
-        : "AURKA fixture fork contracts deployed; seeding fixture balances.",
+        : INTEGRATION_MODE === "fixture-upstream"
+          ? "AURKA controlled upstream fixture deployed; seeding MockAqua balances."
+          : "AURKA fixture fork contracts deployed; seeding fixture balances.",
     );
     await write(wallet, client, policyRegistry, "createPolicy", [
       POLICY_ID,
@@ -823,20 +849,6 @@ async function main() {
       86400n,
       100,
     ]);
-    if (INTEGRATION_MODE === "fixture") {
-      const block = await client.getBlock();
-      for (const [token, price, byte] of [
-        [USDC, 1n, "11"],
-        [WETH, 3200n, "22"],
-      ])
-        await write(wallet, client, oracle, "setPrice", [
-          token,
-          price,
-          0,
-          block.timestamp,
-          `0x${byte.repeat(32)}`,
-        ]);
-    }
     // Local impersonation transfers real fork USDC; never broadcast to upstream.
     const holder = "0x55FE002aefF02F77364de339a1292923A15844B8";
     await client.request({
@@ -889,32 +901,31 @@ async function main() {
     // These are runner-only seed presets for the two pre-created demo Spaces.
     // User-created Spaces take their funding from the signed draft and the
     // lifecycle planner; these values are not runtime requirements.
-    const strategies =
-      INTEGRATION_MODE === "real"
-        ? [
-            [
-              upstreamPrimary.strategy,
-              upstreamPrimary.strategyHash,
-              [70000n * 1000000n, 10n * 10n ** 18n],
-            ],
-            [
-              upstreamSecondary.strategy,
-              upstreamSecondary.strategyHash,
-              [35000n * 1000000n, 5n * 10n ** 18n],
-            ],
-          ]
-        : [
-            [
-              stringToHex("strategy:local-settlement-e2e"),
-              STRATEGY_HASH,
-              [70000n * 1000000n, 10n * 10n ** 18n],
-            ],
-            [
-              stringToHex("strategy:local-settlement-e2e-secondary"),
-              SECOND_SPACE.strategyHash,
-              [35000n * 1000000n, 5n * 10n ** 18n],
-            ],
-          ];
+    const strategies = UPSTREAM_MODE
+      ? [
+          [
+            upstreamPrimary.strategy,
+            upstreamPrimary.strategyHash,
+            [70000n * 1000000n, 10n * 10n ** 18n],
+          ],
+          [
+            upstreamSecondary.strategy,
+            upstreamSecondary.strategyHash,
+            [35000n * 1000000n, 5n * 10n ** 18n],
+          ],
+        ]
+      : [
+          [
+            stringToHex("strategy:local-settlement-e2e"),
+            STRATEGY_HASH,
+            [70000n * 1000000n, 10n * 10n ** 18n],
+          ],
+          [
+            stringToHex("strategy:local-settlement-e2e-secondary"),
+            SECOND_SPACE.strategyHash,
+            [35000n * 1000000n, 5n * 10n ** 18n],
+          ],
+        ];
     if (INTEGRATION_MODE === "real") {
       for (const [strategy, expectedHash, amounts] of strategies) {
         for (const [token, amount] of [
@@ -949,7 +960,7 @@ async function main() {
         ])
           await write(wallet, client, aqua, "seed", [
             alice,
-            router.address,
+            aquaApp,
             strategyHash,
             token,
             amount,
@@ -957,26 +968,25 @@ async function main() {
     }
     // Alice explicitly enables allowance and epoch from her browser wallet.
     const swapVMRuntime = await client.getCode({ address: swapVM.address });
-    const upstreamWrapper =
-      INTEGRATION_MODE === "real"
-        ? {
-            address: swapVM.address,
-            runtimeBytes: (swapVMRuntime.length - 2) / 2,
-            runtimeCodeHash: keccak256(swapVMRuntime),
-            sourceHash: keccak256(
-              stringToHex(
-                readFileSync(
-                  path.join(
-                    ROOT,
-                    "contracts/upstream/AurkaUpstreamAquaSwapVMRouter.sol",
-                  ),
-                  "utf8",
+    const upstreamWrapper = UPSTREAM_MODE
+      ? {
+          address: swapVM.address,
+          runtimeBytes: (swapVMRuntime.length - 2) / 2,
+          runtimeCodeHash: keccak256(swapVMRuntime),
+          sourceHash: keccak256(
+            stringToHex(
+              readFileSync(
+                path.join(
+                  ROOT,
+                  "contracts/upstream/AurkaUpstreamAquaSwapVMRouter.sol",
                 ),
+                "utf8",
               ),
             ),
-            constructor: { aqua: aqua.address, weth: WETH, owner: alice },
-          }
-        : undefined;
+          ),
+          constructor: { aqua: aqua.address, weth: WETH, owner: alice },
+        }
+      : undefined;
     manifest = {
       mode: "fork",
       integrationMode: INTEGRATION_MODE,
@@ -984,7 +994,7 @@ async function main() {
       chainId: CHAIN_ID,
       upstreamChainId: 1,
       forkBlock: FORK_BLOCK,
-      rpcUrl: RPC,
+      rpcUrl: PUBLIC_RPC_URL ?? RPC,
       alice,
       bob: accounts[1].address,
       protocolRecipient: accounts[2].address,
@@ -1001,10 +1011,8 @@ async function main() {
       upstreamWrapper,
       aquaApp,
       swapVMGuard,
-      swapVMUpstreamCommit:
-        INTEGRATION_MODE === "real" ? UPSTREAM_SWAPVM_COMMIT : undefined,
-      aquaUpstreamCommit:
-        INTEGRATION_MODE === "real" ? UPSTREAM_AQUA_COMMIT : undefined,
+      swapVMUpstreamCommit: UPSTREAM_MODE ? UPSTREAM_SWAPVM_COMMIT : undefined,
+      aquaUpstreamCommit: UPSTREAM_MODE ? UPSTREAM_AQUA_COMMIT : undefined,
       router: router.address,
       vaultFactory: vaultFactory.address,
       vaultFactoryVersion: 2,
@@ -1032,10 +1040,9 @@ async function main() {
               "TradeExecuted + FeesRouted + PolicyMutation + SpaceInitialized",
           }
         : { status: "not-configured" },
-      executionEngine:
-        INTEGRATION_MODE === "real"
-          ? "AURKA_UPSTREAM_LIMIT_SWAP_V1"
-          : "AURKA_DIRECT_PAIR_V1 (AurkaDirectSwapVM reference adapter)",
+      executionEngine: UPSTREAM_MODE
+        ? "AURKA_UPSTREAM_LIMIT_SWAP_V1"
+        : "AURKA_DIRECT_PAIR_V1 (AurkaDirectSwapVM reference adapter)",
       integrationEvidence,
       mocks:
         INTEGRATION_MODE === "real"
@@ -1113,10 +1120,11 @@ async function main() {
       "Fork deployment identity changed. The configured fork was reset; use its new browser session and do not reuse pending setup hashes.",
     );
   manifest.deploymentBlockHash = deploymentBlock.hash;
-  manifest.apiUrl = `http://127.0.0.1:${API_PORT}`;
+  manifest.rpcUrl = PUBLIC_RPC_URL ?? manifest.rpcUrl ?? RPC;
+  manifest.apiUrl = PUBLIC_API_URL ?? `http://127.0.0.1:${API_PORT}`;
   delete manifest.ownerUrl;
   delete manifest.traderUrl;
-  manifest.appUrl = `http://127.0.0.1:${APP_PORT}/spaces`;
+  manifest.appUrl = PUBLIC_APP_URL ?? `http://127.0.0.1:${APP_PORT}/spaces`;
   writeFileSync(manifestFile, stringify(manifest));
   const contracts = Object.fromEntries(
     [
@@ -1153,12 +1161,43 @@ async function main() {
   const spaceDefinitions = manifest.spaces ?? [
     { ...DEFAULT_SPACE, name: manifest.name },
   ];
+  const closedSpaces = new Set();
+  const strategyIsClosed = async (definition, maker) => {
+    if (!maker) return false;
+    const states = await Promise.all(
+      [USDC, WETH].map((token) =>
+        client.readContract({
+          ...contracts.aqua,
+          functionName: "rawBalances",
+          args: [maker, manifest.aquaApp, definition.strategyHash, token],
+        }),
+      ),
+    );
+    return states.every(
+      (raw) => Number(tupleValue(raw, 1, "tokensCount")) === 255,
+    );
+  };
+  const closedStrategyError = (positionId) =>
+    new ServiceError(
+      "PRICING_RENEWAL_REQUIRED",
+      "Pricing needs renewal: this fixed-price Space has already been recovered and its Aqua strategy is closed",
+      409,
+      {
+        positionId,
+        state: "PRICING_NEEDS_RENEWAL",
+        executable: false,
+        recovery:
+          "Use the recorded owner recovery receipts and trade only against the replacement Space.",
+      },
+    );
   class ForkProvider extends LocalChainSnapshotProvider {
     constructor(space) {
       super(client, contracts, solver.address, space);
       this.space = space;
     }
     async currentSnapshot() {
+      if (closedSpaces.has(this.space.positionId))
+        throw closedStrategyError(this.space.positionId);
       const snapshot = await super.currentSnapshot();
       if (manifest.executionEngine === "AURKA_UPSTREAM_LIMIT_SWAP_V1") {
         snapshot.swapVMGuard = manifest.swapVMGuard;
@@ -1215,9 +1254,10 @@ async function main() {
     }
   }
   const providers = new Map(
-    spaceDefinitions
-      .filter((space) => !space.lifecycle)
-      .map((space) => [space.positionId, new ForkProvider(space)]),
+    spaceDefinitions.map((space) => [
+      space.positionId,
+      new ForkProvider(space),
+    ]),
   );
   const provider = {
     getPositionSnapshot: (positionId) => {
@@ -1266,6 +1306,13 @@ async function main() {
   });
   const indexer = new ChainEventIndexer(service.repository);
   let indexedBlock = BigInt(manifest.deploymentBlock) - 1n;
+  const pricingNeedsRenewal = (snapshot) =>
+    manifest.executionEngine === "AURKA_UPSTREAM_LIMIT_SWAP_V1" &&
+    buildUpstreamSwapVMStrategy(
+      snapshot,
+      WETH,
+      USDC,
+    ).strategyHash.toLowerCase() !== snapshot.aquaStrategyHash.toLowerCase();
   async function refresh(spaceId = DEFAULT_SPACE.positionId) {
     const selected = providers.get(spaceId);
     if (!selected)
@@ -1288,7 +1335,9 @@ async function main() {
       args: [definition.positionIdHash, WETH, USDC],
       blockNumber: snapshot.snapshotBlock,
     });
+    const needsPricingRenewal = pricingNeedsRenewal(snapshot);
     const tradingReady =
+      !needsPricingRenewal &&
       activeCapacity.capacityEpochId === snapshot.capacityEpochId &&
       !!epochs[activeCapacity.capacityEpochId] &&
       [
@@ -1323,9 +1372,11 @@ async function main() {
       mode: "fork",
       state: position.policy.paused
         ? "PAUSED"
-        : tradingReady
-          ? "ACTIVE"
-          : "REACTIVATION_REQUIRED",
+        : needsPricingRenewal
+          ? "PRICING_NEEDS_RENEWAL"
+          : tradingReady
+            ? "ACTIVE"
+            : "REACTIVATION_REQUIRED",
     });
     const end = snapshot.snapshotBlock;
     if (end > indexedBlock) {
@@ -1372,6 +1423,7 @@ async function main() {
       },
       deployment: {
         policyRegistry: manifest.policyRegistry,
+        riskRegistry: manifest.riskRegistry,
         vaultFactory: manifest.vaultFactory,
         aqua: manifest.aqua,
         router: manifest.router,
@@ -1395,6 +1447,10 @@ async function main() {
   };
   for (const plan of Object.values(lifecycle.plans)) {
     if (plan.complete) {
+      if (await strategyIsClosed(plan.definition, plan.treasury)) {
+        closedSpaces.add(plan.definition.positionId);
+        continue;
+      }
       try {
         await lifecycle.prepare(plan.definition.positionId);
       } catch (error) {
@@ -1407,7 +1463,8 @@ async function main() {
     }
   }
   for (const space of spaceDefinitions)
-    if (providers.has(space.positionId)) await refresh(space.positionId);
+    if (providers.has(space.positionId) && !closedSpaces.has(space.positionId))
+      await refresh(space.positionId);
   const agent = new OpenRouterAgent(service, openRouterAgentOptionsFromEnv());
   const delegated = await createDelegatedSessionServiceFromEnv(service, agent);
   api = createApiServer({ service, agent, delegated });
@@ -1567,6 +1624,7 @@ async function main() {
             baseline: active.capacityBaselineValue,
             consumed: active.consumedValue,
             authorized:
+              !pricingNeedsRenewal(snapshot) &&
               active.capacityEpochId === snapshot.capacityEpochId &&
               !!epochs[active.capacityEpochId] &&
               [
@@ -1595,10 +1653,66 @@ async function main() {
           (space) => space.positionId === spaceId,
         );
         const selected = providers.get(spaceId);
-        if (!definition || !selected)
+        if (!definition || (!selected && action === "authorize"))
           throw new ServiceError("SPACE_NOT_FOUND", "Space was not found", 404);
+        const space = service.getSpace(spaceId);
+        const vault = space.identity.treasuryAddress;
+        const strategyHash =
+          definition.strategyHash ?? space.identity.strategyId;
+        const recoveryState = async () => {
+          const tokens = [USDC, WETH];
+          const aquaBalances = {};
+          const vaultBalances = {};
+          const ownerBalances = {};
+          for (const token of tokens) {
+            const raw = await client.readContract({
+              ...contracts.aqua,
+              functionName: "rawBalances",
+              args: [vault, manifest.aquaApp, strategyHash, token],
+            });
+            aquaBalances[token] = {
+              balance: BigInt(tupleValue(raw, 0, "balance")).toString(),
+              tokensCount: Number(tupleValue(raw, 1, "tokensCount")),
+            };
+            vaultBalances[token] = (
+              await client.readContract({
+                address: token,
+                abi: erc20Abi,
+                functionName: "balanceOf",
+                args: [vault],
+              })
+            ).toString();
+            ownerBalances[token] = (
+              await client.readContract({
+                address: token,
+                abi: erc20Abi,
+                functionName: "balanceOf",
+                args: [space.identity.ownerAddress],
+              })
+            ).toString();
+          }
+          return {
+            spaceId,
+            owner: space.identity.ownerAddress,
+            vault,
+            aqua: manifest.aqua,
+            aquaApp: manifest.aquaApp,
+            strategyHash,
+            tokens: { usdc: USDC, weth: WETH },
+            aquaBalances,
+            vaultBalances,
+            ownerBalances,
+          };
+        };
         let transaction;
-        if (action === "pause" || action === "resume")
+        if (action === "state") {
+          response.writeHead(200, {
+            "content-type": "application/json",
+            "cache-control": "no-store",
+          });
+          response.end(stringify(await recoveryState()));
+          return;
+        } else if (action === "pause" || action === "resume")
           transaction = tx(contracts.policyRegistry, "setPaused", [
             definition.policyId,
             action === "pause",
@@ -1650,12 +1764,56 @@ async function main() {
             contractEpoch(snapshot),
             contractPriceInput(snapshot),
           ]);
+        } else if (action === "dock") {
+          transaction = tx(
+            { address: vault, abi: contracts.vaultAbi },
+            "dockAquaStrategy",
+            [manifest.aqua, manifest.aquaApp, strategyHash, [USDC, WETH]],
+          );
+        } else if (action === "withdraw") {
+          const tokenName = url.searchParams.get("token")?.toLowerCase();
+          const token =
+            tokenName === "usdc"
+              ? USDC
+              : tokenName === "weth"
+                ? WETH
+                : undefined;
+          const amountText = url.searchParams.get("amount") ?? "";
+          if (
+            !token ||
+            !/^[0-9]+$/.test(amountText) ||
+            BigInt(amountText) <= 0n
+          )
+            throw new Error(
+              "Withdraw requires token=USDC|WETH and a positive raw integer amount.",
+            );
+          const vaultBalance = await client.readContract({
+            address: token,
+            abi: erc20Abi,
+            functionName: "balanceOf",
+            args: [vault],
+          });
+          if (BigInt(amountText) > vaultBalance)
+            throw new Error("Withdraw amount exceeds the vault token balance.");
+          transaction = tx(
+            { address: vault, abi: contracts.vaultAbi },
+            "withdraw",
+            [token, space.identity.ownerAddress, BigInt(amountText)],
+          );
         } else throw new Error("Unknown owner action");
         response.writeHead(200, {
           "content-type": "application/json",
           "cache-control": "no-store",
         });
-        response.end(stringify(transaction));
+        response.end(
+          stringify({
+            ...transaction,
+            owner: space.identity.ownerAddress,
+            vault,
+            strategyHash,
+            note: "Unsigned owner transaction; sign and broadcast from the Space owner wallet.",
+          }),
+        );
       } else if (
         request.method === "GET" &&
         url.pathname === "/v1/activity" &&
@@ -1696,7 +1854,11 @@ async function main() {
         response.end(stringify({ ok: true, data: page }));
       } else {
         for (const space of spaceDefinitions)
-          if (providers.has(space.positionId)) await refresh(space.positionId);
+          if (
+            providers.has(space.positionId) &&
+            !closedSpaces.has(space.positionId)
+          )
+            await refresh(space.positionId);
         const chunks = [];
         let size = 0;
         for await (const chunk of request) {
@@ -1746,9 +1908,9 @@ async function main() {
   });
   await new Promise((resolve, reject) => {
     gateway.once("error", reject);
-    gateway.listen(API_PORT, "127.0.0.1", resolve);
+    gateway.listen(API_PORT, FORK_BIND_HOST, resolve);
   });
-  for (const [app, port] of [["trader", APP_PORT]]) {
+  for (const [app, port] of SKIP_APP ? [] : [["trader", APP_PORT]]) {
     const child = spawn(
       "pnpm",
       [
@@ -1756,7 +1918,7 @@ async function main() {
         `@aurka/${app}-app`,
         "dev",
         "--host",
-        "127.0.0.1",
+        FORK_BIND_HOST,
         "--port",
         String(port),
         "--strictPort",
@@ -1779,7 +1941,7 @@ async function main() {
     });
   }
   console.log(
-    `Fork ready: AURKA app http://127.0.0.1:${APP_PORT}/spaces · API http://127.0.0.1:${API_PORT} · manifest ${path.join(DIR, "manifest.json")}. ${INTEGRATION_MODE === "real" ? "Real Aqua + Chainlink prices + pinned upstream SwapVM; test funds." : "Fixture-only Aqua and prices; test funds."}`,
+    `Fork ready: AURKA app ${manifest.appUrl} · API ${manifest.apiUrl} · manifest ${path.join(DIR, "manifest.json")}. ${INTEGRATION_MODE === "real" ? "Real Aqua + Chainlink prices + pinned upstream SwapVM; test funds." : INTEGRATION_MODE === "fixture-upstream" ? "Controlled MockAqua + MockPriceOracle + pinned upstream SwapVM; test funds." : "Fixture-only Aqua and prices; test funds."}`,
   );
 }
 process.once("SIGINT", () => void stop());

@@ -1,0 +1,26 @@
+{$DEMO_DOMAIN} {
+  encode gzip
+
+  header {
+    X-Content-Type-Options nosniff
+    Referrer-Policy strict-origin-when-cross-origin
+    Permissions-Policy "camera=(), microphone=(), geolocation=()"
+    -Server
+  }
+
+  @api path /api/*
+  handle @api {
+    uri strip_prefix /api
+    reverse_proxy fork-runtime:8797
+  }
+
+  @rpc path /rpc*
+  handle @rpc {
+    uri strip_prefix /rpc
+    reverse_proxy rpc-proxy:8546
+  }
+
+  handle {
+    reverse_proxy trader:80
+  }
+}

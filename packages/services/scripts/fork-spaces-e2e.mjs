@@ -129,6 +129,31 @@ async function nextToReview(page, funding) {
   }
   await page.getByRole("button", { name: "Next", exact: true }).click();
 }
+async function enterSettingsEditor(page, target = "review") {
+  const edit = page.getByRole("button", { name: "Edit Space", exact: true });
+  let modernSettings = true;
+  try {
+    await edit.waitFor({ state: "visible", timeout: 10_000 });
+  } catch (error) {
+    if (error instanceof Error && !error.message.includes("Timeout"))
+      throw error;
+    modernSettings = false;
+  }
+  if (!modernSettings) {
+    await page
+      .getByRole("button", { name: "Save changes", exact: true })
+      .waitFor();
+    return;
+  }
+  await edit.click();
+  const nextSteps = target === "funding" ? 3 : 4;
+  for (let i = 0; i < nextSteps; i++)
+    await page.getByRole("button", { name: "Next", exact: true }).click();
+  if (target === "review")
+    await page
+      .getByRole("button", { name: "Apply rules", exact: true })
+      .waitFor();
+}
 async function waitFor(page, predicate, label, attempts = 120) {
   for (let i = 0; i < attempts; i++) {
     if (await predicate()) return;
@@ -238,9 +263,7 @@ try {
       "Each new Space uses exactly two funding approvals",
     );
     await owner.reload();
-    await owner
-      .getByRole("button", { name: "Save changes", exact: true })
-      .waitFor();
+    await enterSettingsEditor(owner);
     await owner.screenshot({
       path: path.join(output, `mvp002-${suffix}-active.png`),
       fullPage: true,
@@ -317,24 +340,24 @@ try {
     await waitFor(
       trader,
       async () =>
-        (await trader.getByRole("status").allTextContents()).some((t) =>
-          t.includes("Quote ready"),
+        (await trader.getByRole("status").allTextContents()).some(
+          (t) => t.includes("Offer ready") || t.includes("Quote ready"),
         ),
       "quote",
     );
     await trader
-      .getByRole("button", { name: "Review and sign exact trade", exact: true })
+      .getByRole("button", { name: "Approve exact trade", exact: true })
       .click();
     await waitFor(
       trader,
       async () =>
         (await trader.getByRole("status").allTextContents()).some((t) =>
-          t.includes("Prepared"),
+          t.includes("ready to submit"),
         ),
       "trade preparation",
     );
     await trader
-      .getByRole("button", { name: "Submit exact trade", exact: true })
+      .getByRole("button", { name: "Submit trade", exact: true })
       .click();
     await waitFor(
       trader,
@@ -384,10 +407,10 @@ try {
       "ACTIVE",
     "resume",
   );
-  await owner.getByRole("textbox").fill("2500");
-  await owner
-    .getByRole("button", { name: "Save changes", exact: true })
-    .click();
+  await enterSettingsEditor(owner, "funding");
+  await owner.getByLabel(/Maximum trade value/).fill("2500");
+  await owner.getByRole("button", { name: "Next", exact: true }).click();
+  await owner.getByRole("button", { name: "Apply rules", exact: true }).click();
   await waitFor(
     owner,
     async () =>
@@ -432,9 +455,7 @@ try {
     ),
   );
   await owner.reload();
-  await owner
-    .getByRole("button", { name: "Save changes", exact: true })
-    .waitFor();
+  await enterSettingsEditor(owner);
   await owner.screenshot({
     path: path.join(output, "mvp002-owner-settings.png"),
     fullPage: true,

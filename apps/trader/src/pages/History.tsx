@@ -6,7 +6,6 @@ import {
   activityTypeSchema,
   type ActivityStatus,
   type ActivityType,
-  type Execution,
   type SpaceRecord,
 } from "@aurka/shared";
 import {
@@ -14,6 +13,7 @@ import {
   type ActivityFeedQuery,
 } from "../components/ActivityFeed";
 import { apiBaseUrl } from "../config";
+import { userFacingError } from "../ui";
 
 const ACTIVITY_TYPES = activityTypeSchema.options;
 const ACTIVITY_STATUSES = activityStatusSchema.options;
@@ -128,8 +128,7 @@ function ActivityFilters({
         <div>
           <h2 className="font-semibold text-white">Filter activity</h2>
           <p className="mt-1 text-sm text-slate-400">
-            Filters stay in this URL, so a Space-specific view can be shared or
-            reloaded.
+            Filter by Space, activity type, status, or date.
           </p>
         </div>
         <button
@@ -219,10 +218,6 @@ export default function History() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [spaces, setSpaces] = useState<SpaceRecord[]>([]);
   const [spacesError, setSpacesError] = useState<string | null>(null);
-  const [hash, setHash] = useState("");
-  const [execution, setExecution] = useState<Execution | null>(null);
-  const [lookupError, setLookupError] = useState<string | null>(null);
-  const [lookupLoading, setLookupLoading] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -233,9 +228,7 @@ export default function History() {
       })
       .catch((error: unknown) => {
         if (active)
-          setSpacesError(
-            error instanceof Error ? error.message : "Space list unavailable",
-          );
+          setSpacesError(userFacingError(error, "Space names are unavailable"));
       });
     return () => {
       active = false;
@@ -278,32 +271,17 @@ export default function History() {
     setSearchParams({});
   }
 
-  async function lookup() {
-    setLookupLoading(true);
-    setLookupError(null);
-    setExecution(null);
-    try {
-      setExecution(
-        await new AurkaClient({ baseUrl: apiBaseUrl }).getExecution(hash),
-      );
-    } catch (error) {
-      setLookupError(error instanceof Error ? error.message : "Lookup failed");
-    } finally {
-      setLookupLoading(false);
-    }
-  }
-
   return (
     <section className="space-y-6 text-slate-200">
       <div>
         <p className="text-sm font-semibold uppercase tracking-[0.18em] text-cyan-300">
-          Global records
+          Your activity
         </p>
         <h1 className="mt-2 text-3xl font-semibold text-white">Activity</h1>
         <p className="mt-3 max-w-2xl leading-7 text-slate-400">
-          One feed for swaps, earned-fee evidence, rule changes and trading
-          status across your Spaces. Prepared and failed attempts remain visible
-          without being presented as completed trades.
+          Review offers, wallet requests, confirmed trades, and Space changes in
+          one place. Pending and failed requests are kept separate from
+          confirmed trades.
         </p>
       </div>
 
@@ -324,51 +302,6 @@ export default function History() {
         query={activityQuery}
         emptyMessage="No activity yet. Completed swaps and rule changes will appear here."
       />
-
-      <section className="rounded-2xl border border-slate-800 bg-slate-950/70 p-5">
-        <h2 className="font-semibold text-white">Find a preparation by ID</h2>
-        <p className="mt-1 text-sm text-slate-400">
-          Hash lookup is a secondary developer tool; it does not replace the
-          activity feed.
-        </p>
-        <form
-          className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-end"
-          onSubmit={(event) => {
-            event.preventDefault();
-            void lookup();
-          }}
-        >
-          <label className="block min-w-0 flex-1">
-            <span className="text-sm text-slate-300">Execution hash</span>
-            <input
-              required
-              pattern="0x[0-9a-fA-F]{64}"
-              className="mt-1 block w-full rounded-lg border border-slate-700 bg-slate-800 p-2.5 text-slate-100"
-              value={hash}
-              onChange={(event) => setHash(event.target.value)}
-            />
-          </label>
-          <button
-            type="submit"
-            disabled={lookupLoading}
-            className="rounded-lg bg-slate-700 px-4 py-2.5 font-medium text-white disabled:opacity-50"
-          >
-            {lookupLoading ? "Loading…" : "Look up"}
-          </button>
-        </form>
-        {lookupError && (
-          <p role="alert" className="mt-3 text-sm text-red-300">
-            {lookupError}
-          </p>
-        )}
-        {execution && (
-          <p className="mt-4 text-sm text-slate-300">
-            Preparation status:{" "}
-            <span className="font-medium text-white">{execution.status}</span>
-            {execution.revertReason ? ` · ${execution.revertReason}` : ""}
-          </p>
-        )}
-      </section>
 
       {spaceId && (
         <Link

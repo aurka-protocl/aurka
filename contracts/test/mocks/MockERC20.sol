@@ -8,6 +8,8 @@ contract MockERC20 is IERC20Minimal {
     string public symbol;
     uint8 public immutable decimals;
     uint256 public totalSupply;
+    bool public transferReturnsFalse;
+    bool public transferReverts;
     bool public transferFromReturnsFalse;
     bool public transferFromReverts;
     uint256 public transferFeeBps;
@@ -38,6 +40,8 @@ contract MockERC20 is IERC20Minimal {
     }
 
     function transfer(address to, uint256 amount) external returns (bool) {
+        if (transferReverts) revert("mock transfer reverted");
+        if (transferReturnsFalse) return false;
         require(_balances[msg.sender] >= amount, "balance");
         _balances[msg.sender] -= amount;
         _balances[to] += amount;
@@ -64,6 +68,14 @@ contract MockERC20 is IERC20Minimal {
 
     function setTransferFromReturnsFalse(bool value) external {
         transferFromReturnsFalse = value;
+    }
+
+    function setTransferReturnsFalse(bool value) external {
+        transferReturnsFalse = value;
+    }
+
+    function setTransferReverts(bool value) external {
+        transferReverts = value;
     }
 
     function setTransferFromReverts(bool value) external {

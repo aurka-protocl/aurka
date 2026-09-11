@@ -1,0 +1,53 @@
+{
+  "task": "TASK1009-004",
+  "status": "prepared_not_deployed",
+  "checkedAt": "2026-09-10",
+  "repositoryCommit": "c1095c4d87ead55fb1ff7eba4ee849a755a1f480",
+  "worktree": "dirty_existing_and_task_changes_preserved",
+  "hosted": {
+    "frontendUrl": null,
+    "apiUrl": null,
+    "rpcUrl": null,
+    "graphEndpoint": null,
+    "secondNetworkCheck": "NOT_RUN",
+    "reason": "No authorized hosting resource, DNS name, or public deployment was supplied or created."
+  },
+  "preparedArtifacts": [
+    "deploy/vercel/vercel.json",
+    "deploy/hosted-demo/docker-compose.yml",
+    "deploy/hosted-demo/Dockerfile.fork",
+    "deploy/hosted-demo/Dockerfile.trader",
+    "deploy/hosted-demo/Caddyfile",
+    "deploy/hosted-demo/.env.hosted.example",
+    "packages/services/scripts/filtered-rpc-proxy.mjs",
+    "packages/services/scripts/hosted-graph-deploy.mjs",
+    "docs/hosted-demo.md",
+    "docs/ethonline-submission.md"
+  ],
+  "localValidation": {
+    "build": "PASS",
+    "tests": "PASS",
+    "lint": "PASS",
+    "typecheck": "PASS",
+    "format": "PASS",
+    "composeConfig": "PASS",
+    "rpcProxySecurityTests": "PASS",
+    "uiProviderErrorFallbackTest": "PASS"
+  },
+  "event": {
+    "name": "ETHOnline 2026",
+    "submissionDeadline": "2026-09-13T12:00:00-04:00",
+    "demoVideoLimit": "2-4 minutes",
+    "partnerPrizeLimit": 3,
+    "source": "https://ethglobal.com/events/ethonline2026/info/details",
+    "prizesSource": "https://ethglobal.com/events/ethonline2026/prizes"
+  },
+  "uncompleted": [
+    "Replace placeholder API hostname and provision an approved HTTPS host.",
+    "Deploy and cross-network test frontend, API, filtered RPC, chain, and same-fork Graph.",
+    "Complete live Privy wallet/policy/signature/revocation/recovery acceptance.",
+    "Run hosted quote, signed trade, Stop/recovery, restart, and non-reactivation rehearsal.",
+    "Freeze a reviewed commit and record a compliant 2-4 minute video.",
+    "Obtain explicit user authorization before publishing the final submission."
+  ]
+}

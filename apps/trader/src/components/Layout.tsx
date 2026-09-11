@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Menu, X, Activity, ArrowLeftRight, Boxes } from "lucide-react";
+import { Menu, X, Activity, ArrowLeftRight, Boxes, Info } from "lucide-react";
 import { NavLink, useLocation } from "react-router-dom";
 import { clsx } from "clsx";
 import { environmentLabel, appMode } from "../config";
@@ -13,6 +13,7 @@ const navigation = [
   { name: "Spaces", href: "/spaces", icon: Boxes },
   { name: "Trade", href: "/trade", icon: ArrowLeftRight },
   { name: "Activity", href: "/activity", icon: Activity },
+  { name: "About", href: "/about", icon: Info },
 ];
 
 function navigationClass(active: boolean): string {
@@ -55,7 +56,7 @@ export default function Layout({ children }: LayoutProps) {
               AURKA
             </span>
             <span className="block text-xs text-slate-500">
-              Portfolio mandates
+              Constrained liquidity
             </span>
           </NavLink>
 
@@ -105,21 +106,6 @@ export default function Layout({ children }: LayoutProps) {
               )}
             </button>
           </div>
-        </div>
-        <div className="mx-auto flex max-w-7xl items-center justify-between px-4 pb-2 sm:px-6 md:hidden lg:px-8">
-          <span className="inline-flex items-center gap-1.5 rounded-full border border-slate-800 px-2.5 py-1 text-[11px] text-slate-400">
-            <span
-              className={clsx(
-                "h-1.5 w-1.5 rounded-full",
-                appMode === "fork" ? "bg-amber-300" : "bg-cyan-300",
-              )}
-              aria-hidden="true"
-            />
-            {environmentLabel}
-          </span>
-          <span className="text-xs text-slate-500">
-            One app · shared Space state
-          </span>
         </div>
         {menuOpen && (
           <nav

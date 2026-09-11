@@ -227,6 +227,45 @@ contract AurkaSpaceCreationTest is TestBase {
         assertEq(weth.balanceOf(vault), params.wethAmount);
     }
 
+    function testOwnerDocksAndWithdrawsExactBalancesAfterPriceRecovery() public {
+        address vault = factory.vaultAddress(address(this), SPACE_ID);
+        factory.createAndInitializeSpace(params);
+
+        address[] memory tokens = new address[](2);
+        tokens[0] = address(usdc);
+        tokens[1] = address(weth);
+        vm.prank(address(0xBAD));
+        vm.expectRevert(AurkaSpaceVault.NotOwner.selector);
+        AurkaSpaceVault(vault).dockAquaStrategy(
+            address(aqua), address(router), strategyHash, tokens
+        );
+
+        AurkaSpaceVault(vault).dockAquaStrategy(
+            address(aqua), address(router), strategyHash, tokens
+        );
+        (uint248 usdcClosed, uint8 usdcState) =
+            aqua.rawBalances(vault, address(router), strategyHash, address(usdc));
+        (uint248 wethClosed, uint8 wethState) =
+            aqua.rawBalances(vault, address(router), strategyHash, address(weth));
+        assertEq(usdcClosed, 0);
+        assertEq(wethClosed, 0);
+        assertEq(usdcState, type(uint8).max);
+        assertEq(wethState, type(uint8).max);
+        assertEq(usdc.balanceOf(vault), params.usdcAmount);
+        assertEq(weth.balanceOf(vault), params.wethAmount);
+
+        AurkaSpaceVault(vault).withdraw(address(usdc), address(this), params.usdcAmount);
+        AurkaSpaceVault(vault).withdraw(address(weth), address(this), params.wethAmount);
+        assertEq(usdc.balanceOf(vault), 0);
+        assertEq(weth.balanceOf(vault), 0);
+        assertEq(usdc.balanceOf(address(this)), params.usdcAmount);
+        assertEq(weth.balanceOf(address(this)), params.wethAmount);
+
+        vm.prank(address(0xBAD));
+        vm.expectRevert(AurkaSpaceVault.NotOwner.selector);
+        AurkaSpaceVault(vault).withdraw(address(usdc), address(0xBAD), 1);
+    }
+
     function testZeroFundingIsRejected() public {
         params.usdcAmount = 0;
         vm.expectRevert(AurkaSpaceVaultFactory.InvalidInitialization.selector);

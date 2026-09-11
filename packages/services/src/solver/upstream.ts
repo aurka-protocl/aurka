@@ -26,6 +26,14 @@ export interface UpstreamSwapVMData {
   readonly programHash: string;
 }
 
+export interface UpstreamSwapVMStrategy {
+  readonly strategy: string;
+  readonly strategyHash: string;
+  readonly program: string;
+  readonly orderData: string;
+  readonly makerTraits: bigint;
+}
+
 function strip0x(value: string): string {
   return value.startsWith("0x") || value.startsWith("0X")
     ? value.slice(2)
@@ -157,6 +165,74 @@ function staticBalances(
   return [balanceA, balanceB];
 }
 
+function reviewedMakerTraits(): bigint {
+  return (
+    (1n << 254n) |
+    (1n << 250n) |
+    (1n << 246n) |
+    (60n << 208n) |
+    (60n << 192n) |
+    (40n << 176n) |
+    (40n << 160n)
+  );
+}
+
+/** Rebuild the fixed-price order identity without proposal-specific amounts. */
+export function buildUpstreamSwapVMStrategy(
+  snapshot: SolverSnapshot,
+  input: string,
+  output: string,
+): UpstreamSwapVMStrategy {
+  if (!snapshot.swapVMGuard)
+    throw new Error("Pinned upstream VM guard is not configured");
+  const tokenA = input.toLowerCase() < output.toLowerCase() ? input : output;
+  const tokenB = tokenA.toLowerCase() === input.toLowerCase() ? output : input;
+  const [balanceA, balanceB] = staticBalances(snapshot, input, output);
+  const outputBalance =
+    (tokenA.toLowerCase() === output.toLowerCase() ? balanceA : balanceB) *
+      UPSTREAM_STATIC_BALANCE_SCALE +
+    1n;
+  const scaledBalanceA =
+    tokenA.toLowerCase() === output.toLowerCase()
+      ? outputBalance
+      : balanceA * UPSTREAM_STATIC_BALANCE_SCALE;
+  const scaledBalanceB =
+    tokenB.toLowerCase() === output.toLowerCase()
+      ? outputBalance
+      : balanceB * UPSTREAM_STATIC_BALANCE_SCALE;
+  const direction = input.toLowerCase() === tokenA.toLowerCase() ? "80" : "00";
+  const program = `0x9040${word(scaledBalanceA)}${word(scaledBalanceB)}5301${direction}`;
+  const orderData = `0x${addressBytes(tokenA)}${addressBytes(tokenB)}${addressBytes(snapshot.swapVMGuard)}${strip0x(program)}`;
+  const traits = reviewedMakerTraits();
+  const strategy = abiEncodeOrder(
+    snapshot.feeAccounting.treasuryRecipient,
+    traits,
+    orderData,
+  );
+  return {
+    strategy,
+    strategyHash: asHex(keccak_256(parseHex(strategy))),
+    program,
+    orderData,
+    makerTraits: traits,
+  };
+}
+
+export function upstreamStrategyMatchesSnapshot(
+  snapshot: SolverSnapshot,
+  input: string,
+  output: string,
+): boolean {
+  if (!snapshot.swapVMGuard) return true;
+  return (
+    buildUpstreamSwapVMStrategy(
+      snapshot,
+      input,
+      output,
+    ).strategyHash.toLowerCase() === snapshot.aquaStrategyHash.toLowerCase()
+  );
+}
+
 /** Build the reviewed StaticBalances + LimitSwap order template. */
 export function buildUpstreamSwapVMData(
   intent: AtomicSettlementIntent,
@@ -165,50 +241,19 @@ export function buildUpstreamSwapVMData(
 ): UpstreamSwapVMData {
   if (!snapshot.swapVMGuard)
     throw new Error("Pinned upstream VM guard is not configured");
+  const strategyTemplate = buildUpstreamSwapVMStrategy(
+    snapshot,
+    intent.traderInputToken,
+    intent.traderOutputToken,
+  );
+  const { orderData, makerTraits } = strategyTemplate;
   const tokenA =
     intent.traderInputToken.toLowerCase() <
     intent.traderOutputToken.toLowerCase()
       ? intent.traderInputToken
       : intent.traderOutputToken;
-  const tokenB =
-    tokenA.toLowerCase() === intent.traderInputToken.toLowerCase()
-      ? intent.traderOutputToken
-      : intent.traderInputToken;
-  const [balanceA, balanceB] = staticBalances(
-    snapshot,
-    intent.traderInputToken,
-    intent.traderOutputToken,
-  );
-  const direction =
-    intent.traderInputToken.toLowerCase() === tokenA.toLowerCase()
-      ? "80"
-      : "00";
-  const outputBalance =
-    (tokenA.toLowerCase() === intent.traderOutputToken.toLowerCase()
-      ? balanceA
-      : balanceB) *
-      UPSTREAM_STATIC_BALANCE_SCALE +
-    1n;
-  const scaledBalanceA =
-    tokenA.toLowerCase() === intent.traderOutputToken.toLowerCase()
-      ? outputBalance
-      : balanceA * UPSTREAM_STATIC_BALANCE_SCALE;
-  const scaledBalanceB =
-    tokenB.toLowerCase() === intent.traderOutputToken.toLowerCase()
-      ? outputBalance
-      : balanceB * UPSTREAM_STATIC_BALANCE_SCALE;
-  const program = `0x9040${word(scaledBalanceA)}${word(scaledBalanceB)}5301${direction}`;
   // MakerTraits: Aqua mode, pre-transfer-out hook + explicit hook target,
   // and the four official order-data slice indexes 40/40/60/60.
-  const makerTraits =
-    (1n << 254n) |
-    (1n << 250n) |
-    (1n << 246n) |
-    (60n << 208n) |
-    (60n << 192n) |
-    (40n << 176n) |
-    (40n << 160n);
-  const orderData = `0x${addressBytes(tokenA)}${addressBytes(tokenB)}${addressBytes(snapshot.swapVMGuard)}${strip0x(program)}`;
   // The VM executes the pre-fee oracle exchange. AURKA routes solver/protocol
   // shares and pushes the treasury-retained fee back into the same Aqua
   // strategy after the VM pull. This keeps the VM's strict threshold independent
@@ -232,12 +277,8 @@ export function buildUpstreamSwapVMData(
     .padStart(4, "0");
   const deadline = BigInt(proposal.deadline).toString(16).padStart(10, "0");
   const takerTraitsAndData = `0x${indexes}${flags}${threshold}${deadline}`;
-  const strategy = abiEncodeOrder(
-    snapshot.feeAccounting.treasuryRecipient,
-    makerTraits,
-    orderData,
-  );
-  const strategyHash = asHex(keccak_256(parseHex(strategy)));
+  const strategy = strategyTemplate.strategy;
+  const strategyHash = strategyTemplate.strategyHash;
   const programHash = asHex(keccak_256(parseHex(orderData)));
   if (strategyHash.toLowerCase() !== snapshot.aquaStrategyHash.toLowerCase()) {
     throw new Error(

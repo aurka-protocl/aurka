@@ -8,6 +8,7 @@ import {
   type ActivityType,
 } from "@aurka/shared";
 import { apiBaseUrl } from "../config";
+import { userFacingError } from "../ui";
 
 export interface ActivityFeedQuery {
   readonly spaceId?: string;
@@ -42,6 +43,21 @@ const CHANGE_LABELS: Record<ActivityChange["eventType"], string> = {
   SPACE_DEPLOYMENT_FAILED: "Space setup failed",
 };
 
+function stateLabel(value: string | undefined): string {
+  if (!value) return "Recorded";
+  return (
+    {
+      ACTIVE: "Ready to trade",
+      DRAFT: "Draft",
+      FAILED: "Setup failed",
+      PAUSED: "Trading paused",
+      PENDING: "Pending",
+      REACTIVATION_REQUIRED: "Trading needs reactivation",
+      PRICING_NEEDS_RENEWAL: "Price needs renewal",
+    }[value] ?? "Recorded"
+  );
+}
+
 function shortHash(value: string): string {
   return `${value.slice(0, 10)}…${value.slice(-8)}`;
 }
@@ -66,7 +82,7 @@ function ActivityEvidence({ item }: { readonly item: ActivityItem }) {
   return (
     <details className="mt-4 rounded-lg border border-slate-700 bg-slate-950/60 p-3">
       <summary className="cursor-pointer text-sm text-slate-300">
-        Technical evidence
+        Transaction details
       </summary>
       <dl className="mt-3 space-y-2 break-all text-xs text-slate-500">
         <div>
@@ -175,7 +191,7 @@ export function ActivityCard({
           </div>
           <div>
             <dt className="text-slate-500">Resulting state</dt>
-            <dd className="text-slate-200">{item.state ?? "Recorded"}</dd>
+            <dd className="text-slate-200">{stateLabel(item.state)}</dd>
           </div>
         </dl>
         {item.status === "FAILED" && (
@@ -244,8 +260,8 @@ export function ActivityCard({
           <dt className="text-slate-500">Evidence</dt>
           <dd className="text-slate-200">
             {item.source === "CHAIN_EVENT"
-              ? `Router events · block ${item.blockNumber ?? "unavailable"}`
-              : "Service preparation record"}
+              ? `Confirmed network record · block ${item.blockNumber ?? "unavailable"}`
+              : "Prepared offer record"}
           </dd>
         </div>
         <div>
@@ -324,8 +340,8 @@ export function ActivityFeed({
         if (active)
           setError(
             requestError instanceof Error
-              ? requestError.message
-              : "Activity unavailable",
+              ? userFacingError(requestError, "Activity is unavailable")
+              : "Activity is unavailable",
           );
       })
       .finally(() => {

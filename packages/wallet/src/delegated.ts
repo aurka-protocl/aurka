@@ -12,6 +12,8 @@ import { z } from "zod";
 
 import {
   delegatedWalletIdentitySchema,
+  decodeProtocolEventLog,
+  protocolEventTopic,
   type DelegatedRecoveryAsset,
   type DelegatedWalletIdentity,
 } from "@aurka/shared";
@@ -47,6 +49,7 @@ export const delegatedExecutionPolicySchema = z
         ]),
       )
       .min(1),
+    routerMethod: z.enum(["execute", "executeWithSwapVM"]).optional(),
   })
   .strict();
 export type DelegatedExecutionPolicy = z.infer<
@@ -89,7 +92,24 @@ const erc20ApproveAbi = [
 export type DelegatedExecutionReceipt = {
   readonly transactionHash: string;
   readonly blockNumber: string;
+  readonly blockHash?: string;
   readonly status: "0x1" | "0x0" | null;
+};
+
+export type DelegatedReceiptExpectation = {
+  readonly chainId: number;
+  readonly from: string;
+  readonly to: string;
+  readonly data: string;
+  readonly value: string;
+  readonly trade?: {
+    readonly router: string;
+    readonly intentHash: string;
+    readonly proposalHash: string;
+    readonly trader: string;
+    readonly inputToken: string;
+    readonly outputToken: string;
+  };
 };
 
 export interface DelegatedWalletAdapter {
@@ -114,6 +134,7 @@ export interface DelegatedWalletAdapter {
   }>;
   getReceipt(
     transactionHash: string,
+    expectation?: DelegatedReceiptExpectation,
   ): Promise<DelegatedExecutionReceipt | null>;
   approveToken?(
     input: {
@@ -254,12 +275,29 @@ type DecodedProposal = {
 };
 
 function decodeExecute(data: string): {
+  readonly functionName: "execute" | "executeWithSwapVM";
   readonly intent: DecodedIntent;
   readonly proposal: DecodedProposal;
   readonly args: readonly unknown[];
 } {
-  const decoded = decodeFunctionData({ abi: routerAbi, data: data as Hex });
-  if (decoded.functionName !== "execute")
+  const executeWithSwapVMAbi = {
+    ...routerAbi[0],
+    name: "executeWithSwapVM",
+    inputs: [
+      ...routerAbi[0].inputs,
+      { name: "makerTraits", type: "uint256" },
+      { name: "orderData", type: "bytes" },
+      { name: "takerTraitsAndData", type: "bytes" },
+    ],
+  } as const;
+  const decoded = decodeFunctionData({
+    abi: [routerAbi[0], executeWithSwapVMAbi],
+    data: data as Hex,
+  });
+  if (
+    decoded.functionName !== "execute" &&
+    decoded.functionName !== "executeWithSwapVM"
+  )
     throw new Error("Delegated action is not the approved router method");
   const [intent, , proposal] = decoded.args as readonly [
     DecodedIntent,
@@ -268,7 +306,12 @@ function decodeExecute(data: string): {
     ...unknown[],
   ];
   if (!intent || !proposal) throw new Error("Router calldata is incomplete");
-  return { intent, proposal, args: decoded.args };
+  return {
+    functionName: decoded.functionName,
+    intent,
+    proposal,
+    args: decoded.args,
+  };
 }
 
 function assertAction(
@@ -304,6 +347,10 @@ function assertAction(
     throw new Error("Delegated input cap exceeded");
 
   const decoded = decodeExecute(action.data);
+  if (decoded.functionName !== (policy.routerMethod ?? "execute"))
+    throw new Error(
+      "Delegated router method is not the approved settlement path",
+    );
   if (
     decoded.intent.trader.toLowerCase() !== action.trader.toLowerCase() ||
     decoded.intent.traderInputToken.toLowerCase() !==
@@ -327,8 +374,22 @@ function assertAction(
     );
   if (
     encodeFunctionData({
-      abi: routerAbi,
-      functionName: "execute",
+      abi:
+        decoded.functionName === "execute"
+          ? routerAbi
+          : [
+              {
+                ...routerAbi[0],
+                name: "executeWithSwapVM",
+                inputs: [
+                  ...routerAbi[0].inputs,
+                  { name: "makerTraits", type: "uint256" },
+                  { name: "orderData", type: "bytes" },
+                  { name: "takerTraitsAndData", type: "bytes" },
+                ],
+              },
+            ],
+      functionName: decoded.functionName,
       args: decoded.args as never,
     }).toLowerCase() !== action.data.toLowerCase()
   )
@@ -902,6 +963,7 @@ export class PrivyDelegatedExecutionAdapter implements DelegatedWalletAdapter {
 
   async getReceipt(
     transactionHash: string,
+    expectation?: DelegatedReceiptExpectation,
   ): Promise<DelegatedExecutionReceipt | null> {
     if (!/^0x[0-9a-fA-F]{64}$/.test(transactionHash))
       throw new Error("Malformed transaction hash");
@@ -914,16 +976,190 @@ export class PrivyDelegatedExecutionAdapter implements DelegatedWalletAdapter {
     const receipt = value as {
       transactionHash?: unknown;
       blockNumber?: unknown;
+      blockHash?: unknown;
       status?: unknown;
+      logs?: unknown;
     };
-    const hash = asHex(receipt.transactionHash, "receipt transaction hash");
-    const blockNumber = asHex(receipt.blockNumber, "receipt block number");
+    let hash: string;
+    let blockNumber: string;
+    let blockHash: string;
+    try {
+      hash = asHex(receipt.transactionHash, "receipt transaction hash");
+      blockNumber = asHex(receipt.blockNumber, "receipt block number");
+      blockHash = asHex(receipt.blockHash, "receipt block hash");
+    } catch {
+      throw new DelegatedBroadcastUnknownError(
+        "Canonical transaction receipt is malformed",
+      );
+    }
     if (
       hash.toLowerCase() !== transactionHash.toLowerCase() ||
+      !/^0x[0-9a-fA-F]{64}$/.test(blockHash) ||
       (receipt.status !== "0x1" && receipt.status !== "0x0")
     )
-      throw new Error("Malformed transaction receipt");
-    return { transactionHash: hash, blockNumber, status: receipt.status };
+      throw new DelegatedBroadcastUnknownError(
+        "Canonical transaction receipt is malformed",
+      );
+
+    if (expectation) {
+      if (
+        !Number.isSafeInteger(expectation.chainId) ||
+        expectation.chainId <= 0 ||
+        !/^0x[0-9a-fA-F]{40}$/.test(expectation.from) ||
+        !/^0x[0-9a-fA-F]{40}$/.test(expectation.to) ||
+        !/^0x[0-9a-fA-F]*$/.test(expectation.data) ||
+        !/^(0|[1-9][0-9]*)$/.test(expectation.value)
+      )
+        throw new Error("Malformed receipt expectation");
+      const chain = asQuantity(
+        await this.options.rpc.request("eth_chainId", []),
+        "receipt chain ID",
+      );
+      if (chain !== BigInt(expectation.chainId))
+        throw new DelegatedBroadcastUnknownError(
+          "Receipt RPC chain does not match the reviewed transaction",
+        );
+      const transactionValue = await this.options.rpc.request(
+        "eth_getTransactionByHash",
+        [transactionHash],
+      );
+      if (!transactionValue || typeof transactionValue !== "object")
+        throw new DelegatedBroadcastUnknownError(
+          "Broadcast transaction is not available for reconciliation",
+        );
+      const tx = transactionValue as {
+        hash?: unknown;
+        blockHash?: unknown;
+        blockNumber?: unknown;
+        from?: unknown;
+        to?: unknown;
+        input?: unknown;
+        data?: unknown;
+        value?: unknown;
+        chainId?: unknown;
+      };
+      const txData = typeof tx.input === "string" ? tx.input : tx.data;
+      let txValue: bigint;
+      let txChainId: bigint | undefined;
+      try {
+        if (typeof tx.value !== "string") throw new Error("missing value");
+        txValue = BigInt(tx.value);
+        if (tx.chainId !== undefined) {
+          if (typeof tx.chainId !== "string") throw new Error("invalid chain");
+          txChainId = BigInt(tx.chainId);
+        }
+      } catch {
+        throw new DelegatedBroadcastUnknownError(
+          "Canonical transaction has malformed quantities",
+        );
+      }
+      if (
+        typeof tx.hash !== "string" ||
+        tx.hash.toLowerCase() !== transactionHash.toLowerCase() ||
+        typeof tx.blockHash !== "string" ||
+        tx.blockHash.toLowerCase() !== blockHash.toLowerCase() ||
+        typeof tx.blockNumber !== "string" ||
+        tx.blockNumber.toLowerCase() !== blockNumber.toLowerCase() ||
+        typeof tx.from !== "string" ||
+        tx.from.toLowerCase() !== expectation.from.toLowerCase() ||
+        typeof tx.to !== "string" ||
+        tx.to.toLowerCase() !== expectation.to.toLowerCase() ||
+        typeof txData !== "string" ||
+        txData.toLowerCase() !== expectation.data.toLowerCase() ||
+        txValue !== BigInt(expectation.value) ||
+        (txChainId !== undefined && txChainId !== BigInt(expectation.chainId))
+      )
+        throw new DelegatedBroadcastUnknownError(
+          "Canonical transaction does not match the reviewed transaction",
+        );
+      const blockValue = await this.options.rpc.request("eth_getBlockByHash", [
+        blockHash,
+        false,
+      ]);
+      if (!blockValue || typeof blockValue !== "object")
+        throw new DelegatedBroadcastUnknownError(
+          "Transaction block is no longer canonical",
+        );
+      const block = blockValue as { hash?: unknown; number?: unknown };
+      if (
+        typeof block.hash !== "string" ||
+        block.hash.toLowerCase() !== blockHash.toLowerCase() ||
+        typeof block.number !== "string" ||
+        block.number.toLowerCase() !== blockNumber.toLowerCase()
+      )
+        throw new DelegatedBroadcastUnknownError(
+          "Transaction block is no longer canonical",
+        );
+
+      if (receipt.status === "0x1" && expectation.trade) {
+        if (!Array.isArray(receipt.logs))
+          throw new DelegatedBroadcastUnknownError(
+            "Successful settlement receipt has no canonical logs",
+          );
+        const topic = protocolEventTopic("TradeExecuted").toLowerCase();
+        const matches = receipt.logs.filter((item) => {
+          if (!item || typeof item !== "object") return false;
+          const log = item as {
+            address?: unknown;
+            topics?: unknown;
+            data?: unknown;
+          };
+          return (
+            typeof log.address === "string" &&
+            log.address.toLowerCase() ===
+              expectation.trade!.router.toLowerCase() &&
+            Array.isArray(log.topics) &&
+            typeof log.topics[0] === "string" &&
+            log.topics[0].toLowerCase() === topic &&
+            typeof log.data === "string"
+          );
+        });
+        if (matches.length !== 1)
+          throw new DelegatedBroadcastUnknownError(
+            "Successful settlement receipt has no unique TradeExecuted event",
+          );
+        try {
+          const log = matches[0] as {
+            topics: string[];
+            data: string;
+          };
+          const payload = decodeProtocolEventLog(
+            "TradeExecuted",
+            log.topics,
+            log.data,
+          ) as {
+            intentHash: string;
+            proposalHash: string;
+            trader: string;
+            traderInputToken: string;
+            traderOutputToken: string;
+          };
+          if (
+            payload.intentHash.toLowerCase() !==
+              expectation.trade.intentHash.toLowerCase() ||
+            payload.proposalHash.toLowerCase() !==
+              expectation.trade.proposalHash.toLowerCase() ||
+            payload.trader.toLowerCase() !==
+              expectation.trade.trader.toLowerCase() ||
+            payload.traderInputToken.toLowerCase() !==
+              expectation.trade.inputToken.toLowerCase() ||
+            payload.traderOutputToken.toLowerCase() !==
+              expectation.trade.outputToken.toLowerCase()
+          )
+            throw new Error("TradeExecuted payload mismatch");
+        } catch {
+          throw new DelegatedBroadcastUnknownError(
+            "TradeExecuted event does not match the reviewed settlement",
+          );
+        }
+      }
+    }
+    return {
+      transactionHash: hash,
+      blockNumber,
+      blockHash,
+      status: receipt.status,
+    };
   }
 
   async revoke(): Promise<void> {

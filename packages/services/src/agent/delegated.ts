@@ -21,7 +21,7 @@ import {
 } from "@aurka/shared";
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
-import { hashTypedData, recoverAddress } from "viem";
+import { encodeFunctionData, hashTypedData, recoverAddress } from "viem";
 
 import {
   createDelegatedPrivyClient,
@@ -32,6 +32,7 @@ import {
   type DelegatedIntentTypedData,
   type DelegatedChainRpc,
   type DelegatedPrivyAdapterOptions,
+  type DelegatedReceiptExpectation,
   type DelegatedWalletAdapter,
 } from "@aurka/wallet";
 import { hashBytes } from "../solver/hash.js";
@@ -41,6 +42,19 @@ import type { SolverSnapshot } from "../solver/types.js";
 type WalletAuthorizationContext = Parameters<
   DelegatedWalletAdapter["signIntent"]
 >[1];
+
+const erc20TransferAbi = [
+  {
+    type: "function",
+    name: "transfer",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "to", type: "address" },
+      { name: "amount", type: "uint256" },
+    ],
+    outputs: [{ name: "", type: "bool" }],
+  },
+] as const;
 
 export interface DelegatedAgentProposalSource {
   propose(input: {
@@ -258,6 +272,69 @@ function nowSeconds(): number {
 
 function sameAddress(a: string, b: string): boolean {
   return a.toLowerCase() === b.toLowerCase();
+}
+
+function tradeReceiptExpectation(input: {
+  readonly chainId: number;
+  readonly trader: string;
+  readonly to: string;
+  readonly data: string;
+  readonly value: string;
+  readonly intentHash: string;
+  readonly proposalHash: string;
+  readonly inputToken: string;
+  readonly outputToken: string;
+}): DelegatedReceiptExpectation {
+  return {
+    chainId: input.chainId,
+    from: input.trader,
+    to: input.to,
+    data: input.data,
+    value: input.value,
+    trade: {
+      router: input.to,
+      intentHash: input.intentHash,
+      proposalHash: input.proposalHash,
+      trader: input.trader,
+      inputToken: input.inputToken,
+      outputToken: input.outputToken,
+    },
+  };
+}
+
+function recoveryReceiptExpectation(
+  chainId: number,
+  from: string,
+  destination: string,
+  asset: DelegatedRecoveryAsset,
+): DelegatedReceiptExpectation {
+  return {
+    chainId,
+    from,
+    to: asset.token,
+    data: encodeFunctionData({
+      abi: erc20TransferAbi,
+      functionName: "transfer",
+      args: [destination as `0x${string}`, BigInt(asset.amount)],
+    }),
+    value: "0",
+  };
+}
+
+function storedReceiptExpectation(
+  value: unknown,
+): DelegatedReceiptExpectation | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const item = value as Record<string, unknown>;
+  if (
+    typeof item.chainId !== "number" ||
+    typeof item.from !== "string" ||
+    typeof item.to !== "string" ||
+    typeof item.data !== "string" ||
+    typeof item.value !== "string"
+  )
+    return undefined;
+  return item as unknown as DelegatedReceiptExpectation;
 }
 
 function settlementIntentTypedData(
@@ -883,6 +960,21 @@ export class DelegatedSessionService {
         ),
         policyFingerprint: wallet.policyFingerprint!,
       } as const;
+      const receiptExpectation = tradeReceiptExpectation({
+        chainId: action.chainId,
+        trader: action.trader,
+        to: action.to,
+        data: action.data,
+        value: action.value,
+        intentHash: action.intentHash,
+        proposalHash: action.proposalHash,
+        inputToken: action.inputToken,
+        outputToken: action.outputToken,
+      });
+      this.service.repository.setDelegatedTradeReceiptExpectation(
+        trade.id,
+        receiptExpectation,
+      );
       const sent = await this.withWalletOperation(async () => {
         if (!this.isAuthorityCurrent(id, authorityGeneration))
           throw new ServiceError(
@@ -912,7 +1004,10 @@ export class DelegatedSessionService {
           lastResult: "Submitted to Privy; awaiting chain receipt",
         },
       );
-      const receipt = await this.wallet.getReceipt(sent.transactionHash);
+      const receipt = await this.wallet.getReceipt(
+        sent.transactionHash,
+        receiptExpectation,
+      );
       if (receipt) {
         const status = receipt.status === "0x1" ? "CONFIRMED" : "REVERTED";
         this.service.repository.updateDelegatedTrade(trade.id, {
@@ -1123,6 +1218,12 @@ export class DelegatedSessionService {
         "Stop and revoke the delegated session before recovering funds",
         409,
       );
+    if (session.state === "REVOKE_PENDING")
+      throw new ServiceError(
+        "DELEGATED_REVOKE_PENDING",
+        "Remote Privy revoke is still pending; retry Stop before recovering funds",
+        409,
+      );
     if (session.state === "RECONCILIATION_REQUIRED")
       throw new ServiceError(
         "DELEGATED_RECONCILIATION_REQUIRED",
@@ -1231,6 +1332,13 @@ export class DelegatedSessionService {
         409,
       );
     try {
+      const recoveryAsset = request.assets[0];
+      if (!recoveryAsset)
+        throw new ServiceError(
+          "DELEGATED_RECOVERY_ASSET",
+          "Recovery requires one reviewed token",
+          400,
+        );
       const result = await this.wallet.recover({
         sessionId: session.id,
         ownerAddress: session.plan.ownerAddress,
@@ -1249,7 +1357,15 @@ export class DelegatedSessionService {
           409,
         );
       }
-      const receipt = await this.wallet.getReceipt(result.transactionHash);
+      const receipt = await this.wallet.getReceipt(
+        result.transactionHash,
+        recoveryReceiptExpectation(
+          session.plan.chainId,
+          session.wallet.address!,
+          request.destination,
+          recoveryAsset,
+        ),
+      );
       this.service.repository.updateDelegatedRecovery(authorizationHash, {
         status:
           receipt?.status === "0x1"
@@ -1301,7 +1417,12 @@ export class DelegatedSessionService {
         !trade.transactionHash
       )
         continue;
-      const receipt = await this.wallet.getReceipt(trade.transactionHash);
+      const receipt = await this.wallet.getReceipt(
+        trade.transactionHash,
+        storedReceiptExpectation(
+          this.service.repository.getDelegatedTradeReceiptExpectation(trade.id),
+        ),
+      );
       if (!receipt) continue;
       const status = receipt.status === "0x1" ? "CONFIRMED" : "REVERTED";
       this.service.repository.updateDelegatedTrade(trade.id, {
@@ -1334,7 +1455,26 @@ export class DelegatedSessionService {
     )) {
       if (recovery.status !== "SUBMITTED" || !recovery.transactionHash)
         continue;
-      const receipt = await this.wallet.getReceipt(recovery.transactionHash);
+      let recoveryExpectation: DelegatedReceiptExpectation | undefined;
+      try {
+        const assets = JSON.parse(
+          recovery.assetsJson,
+        ) as DelegatedRecoveryAsset[];
+        const asset = assets[0];
+        if (asset)
+          recoveryExpectation = recoveryReceiptExpectation(
+            session.plan.chainId,
+            session.wallet.address!,
+            recovery.destination,
+            asset,
+          );
+      } catch {
+        recoveryExpectation = undefined;
+      }
+      const receipt = await this.wallet.getReceipt(
+        recovery.transactionHash,
+        recoveryExpectation,
+      );
       if (!receipt) continue;
       const status = receipt.status === "0x1" ? "CONFIRMED" : "REVERTED";
       this.service.repository.updateDelegatedRecovery(

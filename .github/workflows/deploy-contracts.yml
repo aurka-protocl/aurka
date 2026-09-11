@@ -36,6 +36,7 @@ jobs:
 
       - name: Build and test
         run: |
+          node contracts/script/build-upstream.mjs
           forge build --sizes
           forge test
 

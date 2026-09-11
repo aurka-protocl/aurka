@@ -1,0 +1,189 @@
+{
+  "scenario": "TASK1009-003 space price recovery",
+  "integrationMode": "fixture-upstream",
+  "oracleKind": "MOCK_ORACLE",
+  "aquaKind": "MOCK_AQUA",
+  "executionEngine": "AURKA_UPSTREAM_LIMIT_SWAP_V1",
+  "fork": {
+    "chainId": 31337,
+    "forkBlock": 22400000,
+    "deploymentBlock": 22400097,
+    "deploymentBlockHash": "0xd3ea750e19296500dd96f2fdfdedbd7af01c93c1d9afb97f9eecbbb1abdf2f67"
+  },
+  "contracts": {
+    "oracle": "0xc91b651f770ed996a223a16da9ccd6f7df56c987",
+    "aqua": "0x934a389cabfb84cdb3f0260b2a4fd575b8b345a3",
+    "aquaApp": "0xB90AcF57C3BFE8e0E8215defc282B5F48b3edC74",
+    "router": "0x787c6666213624d788522d516847978d7f348902",
+    "vaultFactory": "0xaf7868a9bb72e16b930d50636519038d7f057470",
+    "swapVM": "0xb90acf57c3bfe8e0e8215defc282b5f48b3edc74",
+    "usdc": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+    "weth": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+    "swapVMUpstreamCommit": "afd99c408b4ed610027f4426c6f98650acac9f5f",
+    "aquaUpstreamCommit": "9c5c42e5840e8741fba3597c48456c9510212b66"
+  },
+  "oldSpace": {
+    "id": "space:price-recovery-old",
+    "owner": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+    "vault": "0x8aF2a23A9405F2B8A7411Ee4943668f0E0fD59c1",
+    "strategyHash": "0xbb4e1d7a7e4dd16310ed0a7015b432317529b70ef786070508bd0e8e398fe3be",
+    "before": {
+      "spaceId": "space:price-recovery-old",
+      "owner": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+      "vault": "0x8aF2a23A9405F2B8A7411Ee4943668f0E0fD59c1",
+      "aqua": "0x934a389cabfb84cdb3f0260b2a4fd575b8b345a3",
+      "aquaApp": "0xB90AcF57C3BFE8e0E8215defc282B5F48b3edC74",
+      "strategyHash": "0xbb4e1d7a7e4dd16310ed0a7015b432317529b70ef786070508bd0e8e398fe3be",
+      "tokens": {
+        "usdc": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+        "weth": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+      },
+      "aquaBalances": {
+        "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48": {
+          "balance": "24000000000",
+          "tokensCount": 2
+        },
+        "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2": {
+          "balance": "4000000000000000000",
+          "tokensCount": 2
+        }
+      },
+      "vaultBalances": {
+        "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48": "24000000000",
+        "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2": "4000000000000000000"
+      },
+      "ownerBalances": {
+        "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48": "46000000000",
+        "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2": "6000000000000000000"
+      }
+    },
+    "afterDock": {
+      "spaceId": "space:price-recovery-old",
+      "owner": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+      "vault": "0x8aF2a23A9405F2B8A7411Ee4943668f0E0fD59c1",
+      "aqua": "0x934a389cabfb84cdb3f0260b2a4fd575b8b345a3",
+      "aquaApp": "0xB90AcF57C3BFE8e0E8215defc282B5F48b3edC74",
+      "strategyHash": "0xbb4e1d7a7e4dd16310ed0a7015b432317529b70ef786070508bd0e8e398fe3be",
+      "tokens": {
+        "usdc": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+        "weth": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+      },
+      "aquaBalances": {
+        "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48": {
+          "balance": "0",
+          "tokensCount": 255
+        },
+        "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2": {
+          "balance": "0",
+          "tokensCount": 255
+        }
+      },
+      "vaultBalances": {
+        "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48": "24000000000",
+        "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2": "4000000000000000000"
+      },
+      "ownerBalances": {
+        "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48": "46000000000",
+        "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2": "6000000000000000000"
+      }
+    },
+    "afterWithdraw": {
+      "spaceId": "space:price-recovery-old",
+      "owner": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+      "vault": "0x8aF2a23A9405F2B8A7411Ee4943668f0E0fD59c1",
+      "aqua": "0x934a389cabfb84cdb3f0260b2a4fd575b8b345a3",
+      "aquaApp": "0xB90AcF57C3BFE8e0E8215defc282B5F48b3edC74",
+      "strategyHash": "0xbb4e1d7a7e4dd16310ed0a7015b432317529b70ef786070508bd0e8e398fe3be",
+      "tokens": {
+        "usdc": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+        "weth": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+      },
+      "aquaBalances": {
+        "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48": {
+          "balance": "0",
+          "tokensCount": 255
+        },
+        "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2": {
+          "balance": "0",
+          "tokensCount": 255
+        }
+      },
+      "vaultBalances": {
+        "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48": "0",
+        "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2": "0"
+      },
+      "ownerBalances": {
+        "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48": "70000000000",
+        "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2": "10000000000000000000"
+      }
+    },
+    "afterRestart": {
+      "spaceId": "space:price-recovery-old",
+      "owner": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+      "vault": "0x8aF2a23A9405F2B8A7411Ee4943668f0E0fD59c1",
+      "aqua": "0x934a389cabfb84cdb3f0260b2a4fd575b8b345a3",
+      "aquaApp": "0xB90AcF57C3BFE8e0E8215defc282B5F48b3edC74",
+      "strategyHash": "0xbb4e1d7a7e4dd16310ed0a7015b432317529b70ef786070508bd0e8e398fe3be",
+      "tokens": {
+        "usdc": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+        "weth": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+      },
+      "aquaBalances": {
+        "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48": {
+          "balance": "0",
+          "tokensCount": 255
+        },
+        "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2": {
+          "balance": "0",
+          "tokensCount": 255
+        }
+      },
+      "vaultBalances": {
+        "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48": "0",
+        "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2": "0"
+      },
+      "ownerBalances": {
+        "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48": "70000000000",
+        "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2": "10000000000000000000"
+      }
+    }
+  },
+  "replacementSpace": {
+    "id": "space:price-recovery-replacement",
+    "owner": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+    "vault": "0x0EDd8f1e021AEc17063ec8bc063c044b37549D5F",
+    "strategyHash": "0x13b341f202d8e61d6f5f36362923fd3980b57c4e3db7985e747daace2f555541",
+    "capacity": {
+      "id": "0x7c8b23828bf466a5cb0f6f8c3dbaa477817719ceaaec41036947de530655a7fe",
+      "baseline": "5000",
+      "consumed": "0",
+      "authorized": true
+    },
+    "freshTradeCapacity": {
+      "id": "0x7c8b23828bf466a5cb0f6f8c3dbaa477817719ceaaec41036947de530655a7fe",
+      "baseline": "5000",
+      "consumed": "1000",
+      "authorized": false
+    }
+  },
+  "typedGuard": {
+    "changedOutputPrice": "2",
+    "freshSnapshot": true,
+    "state": "PRICING_NEEDS_RENEWAL",
+    "executable": false,
+    "errorCode": "PRICING_RENEWAL_REQUIRED",
+    "oldProposalBlocked": true
+  },
+  "transactions": {
+    "oldCreation": "0x807c0dee26b494db37ccef3cdeba4897217331de5eabef0390e0f4aafc573ab9",
+    "priceChange": "0x2159afa11883dbc5e8ae55d02806b5e4cd2b6cf75342e0396cbdd3b4feb6f20a",
+    "pause": "0x2258efef8341183f7a4c74febedbd910ac99f011500109a1fa71888302099fa5",
+    "dock": "0x24041226fbf6809c295680e346da2af2a0f17396aff6898be1d90924e4426058",
+    "withdrawUsdc": "0x46064819894399131494fb5f7cc18b8efd766f900db5e11b84bbde6b9d522db5",
+    "withdrawWeth": "0xf08fa87dc9a195f0662b3d35279c7a3d2812bed07646744f545cddf65742fd91",
+    "replacementCreation": "0x6edc11ac443db2ade8e606104e5b412abe93cb3af9bb12e51f05af23e6c08d1c",
+    "replacementInputApproval": "0x1b26a2c91272a5b64ae8d7149d5300c1afb1f5d67e7a0590b756da63c831f190",
+    "freshTrade": "0xf38563159408e6c9b2429352f1ec2a8dec81113fb6d200c897e7e352c3466af3"
+  },
+  "limitations": "Controlled MockPriceOracle/MockAqua proof on an isolated local Anvil fork; it is not a live Chainlink update or a production recovery claim."
+}

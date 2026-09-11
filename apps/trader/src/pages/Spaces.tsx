@@ -6,13 +6,9 @@ import {
   formatValueAmount,
   snapshotFreshness,
 } from "@aurka/shared";
-import { appMode } from "../config";
 import { spaceAdapter, spaceUrl, type SpaceRecord } from "../domain/spaces";
+import { lifecycleLabel, shortAddress, userFacingError } from "../ui";
 import { useWallet } from "../wallet";
-
-function shortAddress(value: string): string {
-  return `${value.slice(0, 6)}…${value.slice(-4)}`;
-}
 
 function SpaceCard({ space }: { readonly space: SpaceRecord }) {
   const snapshot = space.position?.currentPortfolio;
@@ -29,11 +25,13 @@ function SpaceCard({ space }: { readonly space: SpaceRecord }) {
       ? "border-emerald-800 bg-emerald-950/30 text-emerald-300"
       : space.identity.state === "PAUSED"
         ? "border-amber-800 bg-amber-950/30 text-amber-300"
-        : space.identity.state === "REACTIVATION_REQUIRED"
+        : space.identity.state === "PRICING_NEEDS_RENEWAL"
           ? "border-amber-800 bg-amber-950/30 text-amber-300"
-          : space.identity.state === "FAILED"
-            ? "border-red-800 bg-red-950/30 text-red-300"
-            : "border-slate-700 bg-slate-950 text-slate-300";
+          : space.identity.state === "REACTIVATION_REQUIRED"
+            ? "border-amber-800 bg-amber-950/30 text-amber-300"
+            : space.identity.state === "FAILED"
+              ? "border-red-800 bg-red-950/30 text-red-300"
+              : "border-slate-700 bg-slate-950 text-slate-300";
   return (
     <article className="min-w-0 rounded-2xl border border-slate-700 bg-slate-900 p-5 transition hover:border-cyan-700 sm:p-6">
       <div className="flex items-start justify-between gap-4">
@@ -46,15 +44,12 @@ function SpaceCard({ space }: { readonly space: SpaceRecord }) {
               {space.identity.name}
             </h2>
             <p className="mt-1 text-sm text-slate-400">
-              {space.identity.ownerAddress
-                ? `Owner ${shortAddress(space.identity.ownerAddress)} · `
-                : ""}
-              chain {space.identity.chainId}
+              Owner-controlled Space
             </p>
           </div>
         </div>
         <span className="shrink-0 rounded-full border border-slate-700 px-2.5 py-1 text-[11px] text-slate-400">
-          {space.identity.state}
+          {lifecycleLabel(space.identity.state)}
         </span>
       </div>
 
@@ -65,7 +60,7 @@ function SpaceCard({ space }: { readonly space: SpaceRecord }) {
           </dt>
           <dd className="mt-1 font-semibold text-cyan-200">
             {snapshot
-              ? `${formatValueAmount(snapshot.nav, snapshot.valueDecimals)} value units`
+              ? `${formatValueAmount(snapshot.nav, snapshot.valueDecimals)} normalized value units`
               : space.draft
                 ? "Not deployed"
                 : "Unavailable"}
@@ -81,13 +76,13 @@ function SpaceCard({ space }: { readonly space: SpaceRecord }) {
         </div>
         <div>
           <dt className="text-xs uppercase tracking-wide text-slate-500">
-            Snapshot
+            Holdings status
           </dt>
           <dd
             className={`mt-1 font-semibold ${freshness === "stale" ? "text-amber-300" : "text-emerald-300"}`}
           >
             {snapshot
-              ? `${freshness === "stale" ? "Stale" : "Observed"} · ${formatSnapshotAge(snapshot.observedAt, now)}`
+              ? `${freshness === "stale" ? "Needs refresh" : "Updated"} · ${formatSnapshotAge(snapshot.observedAt, now)}`
               : space.identity.state === "DRAFT"
                 ? "Save complete · activation pending"
                 : "Unavailable"}
@@ -99,11 +94,7 @@ function SpaceCard({ space }: { readonly space: SpaceRecord }) {
         <span
           className={`rounded-full border px-2.5 py-1 text-[11px] ${stateClass}`}
         >
-          {space.identity.state === "PENDING"
-            ? "Deployment pending"
-            : space.identity.state === "REACTIVATION_REQUIRED"
-              ? "Reactivate trading"
-              : space.identity.state}
+          {lifecycleLabel(space.identity.state)}
         </span>
         <Link
           to={spaceUrl(space.identity.id)}
@@ -142,7 +133,7 @@ export default function Spaces() {
         if (active)
           setError(
             requestError instanceof Error
-              ? requestError.message
+              ? userFacingError(requestError, "Spaces could not be loaded")
               : "Spaces could not be loaded",
           );
       })
@@ -232,11 +223,24 @@ export default function Spaces() {
         </div>
       )}
 
-      <p className="text-xs text-slate-500">
-        {appMode === "fork"
-          ? "Fork balances and policy state are read from the local chain; test funds only."
-          : "This local demo uses a configured example Space. Values retain their declared units."}
-      </p>
+      {spaces.length > 0 && (
+        <details className="rounded-xl border border-slate-800 bg-slate-950/40 p-4 text-sm text-slate-400">
+          <summary className="cursor-pointer font-medium text-slate-300">
+            Space details
+          </summary>
+          <div className="mt-3 grid gap-3 sm:grid-cols-2">
+            {spaces.map((space) => (
+              <div key={space.identity.id}>
+                <p className="text-slate-500">{space.identity.name}</p>
+                <p className="mt-1 break-all">
+                  Owner {shortAddress(space.identity.ownerAddress)} · chain{" "}
+                  {space.identity.chainId}
+                </p>
+              </div>
+            ))}
+          </div>
+        </details>
+      )}
     </section>
   );
 }

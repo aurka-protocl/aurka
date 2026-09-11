@@ -73,6 +73,7 @@ import type {
   SolverSnapshotProvider,
 } from "./solver/types.js";
 import { Eip1193RouterSimulator, type Eip1193Transport } from "./solver/rpc.js";
+import { buildUpstreamSwapVMStrategy } from "./solver/upstream.js";
 import { hashTypedData } from "viem";
 import { RiskService } from "./risk-service.js";
 import {
@@ -276,6 +277,33 @@ export class AurkaService {
       }
       return snapshot;
     };
+    const validateUpstreamPricing = (
+      snapshot: SolverSnapshot,
+      intent: AtomicSettlementIntent,
+    ): void => {
+      if (!snapshot.swapVMGuard) return;
+      const expected = buildUpstreamSwapVMStrategy(
+        snapshot,
+        intent.traderInputToken,
+        intent.traderOutputToken,
+      ).strategyHash;
+      if (expected.toLowerCase() !== snapshot.aquaStrategyHash.toLowerCase()) {
+        throw new ServiceError(
+          "PRICING_RENEWAL_REQUIRED",
+          "Pricing needs renewal: this fixed-price Space no longer matches its shipped SwapVM strategy",
+          409,
+          {
+            positionId: snapshot.positionId,
+            state: "PRICING_NEEDS_RENEWAL",
+            shippedStrategyHash: snapshot.aquaStrategyHash,
+            currentStrategyHash: expected,
+            executable: false,
+            recovery:
+              "Pause the old Space, dock its Aqua strategy, withdraw the exact vault balances, and create a new owner-controlled Space with a new identity.",
+          },
+        );
+      }
+    };
     this.provider = {
       ...(sourceProvider.getPositionSnapshot
         ? {
@@ -304,6 +332,25 @@ export class AurkaService {
           }
         : {}),
       getSnapshot: async (intent) => {
+        // Check the authoritative current snapshot before asking a chain
+        // adapter to validate the intent's old balance/price commitment. A
+        // fixed-price SwapVM Space must report typed renewal before a generic
+        // stale-snapshot error can hide the recovery instruction.
+        if (sourceProvider.getPositionSnapshot) {
+          const knownSpace = this.repository
+            .listSpaces(1_000)
+            .items.find(
+              (space) =>
+                hashBytes(space.identity.id).toLowerCase() ===
+                intent.positionIdHash.toLowerCase(),
+            );
+          const current = await sourceProvider.getPositionSnapshot(
+            knownSpace?.identity.id ?? intent.positionIdHash,
+          );
+          const validatedCurrent = validateSnapshot(current);
+          this.assertTradingSnapshotFresh(validatedCurrent);
+          validateUpstreamPricing(validatedCurrent, intent);
+        }
         const snapshot = await sourceProvider.getSnapshot(intent);
         const space = this.repository.getSpace(snapshot.positionId);
         if (space?.identity.state === "PAUSED")
@@ -315,6 +362,7 @@ export class AurkaService {
         const validated = validateSnapshot(snapshot);
         if (sourceProvider.getPositionSnapshot)
           this.assertTradingSnapshotFresh(validated);
+        validateUpstreamPricing(validated, intent);
         return validated;
       },
     };

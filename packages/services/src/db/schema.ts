@@ -413,6 +413,10 @@ export const delegatedTrades = sqliteTable(
     inputAmount: text("input_amount").notNull(),
     status: text("status").notNull(),
     idempotencyKey: text("idempotency_key").notNull(),
+    // Stored before the broadcast boundary so restart reconciliation can
+    // validate the canonical transaction and settlement event, not only its
+    // hash.
+    receiptExpectationJson: text("receipt_expectation_json"),
     transactionHash: text("transaction_hash"),
     error: text("error"),
     createdAt: createdAt(),

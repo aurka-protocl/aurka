@@ -199,6 +199,57 @@ function transactionRule(rule, method, to) {
   );
 }
 
+function routerMethod() {
+  const configured =
+    value("PRIVY_DELEGATED_ROUTER_METHOD") ?? "executeWithSwapVM";
+  if (configured !== "execute" && configured !== "executeWithSwapVM")
+    throw new Error(
+      "PRIVY_DELEGATED_ROUTER_METHOD must be execute or executeWithSwapVM",
+    );
+  return configured;
+}
+
+function routerExecutionAbi() {
+  return [
+    {
+      type: "function",
+      name: routerMethod(),
+      stateMutability: "nonpayable",
+      inputs: [
+        { name: "intent", type: "tuple" },
+        { name: "intentSignature", type: "bytes" },
+        { name: "proposal", type: "tuple" },
+        { name: "proposalSignature", type: "bytes" },
+        { name: "assets", type: "tuple[]" },
+        { name: "epoch", type: "tuple" },
+        { name: "priceInput", type: "tuple" },
+        { name: "directProgram", type: "bytes" },
+        ...(routerMethod() === "executeWithSwapVM"
+          ? [
+              { name: "makerTraits", type: "uint256" },
+              { name: "orderData", type: "bytes" },
+              { name: "takerTraitsAndData", type: "bytes" },
+            ]
+          : []),
+      ],
+    },
+  ];
+}
+
+function exactRouterRule(rule, method) {
+  return (
+    transactionRule(rule, method, value("PRIVY_DELEGATED_ROUTER")) &&
+    calldataCondition(
+      rule,
+      "function_name",
+      "eq",
+      routerMethod(),
+      routerExecutionAbi(),
+      routerMethod(),
+    )
+  );
+}
+
 function exactApprovalRule(rule, method) {
   const router = value("PRIVY_DELEGATED_ROUTER");
   const maximum = value("PRIVY_DELEGATED_MAX_INPUT_AMOUNT");
@@ -269,7 +320,12 @@ function exactRecoveryRule(rule, method, token) {
   );
 }
 
-function assertReadback(wallet, policy, recoveryPolicy) {
+function assertReadback(
+  wallet,
+  policy,
+  recoveryPolicy,
+  { requireSigner = true } = {},
+) {
   const ownerId = value("PRIVY_DELEGATED_OWNER_ID");
   const signerId = value("PRIVY_DELEGATED_SIGNER_ID");
   const policyId = value("PRIVY_DELEGATED_POLICY_ID");
@@ -290,21 +346,24 @@ function assertReadback(wallet, policy, recoveryPolicy) {
     ? wallet.additional_signers.find((item) => item?.signer_id === signerId)
     : undefined;
   if (
-    !Array.isArray(wallet.additional_signers) ||
-    wallet.additional_signers.length !== 1 ||
-    !signer
+    requireSigner &&
+    (!Array.isArray(wallet.additional_signers) ||
+      wallet.additional_signers.length !== 1 ||
+      !signer)
   )
     throw new Error("approved delegated additional signer is not attached");
-  try {
-    exactIds(
-      signer.override_policy_ids,
-      [policyId],
-      "Delegated signer policy override",
-    );
-  } catch {
-    throw new Error(
-      "delegated signer does not have the approved policy override",
-    );
+  if (signer) {
+    try {
+      exactIds(
+        signer.override_policy_ids,
+        [policyId],
+        "Delegated signer policy override",
+      );
+    } catch {
+      throw new Error(
+        "delegated signer does not have the approved policy override",
+      );
+    }
   }
   if (
     policy.id !== policyId ||
@@ -354,9 +413,7 @@ function assertReadback(wallet, policy, recoveryPolicy) {
       rule?.action === "ALLOW" &&
       (rule.method === method || rule.method === "*"),
   );
-  const sendRules = methodRules.filter((rule) =>
-    transactionRule(rule, method, router),
-  );
+  const sendRules = methodRules.filter((rule) => exactRouterRule(rule, method));
   const approvalRules = methodRules.filter((rule) =>
     transactionRule(rule, method, inputToken),
   );
@@ -425,7 +482,7 @@ function policyTemplate() {
       : "eth_sendTransaction";
   return {
     execution: {
-      name: "AURKA delegated direct settlement",
+      name: `AURKA delegated ${routerMethod()} settlement`,
       version: "1.0",
       chain_type: "ethereum",
       rules: [
@@ -449,7 +506,7 @@ function policyTemplate() {
           ],
         },
         {
-          name: "direct settlement execute only",
+          name: `direct settlement ${routerMethod()} only`,
           action: "ALLOW",
           method: transactionMethod,
           conditions: [
@@ -470,6 +527,13 @@ function policyTemplate() {
               field: "chain_id",
               operator: "eq",
               value: `0x${chainId.toString(16)}`,
+            },
+            {
+              field_source: "ethereum_calldata",
+              field: "function_name",
+              abi: routerExecutionAbi(),
+              operator: "eq",
+              value: routerMethod(),
             },
           ],
         },
@@ -655,7 +719,9 @@ async function main() {
   const recoveryPolicy = await client
     .policies()
     .get(value("PRIVY_DELEGATED_RECOVERY_POLICY_ID"));
-  assertReadback(wallet, policy, recoveryPolicy);
+  assertReadback(wallet, policy, recoveryPolicy, {
+    requireSigner: command === "provision",
+  });
   if (command === "deny-test") {
     const chainId = Number(value("PRIVY_DELEGATED_CHAIN_ID") ?? "31337");
     try {

@@ -29,6 +29,7 @@
     "generate:router-fixture": "pnpm build && node scripts/generate-router-calldata-fixture.mjs",
     "integration:local-settlement": "pnpm --dir ../.. integration:local-settlement",
     "integration:graph-node": "pnpm --dir ../.. integration:graph-node",
+    "rpc:proxy": "node scripts/filtered-rpc-proxy.mjs",
     "start": "node --env-file-if-exists=../../.env --import tsx src/cli.ts serve",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit"

@@ -25,6 +25,20 @@ contract VaultTestToken {
     }
 }
 
+contract VaultDockAqua {
+    address public caller;
+    address public app;
+    bytes32 public strategyHash;
+    uint256 public tokenCount;
+
+    function dock(address app_, bytes32 strategyHash_, address[] calldata tokens) external {
+        caller = msg.sender;
+        app = app_;
+        strategyHash = strategyHash_;
+        tokenCount = tokens.length;
+    }
+}
+
 contract AurkaSpaceVaultTest is TestBase {
     function _factory() private returns (AurkaSpaceVaultFactory) {
         return
@@ -61,5 +75,32 @@ contract AurkaSpaceVaultTest is TestBase {
         AurkaSpaceVault(vault).withdraw(address(1), address(2), 10);
         assertTrue(factory.createVault(id) != vault);
         vm.stopPrank();
+    }
+
+    function testOwnerCanDockAquaStrategyForExactRecovery() public {
+        AurkaSpaceVault vault = new AurkaSpaceVault(address(this), address(this));
+        vault.finalizeInitialization();
+        VaultDockAqua aqua = new VaultDockAqua();
+        address[] memory tokens = new address[](2);
+        tokens[0] = address(1);
+        tokens[1] = address(2);
+        bytes32 strategyHash = keccak256("fixed-price-strategy");
+
+        vault.dockAquaStrategy(address(aqua), address(3), strategyHash, tokens);
+
+        assertEq(aqua.caller(), address(vault));
+        assertEq(aqua.app(), address(3));
+        assertEq(aqua.strategyHash(), strategyHash);
+        assertEq(aqua.tokenCount(), 2);
+    }
+
+    function testNonOwnerCannotDockAquaStrategy() public {
+        AurkaSpaceVault vault = new AurkaSpaceVault(address(this), address(this));
+        vault.finalizeInitialization();
+        address[] memory tokens = new address[](1);
+        tokens[0] = address(1);
+        vm.prank(address(0xBAD));
+        vm.expectRevert(AurkaSpaceVault.NotOwner.selector);
+        vault.dockAquaStrategy(address(2), address(3), keccak256("strategy"), tokens);
     }
 }

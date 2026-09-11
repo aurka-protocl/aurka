@@ -63,7 +63,12 @@ function statusForChain(chainId: number | null): WalletStatus {
 }
 
 function friendlyWalletError(error: unknown): string {
-  if (error instanceof Error && error.message.trim()) return error.message;
+  const message = error instanceof Error ? error.message.trim() : "";
+  if (/4001|rejected|denied|cancel/i.test(message))
+    return "The wallet rejected the request. Try again when you are ready.";
+  if (/network|provider|disconnected/i.test(message))
+    return "The wallet connection is unavailable. Unlock it and try again.";
+  if (message) return "The wallet could not complete that request. Try again.";
   return "The wallet request failed. Try again or inspect the wallet details.";
 }
 
@@ -213,7 +218,7 @@ export function WalletStatusControl() {
         {wallet.status === "connected"
           ? `Connected · ${shortAddress(wallet.address ?? "")}`
           : wallet.status === "wrong-network"
-            ? "Switch to AURKA local"
+            ? "Switch to AURKA test network"
             : wallet.status === "unsupported-network"
               ? "Unsupported network"
               : wallet.status === "connecting"
@@ -238,7 +243,7 @@ export function WalletStateMessage() {
   if (wallet.status === "connected") return null;
   const text =
     wallet.status === "wrong-network"
-      ? `Your wallet is on chain ${wallet.chainId ?? "unknown"}. Select AURKA local (chain ${supportedChainId}) in the wallet; AURKA never switches it automatically.`
+      ? `Your wallet is on chain ${wallet.chainId ?? "unknown"}. Select the AURKA test network (chain ${supportedChainId}); AURKA never switches it automatically.`
       : wallet.status === "unsupported-network"
         ? "Install or unlock an Ethereum wallet, then connect it to the supported AURKA network."
         : wallet.status === "error"

@@ -25,4 +25,9 @@ export const supportedChainId =
     ? configuredChainId
     : 31337;
 
-export const environmentLabel = appMode === "fork" ? "Fork demo" : "Local demo";
+export const environmentLabel =
+  appMode === "fork"
+    ? supportedChainId === 11155111
+      ? "Ethereum Sepolia · test funds · demo tokens"
+      : "Test network · test funds"
+    : "Local demo · test data";

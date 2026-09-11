@@ -280,6 +280,7 @@ export class ServiceRepository {
       existingSpace &&
       (existingSpace.state === "DRAFT" ||
         existingSpace.state === "PENDING" ||
+        existingSpace.state === "PRICING_NEEDS_RENEWAL" ||
         existingSpace.state === "FAILED")
         ? existingSpace.state
         : value.policy.paused
@@ -1462,6 +1463,31 @@ export class ServiceRepository {
     return result.changes === 1;
   }
 
+  /** Persist the exact transaction/event shape before any provider call. */
+  setDelegatedTradeReceiptExpectation(id: string, expectation: unknown): void {
+    this.db
+      .update(delegatedTrades)
+      .set({
+        receiptExpectationJson: json(expectation),
+        updatedAt: now(),
+      })
+      .where(eq(delegatedTrades.id, id))
+      .run();
+  }
+
+  getDelegatedTradeReceiptExpectation(id: string): unknown | undefined {
+    const row = this.db
+      .select({
+        receiptExpectationJson: delegatedTrades.receiptExpectationJson,
+      })
+      .from(delegatedTrades)
+      .where(eq(delegatedTrades.id, id))
+      .get();
+    return row?.receiptExpectationJson
+      ? parse<unknown>(row.receiptExpectationJson)
+      : undefined;
+  }
+
   releaseDelegatedTrade(id: string, error?: string): void {
     this.db.transaction((tx) => {
       const trade = tx
@@ -2316,11 +2342,21 @@ export class ServiceRepository {
         : undefined;
     const state =
       typeof change.payload.state === "string" &&
-      ["DRAFT", "PENDING", "ACTIVE", "PAUSED", "FAILED"].includes(
-        change.payload.state,
-      )
+      [
+        "DRAFT",
+        "PENDING",
+        "ACTIVE",
+        "PRICING_NEEDS_RENEWAL",
+        "PAUSED",
+        "FAILED",
+      ].includes(change.payload.state)
         ? (change.payload.state as
-            "DRAFT" | "PENDING" | "ACTIVE" | "PAUSED" | "FAILED")
+            | "DRAFT"
+            | "PENDING"
+            | "ACTIVE"
+            | "PRICING_NEEDS_RENEWAL"
+            | "PAUSED"
+            | "FAILED")
         : undefined;
     const type =
       change.eventType === "SPACE_PAUSED" ||

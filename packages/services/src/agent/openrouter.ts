@@ -142,7 +142,8 @@ type AgentBlockedCode =
   | "TRADE_RULE_REJECTED"
   | "INVALID_TRADE_REQUEST"
   | "SIMULATION_REJECTED"
-  | "SPACE_UNAVAILABLE";
+  | "SPACE_UNAVAILABLE"
+  | "PRICING_RENEWAL_REQUIRED";
 
 type ToolOutcome =
   | {
@@ -278,6 +279,8 @@ function nextActionForBlocked(code: AgentBlockedCode): string {
       return "Include a positive amount and a supported token direction, then try again.";
     case "SIMULATION_REJECTED":
       return "Review the current Space state and request a fresh quote before trying again.";
+    case "PRICING_RENEWAL_REQUIRED":
+      return "Ask the Space owner to complete the documented price-renewal recovery, then request a fresh quote.";
     case "TRADE_RULE_REJECTED":
       return "Review the deterministic reason above, then choose a direction or amount accepted by the current rules and request a fresh quote.";
   }
@@ -291,7 +294,8 @@ function isBlockedCode(
     code === "TRADE_RULE_REJECTED" ||
     code === "INVALID_TRADE_REQUEST" ||
     code === "SIMULATION_REJECTED" ||
-    code === "SPACE_UNAVAILABLE"
+    code === "SPACE_UNAVAILABLE" ||
+    code === "PRICING_RENEWAL_REQUIRED"
   );
 }
 
@@ -459,6 +463,15 @@ function errorText(error: unknown): string {
   return error instanceof Error && error.message.trim()
     ? error.message.slice(0, 500)
     : "The deterministic tool could not complete.";
+}
+
+function isPricingRenewalError(error: unknown): boolean {
+  return (
+    error !== null &&
+    typeof error === "object" &&
+    "code" in error &&
+    error.code === "PRICING_RENEWAL_REQUIRED"
+  );
 }
 
 function throwIfAborted(signal: AbortSignal | undefined): void {
@@ -981,15 +994,17 @@ export class OpenRouterAgent {
           ? "MALFORMED_RESPONSE"
           : message === "The requested tool is not available."
             ? "UNSUPPORTED_CAPABILITY"
-            : /Space (?:was not found|is not active|not available)/i.test(
-                  message,
-                )
-              ? "SPACE_UNAVAILABLE"
-              : name === "simulate_proposal"
-                ? "SIMULATION_REJECTED"
-                : /amount|token|requested|positive/i.test(message)
-                  ? "INVALID_TRADE_REQUEST"
-                  : "TRADE_RULE_REJECTED";
+            : isPricingRenewalError(error)
+              ? "PRICING_RENEWAL_REQUIRED"
+              : /Space (?:was not found|is not active|not available)/i.test(
+                    message,
+                  )
+                ? "SPACE_UNAVAILABLE"
+                : name === "simulate_proposal"
+                  ? "SIMULATION_REJECTED"
+                  : /amount|token|requested|positive/i.test(message)
+                    ? "INVALID_TRADE_REQUEST"
+                    : "TRADE_RULE_REJECTED";
       return { ok: false, error: message, code };
     }
   }

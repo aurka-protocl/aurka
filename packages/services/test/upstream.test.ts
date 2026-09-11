@@ -10,11 +10,13 @@ import { DirectSolver } from "../src/solver/direct.js";
 import { FixtureProposalSigner } from "../src/solver/signing.js";
 import {
   buildUpstreamSwapVMData,
+  buildUpstreamSwapVMStrategy,
   SWAPVM_AQUA_COMMIT,
   SWAPVM_UPSTREAM_COMMIT,
 } from "../src/solver/upstream.js";
 import { buildRouterTransactionRequest } from "../src/solver/calldata.js";
 import { hashIntent } from "../src/solver/hash.js";
+import { AurkaService } from "../src/service.js";
 
 const guard = "0x7777777777777777777777777777777777777777";
 
@@ -95,5 +97,54 @@ describe("pinned upstream SwapVM settlement template", () => {
       hashIntent(fixture.intent, snapshot),
     );
     expect(transaction.data.slice(0, 10)).toBe("0xa9aedf0c");
+  });
+
+  it("blocks quoting when a controlled oracle price no longer matches the shipped strategy", async () => {
+    const fixture = createCanonicalFixture();
+    const current = {
+      ...fixture.snapshot,
+      swapVMGuard: guard,
+    };
+    const shipped = buildUpstreamSwapVMStrategy(
+      current,
+      fixture.intent.traderInputToken,
+      fixture.intent.traderOutputToken,
+    );
+    const changed = {
+      ...current,
+      aquaStrategyHash: shipped.strategyHash,
+      portfolio: {
+        ...current.portfolio,
+        assets: current.portfolio.assets.map((asset) =>
+          asset.token.toLowerCase() ===
+          fixture.intent.traderOutputToken.toLowerCase()
+            ? { ...asset, price: 2n, priceDecimals: 1 }
+            : asset,
+        ),
+      },
+    };
+    const provider = {
+      getPositionSnapshot: async () => changed,
+      getSnapshot: async () => changed,
+    };
+    const service = new AurkaService({
+      provider,
+      seedFixture: false,
+      spaceMode: "fork",
+    });
+    try {
+      await expect(service.quote(fixture.intent)).rejects.toMatchObject({
+        code: "PRICING_RENEWAL_REQUIRED",
+        details: expect.objectContaining({
+          state: "PRICING_NEEDS_RENEWAL",
+          executable: false,
+        }),
+      });
+      expect(
+        service.repository.getIntent(fixture.intent.intentId),
+      ).toBeUndefined();
+    } finally {
+      service.close();
+    }
   });
 });

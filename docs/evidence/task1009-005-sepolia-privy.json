@@ -1,0 +1,75 @@
+{
+  "task": "TASK1009-005",
+  "date": "2026-09-11",
+  "status": "BLOCKED_PRE_DEPLOYMENT",
+  "complete": false,
+  "chain": {
+    "name": "Ethereum Sepolia",
+    "chainId": 11155111,
+    "rpcConfigured": false,
+    "deploymentTransactions": []
+  },
+  "preparedProfile": {
+    "planCommand": "pnpm sepolia:plan",
+    "checkCommand": "pnpm sepolia:check",
+    "deployCommand": "AURKA_SEPOLIA_DEPLOY=true pnpm sepolia:deploy",
+    "manifestPath": "deploy/sepolia/sepolia-deployment.json",
+    "priceModeDefault": "mock",
+    "mockTokens": {
+      "usdcDecimals": 6,
+      "wethDecimals": 18,
+      "faucetBoundary": "MockERC20.mint is operator-controlled and must be labelled demo-only"
+    }
+  },
+  "sourcePins": {
+    "aqua": "9c5c42e5840e8741fba3597c48456c9510212b66",
+    "swapVM": "afd99c408b4ed610027f4426c6f98650acac9f5f",
+    "recommendedRelease102": "32c687c2b73101fc26549e48fa1ff8a4d73afbac",
+    "release102Equivalence": "NOT_REVIEWED"
+  },
+  "checks": {
+    "upstreamArtifactCheck": "PASS",
+    "forgeBuild": "PASS",
+    "traderTypecheck": "PASS",
+    "sepoliaCheck": "PASS_ARTIFACTS_ONLY",
+    "broadcastWithoutOptIn": "REFUSED"
+  },
+  "sizeGate": {
+    "legacyAurkaRouterRuntimeBytes": 39627,
+    "legacyAurkaRouterInitcodeBytes": 59014,
+    "sepoliaRouterRuntimeBytes": 22822,
+    "sepoliaRouterInitcodeBytes": 41268,
+    "upstreamExecutorRuntimeBytes": 5960,
+    "upstreamExecutorInitcodeBytes": 7734,
+    "orderValidatorRuntimeBytes": 989,
+    "orderValidatorInitcodeBytes": 1015,
+    "tradeMathRuntimeBytes": 8856,
+    "tradeMathInitcodeBytes": 8882,
+    "eip170RuntimeLimitBytes": 24576,
+    "eip3860InitcodeLimitBytes": 49152,
+    "legacyRouter": "LOCAL_ONLY_OVERSIZED",
+    "sepoliaRouter": "PASS",
+    "helpers": "PASS",
+    "upstreamSwapVMWrapperRuntimeBytes": 21354,
+    "upstreamSwapVMWrapper": "PASS"
+  },
+  "liveAcceptance": {
+    "deployment": "NOT_RUN",
+    "aquaStrategy": "NOT_RUN",
+    "swapVMTrade": "NOT_RUN",
+    "privy": "NOT_RUN",
+    "graph": "NOT_RUN",
+    "hostedRuntime": "NOT_RUN"
+  },
+  "localSepoliaPathProof": {
+    "sizeAndWiring": "PASS",
+    "pinnedAquaSwapVMTransfer": "PASS",
+    "allowanceBoundary": "AURKA_SEPOLIA_ROUTER",
+    "testCommand": "forge test --match-contract AurkaSepoliaUpstreamSwapVMRouterTest"
+  },
+  "limitations": [
+    "No RPC URL or funded Sepolia deployer key was present.",
+    "The full legacy AURKA settlement router is oversized, so the Sepolia profile uses the reduced upstream-only router and helpers.",
+    "No Privy, Graph, hosted infrastructure, or public receipt evidence was created."
+  ]
+}

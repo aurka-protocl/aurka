@@ -149,14 +149,16 @@ The new delegated adapter is a distinct execution boundary. In the selected
 `sign-and-broadcast` route, Privy signs an exact transaction and AURKA submits
 the returned RLP to the configured canonical fork RPC. This same route is used
 for owner recovery after Stop. The remote delegated policy is limited to the
-reviewed Ethereum chain, typed-data domain, zero-value router call, and an
-input-token `approve` whose function, spender, and amount cap are all decoded by
-Privy. The `privy` broadcast mode remains available for a supported hosted route
-but is not claimed as live evidence here. AURKA enforces the session
-Space/pair/direction, integer per-trade and cumulative budgets, count, expiry,
-delegated identity, exact ABI re-encoding, token balance, router allowance,
-refreshed nonce, chain RPC, and target `eth_call` before every send. The
-settlement contracts remain authoritative for intent/proposal signatures,
+reviewed Ethereum chain, typed-data domain, the configured exact router function
+(`executeWithSwapVM` for the TASK99-013 final path), zero-value router call, and
+an input-token `approve` whose function, spender, and amount cap are all decoded
+by Privy. Set `PRIVY_DELEGATED_ROUTER_METHOD=execute` only for the legacy
+reference deployment. The `privy` broadcast mode remains available for a
+supported hosted route but is not claimed as live evidence here. AURKA enforces
+the session Space/pair/direction, integer per-trade and cumulative budgets,
+count, expiry, delegated identity, exact ABI re-encoding, token balance, router
+allowance, refreshed nonce, chain RPC, and target `eth_call` before every send.
+The settlement contracts remain authoritative for intent/proposal signatures,
 policy/risk/price/balance commitments, and accounting. Privy policy enforcement
 is not claimed to provide AURKA's cumulative budget or nested settlement
 semantics.

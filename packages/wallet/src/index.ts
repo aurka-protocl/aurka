@@ -537,7 +537,10 @@ export class PrivyWalletAdapter implements AurkaWalletAdapter {
         abi: routerAbi,
         data: action.data as Hex,
       });
-      if (decoded.functionName !== "execute")
+      if (
+        decoded.functionName !== "execute" &&
+        decoded.functionName !== "executeWithSwapVM"
+      )
         throw new Error("Unapproved router method");
       const [intent, , proposal] = decoded.args;
       if (
@@ -569,7 +572,7 @@ export class PrivyWalletAdapter implements AurkaWalletAdapter {
       if (
         encodeFunctionData({
           abi: routerAbi,
-          functionName: "execute",
+          functionName: decoded.functionName,
           args: decoded.args,
         }).toLowerCase() !== action.data.toLowerCase()
       )

@@ -10,13 +10,18 @@
 import { createPrivateKey, createPublicKey } from "node:crypto";
 import { Buffer } from "node:buffer";
 
+const PRIVY_AUTHORIZATION_KEY_PREFIX = "wallet-auth:";
+
 function publicKeyDerBase64(privateKey, variableName) {
+  const normalized = privateKey.startsWith(PRIVY_AUTHORIZATION_KEY_PREFIX)
+    ? privateKey.slice(PRIVY_AUTHORIZATION_KEY_PREFIX.length)
+    : privateKey;
   let key;
   try {
-    key = privateKey.includes("BEGIN")
-      ? createPrivateKey(privateKey)
+    key = normalized.includes("BEGIN")
+      ? createPrivateKey(normalized)
       : createPrivateKey({
-          key: Buffer.from(privateKey, "base64"),
+          key: Buffer.from(normalized, "base64"),
           format: "der",
           type: "pkcs8",
         });

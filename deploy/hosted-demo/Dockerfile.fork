@@ -1,0 +1,34 @@
+FROM node:23.3.0-bookworm-slim
+
+ARG FOUNDRY_INSTALL_URL=https://foundry.paradigm.xyz
+ARG FOUNDRY_VERSION=v1.2.3
+WORKDIR /app
+
+RUN apt-get update \
+  && apt-get install --no-install-recommends -y ca-certificates curl git \
+  && rm -rf /var/lib/apt/lists/* \
+  && curl -L "$FOUNDRY_INSTALL_URL" | bash \
+  && /root/.foundry/bin/foundryup -v "$FOUNDRY_VERSION"
+ENV PATH="/root/.foundry/bin:${PATH}"
+
+RUN corepack enable && corepack prepare pnpm@10.13.1 --activate
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
+COPY apps/trader/package.json apps/trader/package.json
+COPY packages/shared/package.json packages/shared/package.json
+COPY packages/graph/package.json packages/graph/package.json
+COPY packages/sdk/package.json packages/sdk/package.json
+COPY packages/services/package.json packages/services/package.json
+COPY packages/wallet/package.json packages/wallet/package.json
+COPY packages/agents/watchtower/package.json packages/agents/watchtower/package.json
+RUN pnpm install --frozen-lockfile --ignore-scripts=false
+
+COPY . .
+RUN pnpm build \
+  && forge build \
+  && pnpm contracts:build-upstream
+
+RUN mkdir -p /app/.fork-space && chown -R node:node /app
+USER node
+
+EXPOSE 8545 8797
+CMD ["node", "--env-file-if-exists=/app/.env.hosted", "packages/services/scripts/fork-space.mjs"]

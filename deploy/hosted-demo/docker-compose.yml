@@ -1,0 +1,170 @@
+services:
+  fork-runtime:
+    build:
+      context: ../..
+      dockerfile: deploy/hosted-demo/Dockerfile.fork
+    restart: unless-stopped
+    env_file:
+      - path: .env.hosted
+        required: false
+    environment:
+      NODE_ENV: production
+      AURKA_FORK_BIND_HOST: 0.0.0.0
+      AURKA_FORK_RPC_PORT: 8545
+      AURKA_FORK_API_PORT: 8797
+      AURKA_FORK_APP_PORT: 3011
+      AURKA_FORK_SKIP_APP: "true"
+      AURKA_FORK_PUBLIC_RPC_URL: https://${DEMO_DOMAIN}/rpc
+      AURKA_FORK_PUBLIC_API_URL: https://${DEMO_DOMAIN}/api
+      AURKA_FORK_PUBLIC_APP_URL: https://${DEMO_DOMAIN}/spaces
+      AURKA_GRAPH_ENDPOINT: http://graph-node:8000/subgraphs/name/${AURKA_GRAPH_SUBGRAPH_NAME:-aurka-hosted}
+      DATABASE_URL: /app/.fork-space/service.sqlite
+    volumes:
+      - fork-state:/app/.fork-space
+    expose:
+      - "8545"
+      - "8797"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8797/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+
+  rpc-proxy:
+    build:
+      context: ../..
+      dockerfile: deploy/hosted-demo/Dockerfile.fork
+    restart: unless-stopped
+    command: ["node", "packages/services/scripts/filtered-rpc-proxy.mjs"]
+    environment:
+      RPC_UPSTREAM_URL: http://fork-runtime:8545
+      RPC_PROXY_HOST: 0.0.0.0
+      RPC_PROXY_PORT: 8546
+      RPC_RATE_LIMIT_PER_MINUTE: 120
+      RPC_SEND_RATE_LIMIT_PER_MINUTE: 12
+    depends_on:
+      fork-runtime:
+        condition: service_healthy
+    expose:
+      - "8546"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8546/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  trader:
+    build:
+      context: ../..
+      dockerfile: deploy/hosted-demo/Dockerfile.trader
+      args:
+        VITE_AURKA_MODE: fork
+        VITE_AURKA_CHAIN_ID: 31337
+        VITE_AURKA_API_URL: /api
+    restart: unless-stopped
+    expose:
+      - "80"
+
+  postgres:
+    image: postgres:${POSTGRES_VERSION:-14.11}
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: graph-node
+      POSTGRES_PASSWORD:
+        ${GRAPH_POSTGRES_PASSWORD:?set GRAPH_POSTGRES_PASSWORD in .env.hosted}
+      POSTGRES_DB: graph-node
+      PGDATA: /var/lib/postgresql/data
+      POSTGRES_INITDB_ARGS: -E UTF8 --locale=C
+    command:
+      [
+        "postgres",
+        "-cshared_preload_libraries=pg_stat_statements",
+        "-cmax_connections=200",
+      ]
+    volumes:
+      - graph-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U graph-node -d graph-node"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  ipfs:
+    image: ipfs/kubo:${IPFS_VERSION:-v0.17.0}
+    restart: unless-stopped
+    volumes:
+      - graph-ipfs:/data/ipfs
+    healthcheck:
+      test: ["CMD", "ipfs", "id"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  graph-node:
+    image: graphprotocol/graph-node:${GRAPH_NODE_VERSION:-v0.41.2}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ipfs:
+        condition: service_healthy
+      fork-runtime:
+        condition: service_healthy
+    environment:
+      postgres_host: postgres
+      postgres_user: graph-node
+      postgres_pass:
+        ${GRAPH_POSTGRES_PASSWORD:?set GRAPH_POSTGRES_PASSWORD in .env.hosted}
+      postgres_db: graph-node
+      ipfs: ipfs:5001
+      ethereum: localhost:http://fork-runtime:8545
+      GRAPH_ETHEREUM_GENESIS_BLOCK_NUMBER: ${AURKA_FORK_BLOCK:-25500000}
+      GRAPH_LOG: info
+    ports:
+      # Loopback only: GraphQL is for the API and operator; admin/status/IPFS
+      # are never routed through Caddy or exposed to the public internet.
+      - "127.0.0.1:${GRAPHQL_PORT:-18000}:8000"
+      - "127.0.0.1:${GRAPH_ADMIN_PORT:-18020}:8020"
+      - "127.0.0.1:${GRAPH_STATUS_PORT:-18030}:8030"
+      - "127.0.0.1:${IPFS_PORT:-15001}:5001"
+
+  edge:
+    image: caddy:2.8-alpine
+    restart: unless-stopped
+    environment:
+      DEMO_DOMAIN: ${DEMO_DOMAIN:?set DEMO_DOMAIN in .env.hosted}
+    depends_on:
+      fork-runtime:
+        condition: service_healthy
+      rpc-proxy:
+        condition: service_healthy
+      trader:
+        condition: service_started
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  fork-state:
+  graph-postgres:
+  graph-ipfs:
+  caddy-data:
+  caddy-config:

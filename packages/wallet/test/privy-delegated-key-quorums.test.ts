@@ -42,6 +42,25 @@ describe("Privy authorization key readback", () => {
     });
   });
 
+  it("accepts Privy's wallet-auth prefix without changing the submitted key", () => {
+    const material = keyMaterial();
+    expect(
+      verifyAuthorizationKeyBinding({
+        quorum: {
+          id: "owner-quorum",
+          authorization_threshold: 1,
+          authorization_keys: [{ public_key: material.publicKey }],
+        },
+        quorumId: "owner-quorum",
+        privateKey: `wallet-auth:${material.privateKey}`,
+        variableName: "TEST_KEY",
+      }),
+    ).toMatchObject({
+      thresholdSatisfied: true,
+      configuredKeyCount: 1,
+    });
+  });
+
   it("rejects an EVM key or a quorum threshold that one configured key cannot satisfy", () => {
     const material = keyMaterial();
     expect(() =>

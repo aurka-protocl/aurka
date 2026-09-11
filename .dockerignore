@@ -1,3 +1,8 @@
+.env
+.env.*
+!.env.example
+.fork-space
+.aurkadev
 node_modules
 **/node_modules
 dist
@@ -6,10 +11,9 @@ coverage
 cache
 contracts/cache
 contracts/out
+contracts/out-upstream
 contracts/broadcast
 .git
-.aurkadev
-.env
 *.db
 *.db-shm
 *.db-wal

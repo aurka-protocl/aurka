@@ -27,9 +27,14 @@ fixture/reference path. A real-mode manifest selects
 | OpenZeppelin   | `openzeppelin-contracts@v5.4.0`                          | Official SwapVM dependency                                   |
 | Compiler       | AURKA `0.8.28`; upstream wrapper `0.8.30`                | Separate Foundry build; no pragma rewrite                    |
 
-The local wrapper is in `contracts/upstream/` and is built by
-`pnpm contracts:build-upstream`. Its source and artifact hashes are recorded by
-the fork runner. The official license notices remain in the vendored sources.
+The local wrapper is in `contracts/upstream/` and is built separately from the
+0.8.28 AURKA suite by `pnpm contracts:build-upstream`. Its Aqua and wrapper
+creation artifacts are written to `contracts/out-upstream/`; the generated
+manifest records compiler settings, vendored source pins, source fingerprint,
+and artifact hashes. `pnpm contracts:check-upstream` fails for missing or stale
+artifacts, and `pnpm contracts:test` builds this boundary before running the
+standard Foundry suite. The official license notices remain in the vendored
+sources.
 
 ## Reviewed program
 

@@ -22,7 +22,7 @@ import {
   temporaryManifest,
   waitForIndexedBlock,
 } from "./local-graph-node-e2e.mjs";
-import { keccak256, stringToHex } from "viem";
+import { encodeFunctionData, keccak256, parseAbi, stringToHex } from "viem";
 
 const ROOT = path.resolve(
   new globalThis.URL("../../..", import.meta.url).pathname,
@@ -37,9 +37,21 @@ mkdirSync(dir, { recursive: true, mode: 0o700 });
 const upstreamSwapSelector = keccak256(
   stringToHex("swap((address,uint256,bytes),uint256,bytes)"),
 ).slice(0, 10);
+const stateReadAbi = parseAbi([
+  "function rawBalances(address,address,bytes32,address) view returns (uint248 balance, uint8 tokensCount)",
+  "function capacityState(bytes32,address,address) view returns (bytes32 capacityEpochId, uint256 capacityBaselineValue, uint256 consumedValue)",
+]);
+const UNAUTHORIZED_SWAP_VM_EXECUTION = "0x48582b61";
 
 function check(condition, message) {
   assert.ok(condition, message);
+}
+
+function revertDataFromError(error) {
+  let data = error && typeof error === "object" ? error.data : undefined;
+  for (let depth = 0; depth < 3 && data && typeof data === "object"; depth += 1)
+    data = data.data ?? data.originalError?.data;
+  return typeof data === "string" ? data : undefined;
 }
 
 function traceHasCall(trace, target) {
@@ -83,6 +95,44 @@ async function captureSwapVMExecution(manifest, forkDirectory) {
     ),
   );
   const executions = [];
+  const protectedState = async () => {
+    const spaces = walletEvidence.spaces ?? [];
+    const result = [];
+    for (const space of spaces) {
+      const positionIdHash = keccak256(stringToHex(space.identity.id));
+      const strategyHash = space.identity.strategyId;
+      const maker = space.identity.treasuryAddress;
+      const balances = [];
+      for (const token of [manifest.usdc, manifest.weth]) {
+        balances.push(
+          await rpc(manifest.rpcUrl, "eth_call", [
+            {
+              to: manifest.aqua,
+              data: encodeFunctionData({
+                abi: stateReadAbi,
+                functionName: "rawBalances",
+                args: [maker, manifest.aquaApp, strategyHash, token],
+              }),
+            },
+            "latest",
+          ]),
+        );
+      }
+      const capacity = await rpc(manifest.rpcUrl, "eth_call", [
+        {
+          to: manifest.router,
+          data: encodeFunctionData({
+            abi: stateReadAbi,
+            functionName: "capacityState",
+            args: [positionIdHash, manifest.weth, manifest.usdc],
+          }),
+        },
+        "latest",
+      ]);
+      result.push({ id: space.identity.id, balances, capacity });
+    }
+    return result;
+  };
   for (const transaction of routerTransactions) {
     check(
       transaction.data?.slice(0, 10) === "0xa9aedf0c",
@@ -118,6 +168,8 @@ async function captureSwapVMExecution(manifest, forkDirectory) {
       upstreamSwapSelector,
     );
     check(programCall, "Trace is missing the upstream SwapVM call data");
+    const stateBefore = await protectedState();
+    let bypassRevertData;
     let bypassError;
     try {
       await rpc(manifest.rpcUrl, "eth_call", [
@@ -130,10 +182,19 @@ async function captureSwapVMExecution(manifest, forkDirectory) {
       ]);
     } catch (error) {
       bypassError = error instanceof Error ? error.message : String(error);
+      bypassRevertData = revertDataFromError(error);
     }
     check(
-      bypassError,
-      "Direct upstream SwapVM call unexpectedly filled the protected strategy",
+      typeof bypassRevertData === "string" &&
+        bypassRevertData
+          .toLowerCase()
+          .startsWith(UNAUTHORIZED_SWAP_VM_EXECUTION),
+      `Direct upstream SwapVM call was not rejected by UnauthorizedSwapVMExecution: ${bypassError ?? "no revert"}`,
+    );
+    const stateAfter = await protectedState();
+    check(
+      JSON.stringify(stateAfter) === JSON.stringify(stateBefore),
+      "Rejected direct upstream call changed balances or capacity",
     );
     executions.push({
       hash: transaction.hash,
@@ -144,7 +205,10 @@ async function captureSwapVMExecution(manifest, forkDirectory) {
         from: manifest.bob,
         target: manifest.swapVM,
         rejected: true,
+        errorSelector: UNAUTHORIZED_SWAP_VM_EXECUTION,
+        revertData: bypassRevertData,
         error: bypassError,
+        stateUnchanged: true,
       },
       trace,
       receipt: {
@@ -235,10 +299,12 @@ async function rpc(rpcUrl, method, params = []) {
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
   });
   const body = await response.json();
-  check(
-    response.ok && !body.error,
-    `${method} failed: ${JSON.stringify(body.error)}`,
-  );
+  if (!response.ok || body.error) {
+    const detail = body.error?.message ?? `${method} failed`;
+    const rpcError = new Error(`${method} failed: ${detail}`);
+    if (body.error?.data !== undefined) rpcError.data = body.error.data;
+    throw rpcError;
+  }
   return body.result;
 }
 

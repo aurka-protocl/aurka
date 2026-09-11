@@ -32,6 +32,7 @@ export const spaceStateSchema = z.enum([
   "DRAFT",
   "PENDING",
   "ACTIVE",
+  "PRICING_NEEDS_RENEWAL",
   "REACTIVATION_REQUIRED",
   "PAUSED",
   "FAILED",

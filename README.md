@@ -37,6 +37,22 @@ Workspace packages live in `apps/*`, `packages/*`, and `packages/agents/*`.
 amounts are represented at JSON boundaries as unsigned base-10 integer strings,
 which avoids precision loss and forces callers to make token decimals explicit.
 
+The local contracts compile with Solidity 0.8.28. The pinned upstream Aqua and
+SwapVM wrapper compile separately with Solidity 0.8.30 into the ignored
+`contracts/out-upstream/` directory; the real upstream contract test deploys
+those creation artifacts through compatible local interfaces. Build and verify
+that boundary before running the contract suite:
+
+```bash
+pnpm contracts:build-upstream
+pnpm contracts:check-upstream
+pnpm contracts:test
+```
+
+The generated manifest records the compiler settings, vendored source pins,
+source fingerprint, and artifact hashes. A missing or stale manifest/artifact
+fails the check with the rebuild command.
+
 ## Current package
 
 - `@aurka/shared`: addresses, amounts, policies, risk certificates, trade
@@ -76,7 +92,11 @@ Unavailable balances, P&L, history feeds and effective risk are labeled as such.
 See [SDK usage](packages/sdk/README.md), [API semantics](docs/api.md), and
 [watchtower runtime requirements](docs/risk-watchtower.md). For the complete
 local product journey, measured demo values, manual acceptance checklist, and
-issue template, see the [product walkthrough](docs/product-walkthrough.md).
+issue template, see the [product walkthrough](docs/product-walkthrough.md). The
+hosted deployment packet and ETHOnline submission copy are in the
+[hosted demo runbook](docs/hosted-demo.md) and
+[submission packet](docs/ethonline-submission.md); neither claims a public
+deployment until its external checks are recorded.
 
 ## Fork Space creation validation
 

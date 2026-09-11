@@ -1,0 +1,65 @@
+{
+  "task": "TASK99-012",
+  "status": "BLOCKED_LIVE_ACCEPTANCE",
+  "complete": false,
+  "date": "2026-09-10",
+  "baseCommitUnderTest": "c1095c4d87ead55fb1ff7eba4ee849a755a1f480",
+  "workingTreeChanges": true,
+  "manifest": {
+    "path": ".fork-space/manifest.json",
+    "sha256": "ce02a3c264c0f704979ff4ecdae28841cc6165123d35e17399596c919a0bb401",
+    "chainId": 31337,
+    "executionEngine": "AURKA_DIRECT_PAIR_V1",
+    "classification": "stale reference manifest; not TASK99-013 final-path evidence"
+  },
+  "versions": {
+    "privyNode": "@privy-io/node@0.34.0",
+    "routerMethodForFinalPath": "executeWithSwapVM",
+    "openRouterLiveTrace": "NOT_RUN"
+  },
+  "configuration": {
+    "configured": false,
+    "missingResourceNames": [
+      "PRIVY_APP_ID",
+      "PRIVY_DELEGATED_POLICY_ID",
+      "PRIVY_DELEGATED_RECOVERY_POLICY_ID",
+      "PRIVY_DELEGATED_ROUTER",
+      "PRIVY_DELEGATED_INPUT_TOKEN",
+      "PRIVY_DELEGATED_OUTPUT_TOKEN",
+      "PRIVY_DELEGATED_MAX_INPUT_AMOUNT",
+      "PRIVY_DELEGATED_MAX_RECOVERY_AMOUNT",
+      "PRIVY_DELEGATED_POLICY_VALID_UNTIL",
+      "PRIVY_DELEGATED_OWNER_ADDRESS",
+      "PRIVY_DELEGATED_SIGNER_ADDRESS",
+      "PRIVY_DELEGATED_WALLET_ID"
+    ],
+    "secretsPrinted": false,
+    "privyContacted": false
+  },
+  "liveAcceptance": {
+    "walletAndPolicyReadback": "NOT_RUN",
+    "ownerConsentAndExactApproval": "NOT_RUN",
+    "privyTradeSignature": "NOT_RUN",
+    "canonicalForkReceipt": "NOT_RUN",
+    "remotePolicyDenial": "NOT_RUN",
+    "stopAndRemoteRevoke": "NOT_RUN",
+    "ownerRecovery": "NOT_RUN",
+    "recoveryReplay": "NOT_RUN",
+    "browserExtension": "NOT_RUN"
+  },
+  "localChecks": {
+    "pnpmTest": "PASS",
+    "pnpmTypecheck": "PASS",
+    "pnpmBuild": "PASS",
+    "pnpmLint": "PASS",
+    "pnpmFormatCheck": "PASS",
+    "privyScriptSyntax": "PASS",
+    "forgeTest": "NOT_RUN_TOOLCHAIN_RESOLUTION_BLOCKER"
+  },
+  "transactionHashes": [],
+  "outstanding": [
+    "authorized dedicated Privy wallet, key quorums, and exact policies",
+    "Privy-reachable isolated final executeWithSwapVM fork",
+    "fork-only funding and browser-extension acceptance evidence"
+  ]
+}

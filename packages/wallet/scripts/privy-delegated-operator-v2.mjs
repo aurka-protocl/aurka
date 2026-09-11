@@ -42,6 +42,37 @@ const erc20ApproveAbi = [
   },
 ];
 
+// The policy must identify the frozen router entry point as well as its
+// address.  The nested tuple components are not needed to compare the
+// function selector, but the top-level ABI shape is kept explicit so a
+// provider readback cannot silently downgrade to a target-only grant.
+function routerExecutionAbi() {
+  return [
+    {
+      type: "function",
+      name: routerMethod(),
+      stateMutability: "nonpayable",
+      inputs: [
+        { name: "intent", type: "tuple" },
+        { name: "intentSignature", type: "bytes" },
+        { name: "proposal", type: "tuple" },
+        { name: "proposalSignature", type: "bytes" },
+        { name: "assets", type: "tuple[]" },
+        { name: "epoch", type: "tuple" },
+        { name: "priceInput", type: "tuple" },
+        { name: "directProgram", type: "bytes" },
+        ...(routerMethod() === "executeWithSwapVM"
+          ? [
+              { name: "makerTraits", type: "uint256" },
+              { name: "orderData", type: "bytes" },
+              { name: "takerTraitsAndData", type: "bytes" },
+            ]
+          : []),
+      ],
+    },
+  ];
+}
+
 function value(name) {
   const result = process.env[name]?.trim();
   return result || undefined;
@@ -261,6 +292,30 @@ function transactionMethod() {
     : "eth_sendTransaction";
 }
 
+function routerMethod() {
+  const configured =
+    value("PRIVY_DELEGATED_ROUTER_METHOD") ?? "executeWithSwapVM";
+  if (configured !== "execute" && configured !== "executeWithSwapVM")
+    throw new Error(
+      "PRIVY_DELEGATED_ROUTER_METHOD must be execute or executeWithSwapVM",
+    );
+  return configured;
+}
+
+function exactRouterRule(rule, method) {
+  return (
+    transactionRule(rule, method, address("PRIVY_DELEGATED_ROUTER")) &&
+    calldataCondition(
+      rule,
+      "function_name",
+      "eq",
+      routerMethod(),
+      routerExecutionAbi(),
+      routerMethod(),
+    )
+  );
+}
+
 function assertExecutionPolicy(wallet, policy, requireSigner) {
   const ownerId = required("PRIVY_DELEGATED_OWNER_ID");
   const signerId = required("PRIVY_DELEGATED_SIGNER_ID");
@@ -269,6 +324,7 @@ function assertExecutionPolicy(wallet, policy, requireSigner) {
   const chainId = numberValue("PRIVY_DELEGATED_CHAIN_ID");
   const router = address("PRIVY_DELEGATED_ROUTER");
   const inputToken = address("PRIVY_DELEGATED_INPUT_TOKEN");
+  const selectedRouterMethod = routerMethod();
   if (wallet.chain_type !== "ethereum")
     throw new Error("Privy delegated wallet is not Ethereum");
   if (wallet.owner_id !== ownerId)
@@ -346,7 +402,7 @@ function assertExecutionPolicy(wallet, policy, requireSigner) {
       (rule.method === method || rule.method === "*"),
   );
   const routerRules = methodRules.filter((rule) =>
-    transactionRule(rule, method, router),
+    exactRouterRule(rule, method),
   );
   const approvalRules = methodRules.filter((rule) =>
     transactionRule(rule, method, inputToken),
@@ -362,7 +418,7 @@ function assertExecutionPolicy(wallet, policy, requireSigner) {
     throw new Error(
       "Privy policy contains a broad grant or is missing the reviewed typed-data, router, and exact approval rules",
     );
-  return signer;
+  return { signer, routerMethod: selectedRouterMethod };
 }
 
 function assertRecoveryPolicy(wallet, policy) {
@@ -433,7 +489,7 @@ export async function getDelegatedExecutionPolicy({ walletId }) {
   const recoveryPolicy = await privy
     .policies()
     .get(required("PRIVY_DELEGATED_RECOVERY_POLICY_ID"));
-  const signer = assertExecutionPolicy(wallet, policy, false);
+  const execution = assertExecutionPolicy(wallet, policy, false);
   assertRecoveryPolicy(wallet, recoveryPolicy);
   const chainId = numberValue("PRIVY_DELEGATED_CHAIN_ID");
   return {
@@ -448,9 +504,10 @@ export async function getDelegatedExecutionPolicy({ walletId }) {
     maximumInputAmount: required("PRIVY_DELEGATED_MAX_INPUT_AMOUNT"),
     validUntil: numberValue("PRIVY_DELEGATED_POLICY_VALID_UNTIL"),
     paused: policy.paused === true,
-    revoked: policy.revoked === true || !signer,
+    revoked: policy.revoked === true || !execution.signer,
     fingerprint: policyFingerprint(policy),
     allowedMethods: ["eth_call", "eth_signTypedData_v4", transactionMethod()],
+    routerMethod: execution.routerMethod,
   };
 }
 
@@ -578,13 +635,14 @@ export async function revokeDelegatedSigner({ walletId, signerId, policyId }) {
   const signers = Array.isArray(wallet.additional_signers)
     ? wallet.additional_signers.filter((item) => item?.signer_id !== signerId)
     : [];
-  const updated = await (await client()).wallets().update(walletId, {
+  await (await client()).wallets().update(walletId, {
     additional_signers: signers,
     authorization_context: ownerAuthorization(),
   });
+  const confirmed = await walletFor(walletId);
   if (
-    !Array.isArray(updated.additional_signers) ||
-    updated.additional_signers.some((item) => item?.signer_id === signerId)
+    !Array.isArray(confirmed.additional_signers) ||
+    confirmed.additional_signers.some((item) => item?.signer_id === signerId)
   )
     throw new Error("Privy delegated signer revoke was not confirmed");
 }

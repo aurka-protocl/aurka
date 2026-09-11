@@ -65,7 +65,15 @@ contract MockAqua is IAqua {
         }
     }
 
-    function dock(address, bytes32, address[] calldata) external pure { }
+    /// @dev Match Aqua's closed-strategy marker so a recovered fixture cannot
+    /// be reused by an old SwapVM proposal or pushed into after docking.
+    function dock(address app, bytes32 strategyHash, address[] calldata tokens) external {
+        bytes32 strategyKey = _strategyKey(msg.sender, app, strategyHash);
+        require(tokens.length == _tokenCounts[strategyKey], "dock tokens");
+        for (uint256 i; i < tokens.length; ++i)
+            _balances[_key(msg.sender, app, strategyHash, tokens[i])] = 0;
+        _tokenCounts[strategyKey] = type(uint8).max;
+    }
 
     function pull(address maker, bytes32 strategyHash, address token, uint256 amount, address to)
         external
@@ -82,6 +90,11 @@ contract MockAqua is IAqua {
     {
         _attemptCallback();
         bytes32 key = _key(maker, app, strategyHash, token);
+        bytes32 strategyKey = _strategyKey(maker, app, strategyHash);
+        require(
+            _tokenCounts[strategyKey] > 0 && _tokenCounts[strategyKey] != type(uint8).max,
+            "closed strategy"
+        );
         require(IERC20Minimal(token).transferFrom(msg.sender, maker, amount), "push transfer");
         _balances[key] += amount;
     }

@@ -13,9 +13,14 @@ test-results/
 contracts/broadcast/
 contracts/cache/
 contracts/out/
+contracts/out-upstream/
 .aurkadev/
 
 packages/graph/subgraph/generated/
 packages/graph/subgraph/build/
 
 .fork-space/
+
+# External Sepolia deployment state may contain addresses and receipt metadata;
+# regenerate it from the reviewed profile instead of committing it accidentally.
+deploy/sepolia/sepolia-deployment.json
