@@ -59,9 +59,69 @@ decimals. This is demo pricing, not Chainlink evidence. The generated
 `sepolia-deployment.json` is local deployment state and should be copied into
 sanitized evidence only after checking every address and receipt.
 
-The deployment script does not mint tokens, create a Space, provision Privy,
-publish a Graph deployment, or claim a successful SwapVM trade. Those remain
-explicit acceptance gates in `TASK1009-005`.
+After deployment, the owner-only demo setup script creates one funded Space,
+ships the reviewed strategy into Aqua, and activates its capacity epoch:
+
+```bash
+pnpm sepolia:space
+```
+
+For the mock profile, this uses 60,000 demo USDC and 12.5 demo WETH. The
+separate acceptance command refreshes the labelled mock prices, opens a fresh
+epoch, and executes one bounded deployer-signed SwapVM trade through the live
+Sepolia router:
+
+```bash
+pnpm sepolia:trade
+```
+
+After that acceptance trade consumes its epoch, reopen a new directional epoch
+for another live app rehearsal without redeploying:
+
+```bash
+pnpm sepolia:reactivate
+```
+
+The command refreshes mock prices, simulates the owner-authorized activation,
+and then broadcasts it. `AURKA_SEPOLIA_DRY_RUN=true pnpm sepolia:reactivate`
+performs only the read/simulation checks. The newly derived baseline reflects
+the current portfolio weights; it can be lower than the policy maximum after a
+previous trade reaches an asset bound.
+
+The acceptance command is deployer-only evidence for the Aqua/SwapVM path; it
+does not substitute for the separate Privy wallet, policy, delegated trade,
+Graph, or hosted-runtime gates.
+
+## Per-user Privy agent wizard
+
+The Sepolia app includes a per-user agent route at `/agent`. A visitor connects
+an injected Ethereum wallet, signs the login challenge, and clicks through the
+four-step wizard. The backend provisions one dedicated Privy wallet for that
+owner, creates an owner-specific recovery policy, funds the wallet with the
+deployed mock WETH/USDC and Sepolia ETH, and stores the reviewed mandate.
+
+The browser never receives Privy credentials, policy JSON, quorum IDs, or
+authorization keys. The server worker continues bounded evaluations after the
+browser is closed. The owner can later stop/revoke the agent and recover one
+reviewed token at a time to the authenticated wallet.
+
+Run the detailed acceptance procedure in
+`.aurkadev/1009/TASK1009-008-manual-test.md`. Set `AURKA_ALLOWED_ORIGINS` to the
+exact hosted HTTPS origin when deploying outside localhost. The faucet limits in
+the environment example are testnet-only controls, not production deposit or
+withdrawal support.
+
+## Run the active testnet app
+
+Start the Sepolia API gateway, then start the browser app with:
+
+```bash
+pnpm app:testnet
+```
+
+This selects Ethereum Sepolia (`11155111`) and points the Vite proxy at the
+gateway on port `8797`. The browser uses `/api/testnet` for chain-backed reads;
+the legacy local-fork gateway is not part of this app path.
 
 ## Size result
 
@@ -76,13 +136,14 @@ and token movement in separately deployed helpers:
 - order validator runtime/initcode: `989` / `1,015` bytes;
 - trade math runtime/initcode: `8,856` / `8,882` bytes.
 
-All are below EIP-170 (`24,576`) and EIP-3860 (`49,152`). The deployment
-script checks the generated artifacts again before broadcasting.
+All are below EIP-170 (`24,576`) and EIP-3860 (`49,152`). The deployment script
+checks the generated artifacts again before broadcasting.
 
-The local acceptance proof is `forge test --match-contract
-AurkaSepoliaUpstreamSwapVMRouterTest`. It deploys the pinned Aqua/SwapVM
-artifacts, ships a real strategy, uses the router allowance boundary, and
-asserts the Aqua, trader, solver, and protocol balance deltas.
+The local acceptance proof is
+`forge test --match-contract AurkaSepoliaUpstreamSwapVMRouterTest`. It deploys
+the pinned Aqua/SwapVM artifacts, ships a real strategy, uses the router
+allowance boundary, and asserts the Aqua, trader, solver, and protocol balance
+deltas.
 
 ## Required environment
 

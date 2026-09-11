@@ -101,7 +101,7 @@ export interface ServiceOptions {
   readonly readiness?: ReadinessConfiguration;
   readonly routerSimulator?: RouterSimulator;
   readonly rpcTransport?: Eip1193Transport;
-  readonly spaceMode?: "demo" | "fork";
+  readonly spaceMode?: "demo" | "testnet" | "fork";
   readonly spaceAssets?: readonly { token: string; decimals: number }[];
 }
 
@@ -186,10 +186,11 @@ export class AurkaService {
   readonly runtime: ServiceRuntimeDiagnostics;
   readonly rpcTransport: Eip1193Transport | undefined;
   readonly readiness: ReadinessMonitor;
-  readonly spaceMode: "demo" | "fork";
+  readonly spaceMode: "demo" | "testnet" | "fork";
   private readonly spaceAssets: readonly { token: string; decimals: number }[];
   private readonly localProvider: LocalDemoProvider | undefined;
   private readonly now: () => number;
+  private readonly positionRefreshes = new Map<string, Promise<Position>>();
 
   constructor(options: ServiceOptions = {}) {
     this.now = options.riskNow ?? serviceNow;
@@ -198,7 +199,7 @@ export class AurkaService {
       options.spaceMode ?? (options.rpcTransport ? "fork" : "demo");
     this.spaceAssets =
       options.spaceAssets ??
-      (this.spaceMode === "fork"
+      (this.spaceMode !== "demo"
         ? [
             {
               token: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
@@ -247,10 +248,14 @@ export class AurkaService {
       (options.spaceMode === "demo"
         ? new LocalDemoProvider(this.now)
         : new FixtureProvider());
-    if (options.spaceMode === "fork" && !sourceProvider.getPositionSnapshot) {
+    if (
+      options.spaceMode !== undefined &&
+      options.spaceMode !== "demo" &&
+      !sourceProvider.getPositionSnapshot
+    ) {
       throw new ServiceError(
         "SNAPSHOT_PROVIDER_REQUIRED",
-        "Fork/RPC mode requires a usable real snapshot provider; FixtureProvider is not valid for configured RPC data",
+        `${options.spaceMode === "testnet" ? "Testnet" : "Fork"}/RPC mode requires a usable real snapshot provider; FixtureProvider is not valid for configured RPC data`,
         503,
       );
     }
@@ -744,11 +749,23 @@ export class AurkaService {
 
   /** Read source evidence and publish the matching durable snapshot. */
   async refreshPosition(positionId: string): Promise<Position> {
-    const position = this.getPosition(positionId);
-    const snapshot = await this.readAuthoritativePositionSnapshot(positionId);
-    return snapshot
-      ? this.persistAuthoritativeSnapshot(position, snapshot)
-      : position;
+    const inFlight = this.positionRefreshes.get(positionId);
+    if (inFlight) return inFlight;
+
+    const refresh = (async (): Promise<Position> => {
+      const position = this.getPosition(positionId);
+      const snapshot = await this.readAuthoritativePositionSnapshot(positionId);
+      return snapshot
+        ? this.persistAuthoritativeSnapshot(position, snapshot)
+        : position;
+    })();
+    this.positionRefreshes.set(positionId, refresh);
+    try {
+      return await refresh;
+    } finally {
+      if (this.positionRefreshes.get(positionId) === refresh)
+        this.positionRefreshes.delete(positionId);
+    }
   }
 
   async refreshSpace(spaceId: string): Promise<SpaceRecord> {
@@ -990,25 +1007,28 @@ export class AurkaService {
   }
 
   /**
-   * The generic Space API can persist authenticated fork drafts, but it does
-   * not yet prepare or verify the policy/strategy transactions required to
-   * make those drafts active. An owner signature authorizes an intent; it is
-   * never evidence that the corresponding chain operation succeeded.
+   * The generic Space API can persist authenticated testnet drafts, but it
+   * does not yet prepare or verify the policy/strategy transactions required
+   * to make those drafts active. An owner signature authorizes an intent; it
+   * is never evidence that the corresponding chain operation succeeded.
    */
   private assertSpaceMutationSupported(
     operation: SpaceMutationPrepareRequest["operation"],
     existing: SpaceRecord | undefined,
   ): void {
-    if (this.spaceMode !== "fork" || operation === "CREATE") return;
+    if (this.spaceMode === "demo" || operation === "CREATE") return;
     if (
       operation === "UPDATE" &&
       existing?.identity.state !== "PENDING" &&
       existing?.identity.state !== "FAILED"
     )
       return;
+    const legacyFork = this.spaceMode === "fork";
     throw new ServiceError(
-      "FORK_SPACE_CHAIN_OPERATION_UNSUPPORTED",
-      `Fork Space ${operation.toLowerCase()} requires a receipt-verified owner-wallet chain transaction; this API currently supports authenticated draft persistence only`,
+      legacyFork
+        ? "FORK_SPACE_CHAIN_OPERATION_UNSUPPORTED"
+        : "TESTNET_SPACE_CHAIN_OPERATION_UNSUPPORTED",
+      `${legacyFork ? "Fork" : "Testnet"} Space ${operation.toLowerCase()} requires a receipt-verified owner-wallet chain transaction; this API currently supports authenticated draft persistence only`,
       501,
       { operation, spaceId: existing?.identity.id ?? null },
     );
@@ -1070,7 +1090,7 @@ export class AurkaService {
         );
     }
     const maximum = BigInt(draft.maximumTransactionValue);
-    const minimum = this.spaceMode === "fork" ? 1n : 1_000n;
+    const minimum = this.spaceMode !== "demo" ? 1n : 1_000n;
     if (maximum < minimum || maximum > 1_000_000_000n)
       throw new ServiceError(
         "INVALID_TRANSACTION_LIMIT",
@@ -1222,7 +1242,7 @@ export class AurkaService {
         throw new ServiceError("SPACE_NOT_FOUND", "Space was not found", 404);
       identity = existing.identity;
       draft = input.draft ?? existing.draft;
-      if (this.spaceMode === "fork" && input.operation === "UPDATE") {
+      if (this.spaceMode !== "demo" && input.operation === "UPDATE") {
         identity = { ...identity, name: draft!.name };
         if (existing.position)
           position = { ...existing.position, name: draft!.name };
@@ -1325,7 +1345,7 @@ export class AurkaService {
       ...(input.receiptHash ? { receiptHash: input.receiptHash } : {}),
       payload: {
         operation: input.operation,
-        authority: this.spaceMode === "fork" ? "signed-metadata-only" : "demo",
+        authority: this.spaceMode !== "demo" ? "signed-metadata-only" : "demo",
         state: savedIdentity.state,
         ...(draft ? { draft } : {}),
       },

@@ -60,6 +60,8 @@ export const delegatedSessionPlanSchema = z
     perTradeInputAmount: positiveUint256StringSchema,
     cumulativeInputBudget: positiveUint256StringSchema,
     maxTradeCount: z.number().int().min(1).max(10),
+    /** Minimum output value per 10,000 input-value units. */
+    minimumOutputPerInputBps: z.number().int().min(0).max(100_000).optional(),
     slippageBps: z.number().int().min(0).max(1_000),
     expiresAt: unixTimestampSchema,
     sessionNonce: bytes32Schema,
@@ -160,6 +162,8 @@ export type DelegatedSession = z.infer<typeof delegatedSessionSchema>;
 export const delegatedStatusSchema = z
   .object({
     wallet: delegatedWalletIdentitySchema,
+    /** Public EVM address allowed to authorize this delegated agent. */
+    ownerAddress: addressSchema.nullable().optional(),
     activeSessions: z.number().int().nonnegative().max(100),
   })
   .strict();
@@ -188,6 +192,9 @@ export type DelegatedControlRequest = z.infer<
 export const delegatedSessionIdRequestSchema = delegatedControlRequestSchema;
 
 export const delegatedSessionResponseSchema = delegatedSessionSchema;
+export const delegatedSessionsResponseSchema = z.object({
+  sessions: z.array(delegatedSessionSchema),
+});
 
 export const delegatedRecoveryAssetSchema = z
   .object({ token: addressSchema, amount: positiveUint256StringSchema })

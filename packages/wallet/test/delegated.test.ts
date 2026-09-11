@@ -38,6 +38,7 @@ function adapter(
     readonly broadcastMode?: "privy" | "sign-and-broadcast";
     readonly walletAddress?: string;
     readonly signAccount?: ReturnType<typeof privateKeyToAccount>;
+    readonly restoreRemote?: () => Promise<void>;
   } = {},
 ) {
   const walletAddress = options.walletAddress ?? AGENT;
@@ -100,12 +101,24 @@ function adapter(
     rpc: { request: async (method) => rpcValue(method) },
     authorization: async () => ({}) as never,
     revokeRemote: async () => undefined,
+    ...(options.restoreRemote ? { restoreRemote: options.restoreRemote } : {}),
     ...(options.broadcastMode ? { broadcastMode: options.broadcastMode } : {}),
     now: () => 100,
   });
 }
 
 describe("delegated Privy execution boundary", () => {
+  it("exposes restore only through the explicit remote signer callback", async () => {
+    let restores = 0;
+    const value = adapter(undefined, {
+      restoreRemote: async () => {
+        restores += 1;
+      },
+    });
+    await value.restore!();
+    expect(restores).toBe(1);
+  });
+
   it("reports the dedicated identity and fails closed on chain, target, and calldata mismatch", async () => {
     const value = adapter();
     await expect(value.getStatus()).resolves.toMatchObject({

@@ -1,12 +1,17 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { ArrowRight, Boxes, RefreshCw } from "lucide-react";
+import { Boxes, RefreshCw } from "lucide-react";
 import {
   formatSnapshotAge,
   formatValueAmount,
   snapshotFreshness,
 } from "@aurka/shared";
-import { spaceAdapter, spaceUrl, type SpaceRecord } from "../domain/spaces";
+import {
+  invalidateSpaceCache,
+  spaceAdapter,
+  spaceUrl,
+  type SpaceRecord,
+} from "../domain/spaces";
 import { lifecycleLabel, shortAddress, userFacingError } from "../ui";
 import { useWallet } from "../wallet";
 
@@ -33,83 +38,80 @@ function SpaceCard({ space }: { readonly space: SpaceRecord }) {
               ? "border-red-800 bg-red-950/30 text-red-300"
               : "border-slate-700 bg-slate-950 text-slate-300";
   return (
-    <article className="min-w-0 rounded-2xl border border-slate-700 bg-slate-900 p-5 transition hover:border-cyan-700 sm:p-6">
-      <div className="flex items-start justify-between gap-4">
-        <div className="flex min-w-0 items-start gap-3">
-          <div className="rounded-xl bg-cyan-950/70 p-2.5 text-cyan-300">
-            <Boxes className="h-5 w-5" aria-hidden="true" />
+    <Link
+      to={spaceUrl(space.identity.id)}
+      aria-label={`Open ${space.identity.name}`}
+      className="group block min-w-0 rounded-2xl focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950"
+    >
+      <article className="min-w-0 rounded-2xl border border-slate-700 bg-slate-900 p-5 transition group-hover:border-cyan-700 group-focus-visible:border-cyan-500 sm:p-6">
+        <div className="flex items-start justify-between gap-4">
+          <div className="flex min-w-0 items-start gap-3">
+            <div className="rounded-xl bg-cyan-950/70 p-2.5 text-cyan-300">
+              <Boxes className="h-5 w-5" aria-hidden="true" />
+            </div>
+            <div className="min-w-0">
+              <h2 className="truncate text-xl font-semibold text-white">
+                {space.identity.name}
+              </h2>
+              <p className="mt-1 text-sm text-slate-400">
+                Owner-controlled Space
+              </p>
+            </div>
           </div>
-          <div className="min-w-0">
-            <h2 className="truncate text-xl font-semibold text-white">
-              {space.identity.name}
-            </h2>
-            <p className="mt-1 text-sm text-slate-400">
-              Owner-controlled Space
-            </p>
-          </div>
+          <span className="shrink-0 rounded-full border border-slate-700 px-2.5 py-1 text-[11px] text-slate-400">
+            {lifecycleLabel(space.identity.state)}
+          </span>
         </div>
-        <span className="shrink-0 rounded-full border border-slate-700 px-2.5 py-1 text-[11px] text-slate-400">
-          {lifecycleLabel(space.identity.state)}
-        </span>
-      </div>
 
-      <dl className="mt-6 grid gap-4 sm:grid-cols-3">
-        <div>
-          <dt className="text-xs uppercase tracking-wide text-slate-500">
-            Portfolio value
-          </dt>
-          <dd className="mt-1 font-semibold text-cyan-200">
-            {snapshot
-              ? `${formatValueAmount(snapshot.nav, snapshot.valueDecimals)} normalized value units`
-              : space.draft
-                ? "Not deployed"
-                : "Unavailable"}
-          </dd>
-        </div>
-        <div>
-          <dt className="text-xs uppercase tracking-wide text-slate-500">
-            Managed assets
-          </dt>
-          <dd className="mt-1 font-semibold text-white">
-            {snapshot?.assets.length ?? space.draft?.assets.length ?? "—"}
-          </dd>
-        </div>
-        <div>
-          <dt className="text-xs uppercase tracking-wide text-slate-500">
-            Holdings status
-          </dt>
-          <dd
-            className={`mt-1 font-semibold ${freshness === "stale" ? "text-amber-300" : "text-emerald-300"}`}
+        <dl className="mt-6 grid gap-4 sm:grid-cols-3">
+          <div>
+            <dt className="text-xs uppercase tracking-wide text-slate-500">
+              Portfolio value
+            </dt>
+            <dd className="mt-1 font-semibold text-cyan-200">
+              {snapshot
+                ? `${formatValueAmount(snapshot.nav, snapshot.valueDecimals)} normalized value units`
+                : space.draft
+                  ? "Not deployed"
+                  : "Unavailable"}
+            </dd>
+          </div>
+          <div>
+            <dt className="text-xs uppercase tracking-wide text-slate-500">
+              Managed assets
+            </dt>
+            <dd className="mt-1 font-semibold text-white">
+              {snapshot?.assets.length ?? space.draft?.assets.length ?? "—"}
+            </dd>
+          </div>
+          <div>
+            <dt className="text-xs uppercase tracking-wide text-slate-500">
+              Holdings status
+            </dt>
+            <dd
+              className={`mt-1 font-semibold ${freshness === "stale" ? "text-amber-300" : "text-emerald-300"}`}
+            >
+              {snapshot
+                ? `${freshness === "stale" ? "Needs refresh" : "Updated"} · ${formatSnapshotAge(snapshot.observedAt, now)}`
+                : space.identity.state === "DRAFT"
+                  ? "Save complete · activation pending"
+                  : "Unavailable"}
+            </dd>
+          </div>
+        </dl>
+
+        <div className="mt-6 flex items-center justify-between gap-3">
+          <span
+            className={`rounded-full border px-2.5 py-1 text-[11px] ${stateClass}`}
           >
-            {snapshot
-              ? `${freshness === "stale" ? "Needs refresh" : "Updated"} · ${formatSnapshotAge(snapshot.observedAt, now)}`
-              : space.identity.state === "DRAFT"
-                ? "Save complete · activation pending"
-                : "Unavailable"}
-          </dd>
+            {lifecycleLabel(space.identity.state)}
+          </span>
+          <span className="text-sm text-cyan-300 transition group-hover:text-cyan-200">
+            View Space
+          </span>
         </div>
-      </dl>
-
-      <div className="mt-6 flex flex-wrap items-center gap-3">
-        <span
-          className={`rounded-full border px-2.5 py-1 text-[11px] ${stateClass}`}
-        >
-          {lifecycleLabel(space.identity.state)}
-        </span>
-        <Link
-          to={spaceUrl(space.identity.id)}
-          className="inline-flex min-h-10 items-center gap-2 rounded-lg bg-cyan-700 px-4 py-2.5 text-sm font-medium text-white hover:bg-cyan-600"
-        >
-          Open Space <ArrowRight className="h-4 w-4" aria-hidden="true" />
-        </Link>
-        <Link
-          to={spaceUrl(space.identity.id, "holdings")}
-          className="inline-flex min-h-10 items-center rounded-lg border border-slate-700 px-4 py-2.5 text-sm text-slate-200 hover:border-cyan-600"
-        >
-          Holdings &amp; rules
-        </Link>
-      </div>
-    </article>
+      </article>
+    </Link>
   );
 }
 
@@ -125,7 +127,7 @@ export default function Spaces() {
     setLoading(true);
     setError(null);
     spaceAdapter
-      .listSpaces(50, wallet.address ?? undefined)
+      .listSpaces(100, wallet.address ?? undefined)
       .then((next) => {
         if (active) setSpaces(next);
       })
@@ -162,17 +164,18 @@ export default function Spaces() {
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
-          {wallet.address && (
-            <Link
-              to="/spaces/new"
-              className="inline-flex min-h-10 items-center rounded-lg bg-cyan-700 px-3 py-2 text-sm font-medium text-white hover:bg-cyan-600"
-            >
-              Create Space
-            </Link>
-          )}
+          <Link
+            to="/spaces/new"
+            className="inline-flex min-h-10 items-center rounded-lg bg-cyan-700 px-3 py-2 text-sm font-medium text-white hover:bg-cyan-600"
+          >
+            Create Space
+          </Link>
           <button
             type="button"
-            onClick={() => setRefreshKey((current) => current + 1)}
+            onClick={() => {
+              invalidateSpaceCache();
+              setRefreshKey((current) => current + 1);
+            }}
             className="inline-flex min-h-10 items-center gap-2 rounded-lg border border-slate-700 px-3 py-2 text-sm text-slate-200 hover:border-cyan-500"
           >
             <RefreshCw className="h-4 w-4" aria-hidden="true" /> Refresh
@@ -200,7 +203,10 @@ export default function Spaces() {
           </p>
           <button
             type="button"
-            onClick={() => setRefreshKey((current) => current + 1)}
+            onClick={() => {
+              invalidateSpaceCache();
+              setRefreshKey((current) => current + 1);
+            }}
             className="rounded-lg border border-red-800 px-4 py-2 text-sm text-red-100 hover:border-red-500"
           >
             Try again

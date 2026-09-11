@@ -1,4 +1,6 @@
 export * from "./api.js";
+export * from "./auth.js";
+export * from "./agent.js";
 export * from "./delegation.js";
 export * from "./activity.js";
 export * from "./events.js";

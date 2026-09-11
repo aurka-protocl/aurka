@@ -11,6 +11,9 @@ export * from "./risk-service.js";
 export * from "./solver/index.js";
 export * from "./agent/openrouter.js";
 export * from "./agent/delegated.js";
+export * from "./agent/trading-agents.js";
+export * from "./agent/worker.js";
+export * from "./api/auth.js";
 
 export * from "./risk-worker.js";
 export * from "./risk-registry.js";

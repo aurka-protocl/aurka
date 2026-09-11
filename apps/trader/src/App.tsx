@@ -12,6 +12,7 @@ import Trade from "./pages/Trade";
 import History from "./pages/History";
 import Status from "./pages/Status";
 import SpaceForm from "./pages/SpaceForm";
+import Agent from "./pages/Agent";
 import { WalletProvider } from "./wallet";
 import { spaceAdapter, spaceUrl } from "./domain/spaces";
 import { userFacingError } from "./ui";
@@ -83,6 +84,7 @@ function AppRoutes() {
 
           <Route path="/trade" element={<Trade />} />
           <Route path="/trade/:spaceId" element={<Trade />} />
+          <Route path="/agent" element={<Agent />} />
           <Route path="/activity" element={<History />} />
           <Route path="/about" element={<Status />} />
 

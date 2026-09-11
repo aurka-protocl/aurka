@@ -148,6 +148,8 @@ export interface DelegatedWalletAdapter {
     context: PrivyAuthorizationContext,
   ): Promise<{ readonly transactionHash: string }>;
   revoke(): Promise<void>;
+  /** Reattach the execution signer only after a fresh owner authorization. */
+  restore?(): Promise<void>;
   /**
    * Recovery is deliberately separate from the delegated signer. The
    * operator callback must use the owner-controlled recovery path and may
@@ -215,6 +217,7 @@ export interface DelegatedPrivyAdapterOptions {
     request: Record<string, unknown>,
   ) => Promise<PrivyAuthorizationContext>;
   readonly revokeRemote: () => Promise<void>;
+  readonly restoreRemote?: () => Promise<void>;
   readonly recoverRemote?: (input: {
     readonly sessionId: string;
     readonly ownerAddress: string;
@@ -1164,6 +1167,12 @@ export class PrivyDelegatedExecutionAdapter implements DelegatedWalletAdapter {
 
   async revoke(): Promise<void> {
     await this.options.revokeRemote();
+  }
+
+  async restore(): Promise<void> {
+    if (!this.options.restoreRemote)
+      throw new Error("Delegated signer restore is not configured");
+    await this.options.restoreRemote();
   }
 
   async recover(input: {

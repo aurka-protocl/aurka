@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { activateForkSpace, parseSendCallsResult } from "./space-setup";
+import { activateTestnetSpace, parseSendCallsResult } from "./space-setup";
 
 describe("wallet call result parsing", () => {
   it("accepts the standard SendCallsResult object", () => {
@@ -91,7 +91,7 @@ describe("atomic Space setup recovery", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(
-      activateForkSpace("space:one", owner, provider, () => {}),
+      activateTestnetSpace("space:one", owner, provider, () => {}),
     ).resolves.toMatchObject({ identity: {} });
     expect(
       requests.some(
@@ -160,7 +160,7 @@ describe("atomic Space setup recovery", () => {
           return {
             ok: false,
             json: async () => ({
-              error: "The fork RPC cannot verify the partial batch.",
+              error: "The testnet RPC cannot verify the partial batch.",
             }),
           };
         return {
@@ -176,8 +176,8 @@ describe("atomic Space setup recovery", () => {
     );
 
     await expect(
-      activateForkSpace("space:partial", owner, provider, () => {}),
-    ).rejects.toThrow("fork RPC cannot verify");
+      activateTestnetSpace("space:partial", owner, provider, () => {}),
+    ).rejects.toThrow("testnet RPC cannot verify");
     expect(local.getItem(`${key}:batch`)).not.toBeNull();
   });
 
@@ -259,7 +259,7 @@ describe("atomic Space setup recovery", () => {
     );
 
     await expect(
-      activateForkSpace("space:retry", owner, provider, () => {}),
+      activateTestnetSpace("space:retry", owner, provider, () => {}),
     ).resolves.toMatchObject({ identity: {} });
     expect(requests).toContain("reconcile:500");
     expect(
@@ -290,7 +290,12 @@ describe("atomic Space setup recovery", () => {
     );
 
     await expect(
-      activateForkSpace("space:missing-transaction", owner, provider, () => {}),
+      activateTestnetSpace(
+        "space:missing-transaction",
+        owner,
+        provider,
+        () => {},
+      ),
     ).rejects.toThrow("did not return the transaction");
     expect(provider.request).not.toHaveBeenCalledWith(
       expect.objectContaining({ method: "eth_sendTransaction" }),
@@ -335,7 +340,7 @@ describe("atomic Space setup recovery", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(
-      activateForkSpace("space:reload", owner, provider, () => {}),
+      activateTestnetSpace("space:reload", owner, provider, () => {}),
     ).resolves.toMatchObject({ identity: {} });
     expect(
       provider.request.mock.calls.some(
@@ -345,10 +350,10 @@ describe("atomic Space setup recovery", () => {
     expect(local.getItem(key)).toBeNull();
   });
 
-  it("blocks a saved transaction when the wallet is on a different fork instance", async () => {
+  it("blocks a saved transaction when the wallet is on a different testnet instance", async () => {
     const local = storage();
     vi.stubGlobal("localStorage", local);
-    const forked = {
+    const testnetSetup = {
       ...prepare,
       forkGeneration: "fork-new",
       forkAnchor: {
@@ -367,12 +372,12 @@ describe("atomic Space setup recovery", () => {
     };
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => ({ ok: true, json: async () => forked })),
+      vi.fn(async () => ({ ok: true, json: async () => testnetSetup })),
     );
 
     await expect(
-      activateForkSpace("space:fork-mismatch", owner, provider, () => {}),
-    ).rejects.toMatchObject({ state: "fork-mismatch" });
+      activateTestnetSpace("space:testnet-mismatch", owner, provider, () => {}),
+    ).rejects.toMatchObject({ state: "testnet-mismatch" });
     expect(provider.request).not.toHaveBeenCalledWith(
       expect.objectContaining({ method: "eth_sendTransaction" }),
     );
@@ -421,7 +426,7 @@ describe("atomic Space setup recovery", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(
-      activateForkSpace(
+      activateTestnetSpace(
         "space:safe-retry",
         owner,
         provider,
@@ -437,7 +442,7 @@ describe("atomic Space setup recovery", () => {
     ).toHaveLength(1);
     expect(
       fetchMock.mock.calls.some(([input]) =>
-        String(input).endsWith("/fork/spaces/recover"),
+        String(input).endsWith("/testnet/spaces/recover"),
       ),
     ).toBe(true);
   });
@@ -527,7 +532,7 @@ describe("atomic Space setup recovery", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(
-      activateForkSpace("space:single", owner, provider, () => {}),
+      activateTestnetSpace("space:single", owner, provider, () => {}),
     ).resolves.toMatchObject({ identity: {} });
     expect(
       requests.filter(({ method }) => method === "eth_sendTransaction"),

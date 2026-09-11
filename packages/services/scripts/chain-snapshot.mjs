@@ -94,11 +94,18 @@ export function policyFrom(raw) {
 }
 
 export class LocalChainSnapshotProvider {
-  constructor(publicClient, contracts, solverAddress, space = DEFAULT_SPACE) {
+  constructor(
+    publicClient,
+    contracts,
+    solverAddress,
+    space = DEFAULT_SPACE,
+    chainId = CHAIN_ID,
+  ) {
     this.publicClient = publicClient;
     this.contracts = contracts;
     this.solverAddress = solverAddress;
     this.space = space;
+    this.chainId = chainId;
   }
 
   async getPositionSnapshot(positionId) {
@@ -345,7 +352,7 @@ export class LocalChainSnapshotProvider {
       aquaStrategyHash: this.space.strategyHash,
       capacityBaselineValue: chainPolicy.maximumTransactionValue,
       consumedBefore: 0n,
-      chainId: BigInt(CHAIN_ID),
+      chainId: BigInt(this.chainId),
       verifyingContract: router.address,
     };
     const portfolioSnapshot = {
@@ -368,7 +375,7 @@ export class LocalChainSnapshotProvider {
     };
     return {
       positionId: this.space.positionId,
-      chainId: CHAIN_ID,
+      chainId: this.chainId,
       verifyingContract: router.address,
       policyId: this.space.policyId,
       policy: {

@@ -9,7 +9,7 @@ import {
 } from "./primitives.js";
 import { assetBoundSchema } from "./policy.js";
 
-export const spaceEnvironmentSchema = z.enum(["demo", "fork"]);
+export const spaceEnvironmentSchema = z.enum(["demo", "testnet", "fork"]);
 /** Drafts are signed payloads. Bumping this value prevents old fixed-funding
  * drafts from being silently interpreted as a new owner-selected allocation. */
 export const SPACE_DRAFT_VERSION = 2 as const;

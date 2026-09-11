@@ -85,6 +85,34 @@
       "when": 1789084800001,
       "tag": "0011_delegated_receipt_expectation",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1789084800002,
+      "tag": "0012_per_user_agents",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1789084800003,
+      "tag": "0013_delegated_worker_leases",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1789166400000,
+      "tag": "0014_agent_funding_operations",
+      "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "7",
+      "when": 1789166400001,
+      "tag": "0015_agent_provisioning_operations",
+      "breakpoints": true
     }
   ]
 }

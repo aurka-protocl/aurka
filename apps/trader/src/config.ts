@@ -11,8 +11,8 @@ function configuredUrl(value: string | undefined): string | undefined {
   return trimmed ? trimmed : undefined;
 }
 
-export const appMode: "demo" | "fork" =
-  environment.VITE_AURKA_MODE === "fork" ? "fork" : "demo";
+export const appMode: "demo" | "testnet" =
+  environment.VITE_AURKA_MODE === "testnet" ? "testnet" : "demo";
 
 const configuredChainId = Number(environment.VITE_AURKA_CHAIN_ID ?? "31337");
 
@@ -26,7 +26,7 @@ export const supportedChainId =
     : 31337;
 
 export const environmentLabel =
-  appMode === "fork"
+  appMode === "testnet"
     ? supportedChainId === 11155111
       ? "Ethereum Sepolia · test funds · demo tokens"
       : "Test network · test funds"

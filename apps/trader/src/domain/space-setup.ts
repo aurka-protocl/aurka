@@ -76,7 +76,10 @@ type SavedApproval = {
 };
 
 export type SetupRecoveryState =
-  "pending" | "confirmation-unavailable" | "fork-mismatch" | "action-required";
+  | "pending"
+  | "confirmation-unavailable"
+  | "testnet-mismatch"
+  | "action-required";
 
 export class SetupRecoveryError extends Error {
   constructor(
@@ -118,10 +121,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function parseSetup(value: unknown): Setup {
   if (!isRecord(value) || typeof value.complete !== "boolean")
-    throw new Error("Fork setup returned a malformed response.");
+    throw new Error("Testnet setup returned a malformed response.");
   if (value.complete) {
     if (!value.space || !isRecord(value.space))
-      throw new Error("Fork setup completed without a verified Space.");
+      throw new Error("Testnet setup completed without a verified Space.");
     return value as unknown as Setup;
   }
   const transaction = value.transaction;
@@ -132,11 +135,13 @@ function parseSetup(value: unknown): Setup {
     typeof transaction.value !== "string"
   )
     throw new Error(
-      "The fork did not return the transaction for the current setup step; check the setup state before retrying.",
+      "The testnet did not return the transaction for the current setup step; check the setup state before retrying.",
     );
   if (value.prerequisites !== undefined) {
     if (!Array.isArray(value.prerequisites))
-      throw new Error("Fork setup returned malformed approval prerequisites.");
+      throw new Error(
+        "Testnet setup returned malformed approval prerequisites.",
+      );
     for (const prerequisite of value.prerequisites) {
       if (
         !isRecord(prerequisite) ||
@@ -150,7 +155,7 @@ function parseSetup(value: unknown): Setup {
         typeof prerequisite.transaction.value !== "string"
       )
         throw new Error(
-          "Fork setup returned malformed approval prerequisites.",
+          "Testnet setup returned malformed approval prerequisites.",
         );
     }
   }
@@ -255,8 +260,8 @@ function assertSavedSubmission(
     submitted.forkGeneration !== setup.forkGeneration
   )
     throw new SetupRecoveryError(
-      "fork-mismatch",
-      "Saved setup transaction belongs to a different local fork instance; check the original wallet and fork before retrying.",
+      "testnet-mismatch",
+      "Saved setup transaction belongs to a different local testnet instance; check the original wallet and testnet before retrying.",
       submitted.hash,
     );
   if (submitted.planId && setup.planId && submitted.planId !== setup.planId)
@@ -277,7 +282,7 @@ function assertSavedSubmission(
     );
 }
 
-async function assertWalletForkContext(
+async function assertWalletTestnetContext(
   provider: Provider,
   owner: string,
   setup: Setup,
@@ -315,7 +320,7 @@ async function assertWalletForkContext(
     } catch (error) {
       throw new SetupRecoveryError(
         "confirmation-unavailable",
-        `The wallet could not verify the configured fork instance: ${error instanceof Error ? error.message : String(error)}`,
+        `The wallet could not verify the configured testnet instance: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
     if (
@@ -324,8 +329,8 @@ async function assertWalletForkContext(
       block.hash.toLowerCase() !== expected.blockHash.toLowerCase()
     )
       throw new SetupRecoveryError(
-        "fork-mismatch",
-        "The wallet and setup server are on different local fork instances; no saved transaction was reused.",
+        "testnet-mismatch",
+        "The wallet and setup server are on different local testnet instances; no saved transaction was reused.",
       );
   }
 }
@@ -403,7 +408,7 @@ async function completePrerequisites(
     const key = `${baseKey}:approval:${prerequisite.token.toLowerCase()}`;
     const savedValue = localStorage.getItem(key);
     let saved = savedValue ? parseSavedApproval(savedValue) : undefined;
-    await assertWalletForkContext(provider, owner, setup);
+    await assertWalletTestnetContext(provider, owner, setup);
     if (saved) {
       if (
         saved.token.toLowerCase() !== prerequisite.token.toLowerCase() ||
@@ -422,8 +427,8 @@ async function completePrerequisites(
         saved.forkGeneration !== setup.forkGeneration
       )
         throw new SetupRecoveryError(
-          "fork-mismatch",
-          "Saved token approval belongs to a different local fork instance; it was not reused.",
+          "testnet-mismatch",
+          "Saved token approval belongs to a different local testnet instance; it was not reused.",
           saved.hash,
         );
     } else {
@@ -529,7 +534,7 @@ async function request(action: string, body: unknown): Promise<Setup> {
   let response: Response;
   let result: unknown;
   try {
-    response = await fetch(`${apiBaseUrl}/fork/spaces/${action}`, {
+    response = await fetch(`${apiBaseUrl}/testnet/spaces/${action}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
@@ -559,7 +564,7 @@ async function request(action: string, body: unknown): Promise<Setup> {
 }
 
 /** Persist the submitted hash before waiting, so reload resumes verification rather than rebroadcasting. */
-export async function activateForkSpace(
+export async function activateTestnetSpace(
   spaceId: string,
   owner: string,
   provider: Provider,
@@ -569,7 +574,7 @@ export async function activateForkSpace(
 ): Promise<SpaceRecord> {
   const chain = await provider.request({ method: "eth_chainId" });
   if (Number(chain) !== supportedChainId)
-    throw new Error("Switch your wallet to the configured fork chain.");
+    throw new Error("Switch your wallet to the configured testnet chain.");
   const key = `aurka:space-setup:${supportedChainId}:${owner.toLowerCase()}:${spaceId}:${operation}`;
   let setup = await request("prepare", { spaceId, operation });
   while (!setup.complete) {
@@ -577,7 +582,7 @@ export async function activateForkSpace(
       progress(`Required gas estimate: ${setup.gasEstimate} gas units.`);
     if (setup.ownerAddress.toLowerCase() !== owner.toLowerCase())
       throw new Error("Connect the recorded Space owner.");
-    await assertWalletForkContext(provider, owner, setup);
+    await assertWalletTestnetContext(provider, owner, setup);
     const requestedAction = setupAction;
     setupAction = "start";
     const pendingValue = localStorage.getItem(key);
@@ -602,8 +607,8 @@ export async function activateForkSpace(
       batch.forkGeneration !== setup.forkGeneration
     )
       throw new SetupRecoveryError(
-        "fork-mismatch",
-        "Saved wallet batch belongs to a different local fork instance; check the original wallet and fork before retrying.",
+        "testnet-mismatch",
+        "Saved wallet batch belongs to a different local testnet instance; check the original wallet and testnet before retrying.",
         batch.id,
       );
     if (
@@ -794,7 +799,7 @@ export async function activateForkSpace(
         if (isRetryableVerificationError(error))
           throw new SetupRecoveryError(
             "confirmation-unavailable",
-            "The server cannot yet prove that the missing setup transaction had no effect. Check the original fork before retrying.",
+            "The server cannot yet prove that the missing setup transaction had no effect. Check the original testnet before retrying.",
             submittedHash,
           );
         throw recoveryError(
@@ -904,7 +909,7 @@ export async function activateForkSpace(
           result.status === "pending" ? "pending" : "confirmation-unavailable",
           result.status === "pending"
             ? "The setup transaction is still pending. Check again to continue verifying the same hash; no new transaction was sent."
-            : "The wallet or fork RPC could not confirm this setup transaction. Check again; no new transaction was sent.",
+            : "The wallet or testnet RPC could not confirm this setup transaction. Check again; no new transaction was sent.",
           submittedHash,
         );
       }

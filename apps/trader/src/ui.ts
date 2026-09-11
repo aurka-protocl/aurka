@@ -15,6 +15,66 @@ const errorLabels: Record<string, string> = {
     "This token configuration is inconsistent. Ask an administrator to review the Space.",
   AUTHORIZATION_PENDING:
     "The wallet authorization is still pending. Review the wallet request and try again.",
+  AUTH_REQUIRED:
+    "Connect and sign in with the wallet that owns this agent before continuing.",
+  AUTH_ORIGIN_MISMATCH:
+    "The login request came from a different app origin. Start the wallet login again from this page.",
+  AGENT_NOT_FOUND:
+    "That trading agent does not belong to the connected wallet.",
+  AGENT_PROVISIONING_UNAVAILABLE:
+    "A per-user Privy trading wallet could not be provisioned. Try again shortly.",
+  AGENT_FAUCET_UNAVAILABLE:
+    "Sepolia test funding is not configured on this deployment.",
+  AGENT_FAUCET_COOLDOWN:
+    "Test funding is rate-limited. Wait a moment before requesting it again.",
+  AGENT_FUNDING_LIMIT: "The requested test balance is above the faucet limit.",
+  AGENT_FUNDING_FAILED:
+    "Test funding did not finish. Check the agent status and retry the unfinished amount.",
+  AGENT_FUNDING_INVALID: "Enter a non-zero test funding amount.",
+  AGENT_RECONCILIATION_REQUIRED:
+    "The provider result is uncertain. Reconcile the agent before trying to create another wallet.",
+  DELEGATED_MINIMUM_RATE:
+    "The proposed trade is below the minimum output/input rate you reviewed.",
+  DELEGATED_APPROVAL_UNAVAILABLE:
+    "The Privy agent wallet cannot approve its token allowance on this deployment. Check the delegated policy methods and settlement router.",
+  DELEGATED_APPROVAL_FAILED:
+    "Privy could not approve the agent wallet's token allowance. Check that the agent wallet has Sepolia ETH for gas and retry the approval step.",
+  DELEGATED_AUTHORIZATION_REPLAYED:
+    "That delegated approval was already used. Start the step again to create a fresh wallet signature.",
+  DELEGATED_CONTROL_EXPIRED:
+    "That control approval expired. Click the action again and approve the fresh wallet signature.",
+  DELEGATED_CONTROL_MISMATCH:
+    "The wallet approval did not match this delegated action. Start the action again and approve the exact request.",
+  DELEGATED_EXPIRY_INVALID:
+    "The delegated session expiry is invalid. Create a new session with the default short lifetime.",
+  DELEGATED_DIRECTION:
+    "The agent proposal used a different token direction than this session. Create a new session for the displayed pair.",
+  DELEGATED_EXECUTION_FAILED:
+    "Privy could not submit the delegated trade. Confirm the agent allowance was approved, the agent wallet has Sepolia ETH, and the Space still has capacity.",
+  DELEGATED_EXHAUSTED:
+    "This delegated session used its complete trade budget. Create a new session to continue.",
+  DELEGATED_NOT_ACTIVE:
+    "This delegated session is not running. Open the wizard and start it from its current step.",
+  DELEGATED_POLICY_CHANGED:
+    "The Privy policy changed while this session was open. Reconcile it, then create a fresh session.",
+  DELEGATED_RECONCILIATION_REQUIRED:
+    "A previous delegated transaction is still being checked. Reconcile the session before starting another trade.",
+  DELEGATED_REVOKE_PENDING:
+    "Privy revocation is still pending. Wait for it to settle, then retry Stop before recovering funds.",
+  DELEGATED_SPACE_INELIGIBLE:
+    "The selected Space is not eligible for this delegated session. Choose an active Space with the displayed token pair.",
+  DELEGATED_TRADE_CAP:
+    "The agent proposal exceeded this session's per-trade limit. Create a session with a larger reviewed limit.",
+  DELEGATED_UNAVAILABLE:
+    "The Privy delegated wallet is not available on this deployment. Check the server-side wallet configuration.",
+  DELEGATED_WALLET_MISMATCH:
+    "The configured Privy agent wallet or policy changed. Reconcile it and create a fresh session.",
+  DELEGATED_OWNER_BINDING_MISSING:
+    "The Privy agent has no server-trusted owner binding. Configure the delegated owner address on the service.",
+  DELEGATED_OWNER_UNAUTHORIZED:
+    "This connected wallet is not the owner authorized for the Privy agent.",
+  DELEGATED_SESSION_NOT_FOUND:
+    "This delegated session is no longer available. Create a new session.",
   CHAIN_MISMATCH:
     "Your wallet is on the wrong network. Switch to the network shown in the app and try again.",
   COMMITMENT_MISMATCH:
@@ -23,12 +83,16 @@ const errorLabels: Record<string, string> = {
     "This test-network session is out of date. Reload the app before retrying.",
   FUNDING_CONFIGURATION_UNAVAILABLE:
     "Space funding is unavailable on this deployment. Ask an administrator to review the setup.",
+  INSUFFICIENT_FUNDING:
+    "The owner wallet does not have enough demo USDC/WETH for this Space. Claim the free Sepolia demo tokens on the Funding step, then try again.",
   INFEASIBLE_BOUNDS:
     "Those portfolio limits cannot be satisfied with the selected funding.",
   INVALID_FUNDING_AMOUNT:
     "Enter positive token amounts with the precision shown in the form.",
   INVALID_SIGNATURE:
     "The wallet signature could not be verified. Review the request and try again.",
+  OWNER_WALLET_SIGNATURE_TIMEOUT:
+    "Your browser wallet did not answer the signing request. Check for a hidden wallet popup, finish or reject it, and try again with the owner wallet on Sepolia.",
   INTERNAL_ERROR: "The service could not complete that request. Try again.",
   INVALID_RESPONSE: "The service returned an unexpected response. Try again.",
   INVALID_REQUEST: "Review the request details and try again.",
@@ -76,6 +140,13 @@ export function userFacingError(
   fallback = "That request could not be completed. Try again.",
 ): string {
   if (error instanceof AurkaError)
+    return errorLabels[error.code] ?? withSupportCode(fallback);
+  if (
+    error &&
+    typeof error === "object" &&
+    "code" in error &&
+    typeof error.code === "string"
+  )
     return errorLabels[error.code] ?? withSupportCode(fallback);
   const message = error instanceof Error ? error.message.trim() : "";
   if (!message) return withSupportCode(fallback);

@@ -78,8 +78,8 @@ export default function Status() {
           </li>
         </ul>
         <p className="mt-4 text-xs leading-5 text-slate-500">
-          {appMode === "fork"
-            ? "This fork may read selected upstream contracts or fixture integrations; the trade page labels the configured path."
+          {appMode === "testnet"
+            ? "This testnet may read selected upstream contracts or fixture integrations; the trade page labels the configured path."
             : "The local demo does not claim live market data, custody, or a public deployment."}
         </p>
       </section>

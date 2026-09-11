@@ -18,6 +18,7 @@ import {
 import { ActivityFeed, ActivityLink } from "../components/ActivityFeed";
 import { apiBaseUrl, appMode } from "../config";
 import {
+  invalidateSpaceCache,
   spaceAdapter,
   spaceUrl,
   tradeUrl,
@@ -166,7 +167,10 @@ function SpacePage({
     };
   }, [refreshKey, spaceId]);
 
-  const refresh = () => setRefreshKey((current) => current + 1);
+  const refresh = () => {
+    if (spaceId) invalidateSpaceCache(spaceId);
+    setRefreshKey((current) => current + 1);
+  };
 
   if (loading)
     return (
@@ -884,8 +888,8 @@ function AdvancedDetails({
         <div>
           <dt className="text-slate-500">Source mode</dt>
           <dd className="mt-1 text-slate-200">
-            {space.identity.mode === "fork"
-              ? "Fork chain reader"
+            {space.identity.mode === "testnet"
+              ? "Ethereum Sepolia contract reader"
               : "Demo clock / local provider"}
           </dd>
         </div>
@@ -1155,7 +1159,7 @@ export function SpaceSettings() {
             <SpaceOwnerControls space={space} onChanged={refresh} />
           ) : null}
           {!editing &&
-            appMode !== "fork" &&
+            appMode !== "testnet" &&
             space.identity.state === "DRAFT" && (
               <p className="rounded-xl border border-slate-800 bg-slate-900/60 p-4 text-sm leading-6 text-slate-400">
                 This draft has no holdings yet. Activation requires the recorded

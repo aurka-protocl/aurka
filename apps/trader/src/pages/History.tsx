@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { AurkaClient } from "@aurka/sdk";
 import {
   activityStatusSchema,
   activityTypeSchema,
@@ -12,7 +11,7 @@ import {
   ActivityFeed,
   type ActivityFeedQuery,
 } from "../components/ActivityFeed";
-import { apiBaseUrl } from "../config";
+import { spaceAdapter } from "../domain/spaces";
 import { userFacingError } from "../ui";
 
 const ACTIVITY_TYPES = activityTypeSchema.options;
@@ -221,10 +220,10 @@ export default function History() {
 
   useEffect(() => {
     let active = true;
-    new AurkaClient({ baseUrl: apiBaseUrl })
+    spaceAdapter
       .listSpaces(100)
-      .then((page) => {
-        if (active) setSpaces(page.items);
+      .then((next) => {
+        if (active) setSpaces(next);
       })
       .catch((error: unknown) => {
         if (active)

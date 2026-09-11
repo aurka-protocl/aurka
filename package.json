@@ -24,6 +24,10 @@
     "sepolia:plan": "node --env-file-if-exists=.env.sepolia packages/services/scripts/sepolia-deploy.mjs plan",
     "sepolia:check": "node --env-file-if-exists=.env.sepolia packages/services/scripts/sepolia-deploy.mjs check",
     "sepolia:deploy": "node --env-file-if-exists=.env.sepolia packages/services/scripts/sepolia-deploy.mjs deploy",
+    "sepolia:space": "node --env-file-if-exists=.env.sepolia packages/services/scripts/sepolia-space-setup.mjs",
+    "sepolia:trade": "node --env-file-if-exists=.env.sepolia packages/services/scripts/sepolia-trade-acceptance.mjs",
+    "sepolia:reactivate": "node --env-file-if-exists=.env.sepolia --env-file-if-exists=.env packages/services/scripts/sepolia-reactivate.mjs",
+    "sepolia:app": "node --env-file-if-exists=.env.sepolia --env-file-if-exists=.env packages/services/scripts/sepolia-app.mjs",
     "contracts:build-upstream": "node contracts/script/build-upstream.mjs",
     "contracts:check-upstream": "node contracts/script/build-upstream.mjs --check",
     "contracts:test": "pnpm contracts:build-upstream && forge test",
@@ -35,6 +39,7 @@
     "integration:fork-wallet": "node packages/services/scripts/fork-wallet-e2e.mjs",
     "privy:delegated": "node --env-file-if-exists=.env packages/wallet/scripts/privy-delegated-wallet.mjs",
     "app:dev": "pnpm --filter @aurka/trader-app dev --host 127.0.0.1 --strictPort",
+    "app:testnet": "VITE_AURKA_MODE=testnet VITE_AURKA_CHAIN_ID=11155111 AURKA_SERVICE_URL=http://127.0.0.1:8797 pnpm --filter @aurka/trader-app dev --host 127.0.0.1 --strictPort",
     "app:preview": "pnpm --filter @aurka/trader-app preview --host 127.0.0.1 --strictPort"
   },
   "devDependencies": {

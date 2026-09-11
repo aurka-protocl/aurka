@@ -1,6 +1,7 @@
-/* global console, process */
+/* global Buffer, console, process */
 
 import { createHash } from "node:crypto";
+
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -338,12 +339,12 @@ async function deploySepolia() {
   );
 
   const contracts = {};
-  const deploy = async (name, args) => {
+  const deploy = async (name, args, artifactName = name) => {
     const result = await deployContract(
       walletClient,
       publicClient,
       account,
-      artifacts[name],
+      artifacts[artifactName],
       name,
       args,
     );
@@ -352,8 +353,8 @@ async function deploySepolia() {
     return contracts[name];
   };
 
-  const usdc = await deploy("mockERC20", ["AURKA Demo USDC", 6]);
-  const weth = await deploy("mockERC20", ["AURKA Demo WETH", 18]);
+  const usdc = await deploy("usdc", ["AURKA Demo USDC", 6], "mockERC20");
+  const weth = await deploy("weth", ["AURKA Demo WETH", 18], "mockERC20");
   const aqua = await deploy("aqua", []);
   const swapVM = await deploy("swapVM", [
     aqua.address,
@@ -419,7 +420,7 @@ async function deploySepolia() {
   let priceSetup;
   if (prices.mode === "mock") {
     const block = await publicClient.getBlock({
-      blockNumber: BigInt(contracts.oracle.blockNumber),
+      blockNumber: BigInt(oracle.blockNumber),
     });
     const oracleContract = {
       address: oracle.address,

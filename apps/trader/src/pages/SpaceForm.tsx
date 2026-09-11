@@ -11,32 +11,54 @@ import {
   type SpaceRecord,
 } from "@aurka/shared";
 import { apiBaseUrl, appMode, supportedChainId } from "../config";
-import { activateForkSpace, SetupRecoveryError } from "../domain/space-setup";
-import { spaceUrl } from "../domain/spaces";
+import {
+  activateTestnetSpace,
+  SetupRecoveryError,
+} from "../domain/space-setup";
+import { invalidateSpaceCache, spaceUrl } from "../domain/spaces";
 import { setupProgressLabel, userFacingError } from "../ui";
 import { useWallet } from "../wallet";
 
 const client = new AurkaClient({ baseUrl: apiBaseUrl });
 const ZERO = "0x0000000000000000000000000000000000000000";
 const ERC20_BALANCE_OF = "0x70a08231";
+const ERC20_MINT = "0x40c10f19";
+const SEPOLIA_ASSETS: readonly AssetBound[] = [
+  {
+    token: "0x8228fd953cdf5fac815d09ec5ea27ddd9412a714",
+    symbol: "USDC",
+    decimals: 6,
+    minimumWeightBps: 5500,
+    maximumWeightBps: 10000,
+  },
+  {
+    token: "0x33dca285758fd19d1f51c7b73d5a5fb8dae4d2c4",
+    symbol: "WETH",
+    decimals: 18,
+    minimumWeightBps: 0,
+    maximumWeightBps: 4500,
+  },
+];
 const supportedAssets: readonly AssetBound[] =
-  appMode === "fork"
-    ? [
-        {
-          token: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
-          symbol: "USDC",
-          decimals: 6,
-          minimumWeightBps: 5500,
-          maximumWeightBps: 10000,
-        },
-        {
-          token: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
-          symbol: "WETH",
-          decimals: 18,
-          minimumWeightBps: 0,
-          maximumWeightBps: 3500,
-        },
-      ]
+  appMode === "testnet"
+    ? supportedChainId === 11155111
+      ? SEPOLIA_ASSETS
+      : [
+          {
+            token: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+            symbol: "USDC",
+            decimals: 6,
+            minimumWeightBps: 5500,
+            maximumWeightBps: 10000,
+          },
+          {
+            token: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+            symbol: "WETH",
+            decimals: 18,
+            minimumWeightBps: 0,
+            maximumWeightBps: 3500,
+          },
+        ]
     : [
         {
           token: "0x1111111111111111111111111111111111111111",
@@ -61,6 +83,32 @@ const supportedAssets: readonly AssetBound[] =
         },
       ];
 
+function mintCalldata(account: string, amount: bigint): string {
+  return `${ERC20_MINT}${account.slice(2).padStart(64, "0")}${amount.toString(16).padStart(64, "0")}`;
+}
+
+async function waitForReceipt(
+  provider: NonNullable<ReturnType<typeof useWallet>["provider"]>,
+  hash: string,
+): Promise<void> {
+  for (let attempt = 0; attempt < 120; attempt += 1) {
+    const result = await provider.request({
+      method: "eth_getTransactionReceipt",
+      params: [hash],
+    });
+    if (result && typeof result === "object") {
+      const receipt = result as Record<string, unknown>;
+      if (receipt.status === "0x0")
+        throw new Error("The token claim reverted.");
+      if (receipt.blockNumber) return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+  throw new Error(
+    "The token claim is still pending. Check the wallet before retrying.",
+  );
+}
+
 type DraftAsset = AssetBound & {
   readonly minimumText: string;
   readonly maximumText: string;
@@ -71,7 +119,7 @@ type SetupUiState =
   | "awaiting-signature"
   | "submitted"
   | "confirmation-unavailable"
-  | "fork-mismatch"
+  | "testnet-mismatch"
   | "action-required"
   | "confirmed";
 
@@ -142,6 +190,8 @@ export default function SpaceForm({
   const [message, setMessage] = useState<string | null>(null);
   const [setupState, setSetupState] = useState<SetupUiState>("idle");
   const [setupDetails, setSetupDetails] = useState<string | null>(null);
+  const [faucetBusy, setFaucetBusy] = useState(false);
+  const [balanceRevision, setBalanceRevision] = useState(0);
   const [walletBalances, setWalletBalances] = useState<{
     readonly native: bigint;
     readonly usdc: bigint;
@@ -149,7 +199,7 @@ export default function SpaceForm({
   }>();
 
   useEffect(() => {
-    if (appMode !== "fork" || !wallet.provider || !wallet.address) {
+    if (appMode !== "testnet" || !wallet.provider || !wallet.address) {
       setWalletBalances(undefined);
       return;
     }
@@ -193,10 +243,69 @@ export default function SpaceForm({
     return () => {
       active = false;
     };
-  }, [wallet.address, wallet.provider, wallet.revision]);
+  }, [wallet.address, wallet.provider, wallet.revision, balanceRevision]);
+
+  async function claimDemoTokens() {
+    setFaucetBusy(true);
+    setError(null);
+    setMessage(null);
+    try {
+      if (
+        appMode !== "testnet" ||
+        supportedChainId !== 11155111 ||
+        !wallet.address ||
+        !wallet.provider ||
+        wallet.status !== "connected"
+      )
+        throw new Error(
+          "Connect a wallet on Sepolia before claiming demo tokens.",
+        );
+
+      const chainId = await wallet.provider.request({ method: "eth_chainId" });
+      if (typeof chainId !== "string" || BigInt(chainId) !== 11_155_111n)
+        throw new Error(
+          "Switch the wallet to Ethereum Sepolia before claiming demo tokens.",
+        );
+
+      const claims = [
+        { asset: SEPOLIA_ASSETS[0], amount: parseTokenAmount("35000", 6) },
+        { asset: SEPOLIA_ASSETS[1], amount: parseTokenAmount("5", 18) },
+      ];
+      for (const claim of claims) {
+        setMessage(
+          `Approve the ${claim.asset.symbol} demo-token claim in your wallet.`,
+        );
+        const hash = await wallet.provider.request({
+          method: "eth_sendTransaction",
+          params: [
+            {
+              from: wallet.address,
+              to: claim.asset.token,
+              data: mintCalldata(wallet.address, claim.amount),
+              value: "0x0",
+            },
+          ],
+        });
+        if (typeof hash !== "string")
+          throw new Error("The wallet did not return a claim transaction.");
+        setMessage(
+          `Waiting for the ${claim.asset.symbol} demo-token claim to confirm…`,
+        );
+        await waitForReceipt(wallet.provider, hash);
+      }
+      setBalanceRevision((current) => current + 1);
+      setMessage(
+        "Demo tokens claimed: 35,000 USDC + 5 WETH. You can continue creating the Space.",
+      );
+    } catch (requestError) {
+      setError(errorMessage(requestError));
+    } finally {
+      setFaucetBusy(false);
+    }
+  }
 
   useEffect(() => {
-    if (appMode !== "fork" || !wallet.address || !saved) return;
+    if (appMode !== "testnet" || !wallet.address || !saved) return;
     const operation =
       saved.identity.state === "ACTIVE" ||
       saved.identity.state === "REACTIVATION_REQUIRED" ||
@@ -289,13 +398,15 @@ export default function SpaceForm({
       method: "eth_signTypedData_v4",
       params: [wallet.address, JSON.stringify(prepared.typedData)],
     })) as string;
-    return client.confirmSpaceMutation({
+    const result = await client.confirmSpaceMutation({
       operation,
       spaceId: draft.id,
       ownerAddress: wallet.address,
       ...(value ? { draft: value } : {}),
       authorization: { ...prepared.authorization, signature },
     });
+    invalidateSpaceCache(draft.id);
+    return result;
   }
 
   async function saveDraft() {
@@ -313,7 +424,7 @@ export default function SpaceForm({
       setMessage(
         result.space.identity.state === "DRAFT"
           ? "Draft saved. Trading is not active yet."
-          : appMode === "fork"
+          : appMode === "testnet"
             ? "Draft saved. Confirm the next owner approval to apply the rules."
             : "Space changes confirmed.",
       );
@@ -336,7 +447,7 @@ export default function SpaceForm({
     setSetupState(action === "check" ? "submitted" : "awaiting-signature");
     try {
       let current = saved;
-      if (appMode === "fork") {
+      if (appMode === "testnet") {
         if (!wallet.address || !wallet.provider)
           throw new Error("Connect the owner wallet.");
         if (!current) {
@@ -354,7 +465,7 @@ export default function SpaceForm({
             ? "UPDATE"
             : "ACTIVATE";
         if (operation === "UPDATE") await sign("UPDATE", draft);
-        const space = await activateForkSpace(
+        const space = await activateTestnetSpace(
           current.identity.id,
           wallet.address,
           wallet.provider,
@@ -369,6 +480,7 @@ export default function SpaceForm({
           action,
         );
         setSaved(space);
+        invalidateSpaceCache(space.identity.id);
         setSetupState("confirmed");
         setMessage("Space setup confirmed on the test network.");
         navigate(spaceUrl(space.identity.id, "settings"), { replace: true });
@@ -403,14 +515,14 @@ export default function SpaceForm({
         setSetupDetails(
           requestError.state === "pending"
             ? "The wallet request was sent and is awaiting network confirmation."
-            : requestError.state === "fork-mismatch"
+            : requestError.state === "testnet-mismatch"
               ? "The wallet and service are using different test-network instances."
               : "The network did not confirm this setup request. Review the Space details before retrying.",
         );
         setError(
           requestError.state === "pending"
             ? "Setup is submitted and still awaiting confirmation."
-            : requestError.state === "fork-mismatch"
+            : requestError.state === "testnet-mismatch"
               ? "The wallet and service are using different test-network instances."
               : "Setup needs verification before another transaction can be approved.",
         );
@@ -615,6 +727,34 @@ export default function SpaceForm({
         )}
         {step === 4 && (
           <div className="space-y-4">
+            {appMode === "testnet" && supportedChainId === 11155111 && (
+              <div className="rounded-lg border border-cyan-900 bg-cyan-950/30 p-4">
+                <p className="text-sm font-medium text-cyan-100">
+                  Need Sepolia demo funds?
+                </p>
+                <p className="mt-1 text-xs leading-5 text-cyan-200/80">
+                  This deployment uses valueless mock tokens. Claim 35,000 demo
+                  USDC and 5 demo WETH to the connected wallet, then continue
+                  with the funding amounts below. You still need Sepolia ETH for
+                  gas.
+                </p>
+                <button
+                  type="button"
+                  disabled={
+                    faucetBusy ||
+                    wallet.status !== "connected" ||
+                    !wallet.provider ||
+                    !wallet.address
+                  }
+                  onClick={() => void claimDemoTokens()}
+                  className="mt-3 rounded-lg border border-cyan-600 px-4 py-2.5 text-sm font-medium text-cyan-100 disabled:opacity-40"
+                >
+                  {faucetBusy
+                    ? "Claiming demo tokens…"
+                    : "Get free Sepolia demo tokens"}
+                </button>
+              </div>
+            )}
             <div>
               <p className="text-sm font-medium text-slate-200">
                 Starting funding
@@ -676,7 +816,7 @@ export default function SpaceForm({
                 }
               />
               <span className="mt-2 block text-xs text-slate-500">
-                {appMode === "fork"
+                {appMode === "testnet"
                   ? "This test network accepts 1–1,000,000,000"
                   : "This local demo accepts 1,000–1,000,000,000"}{" "}
                 normalized settlement units. Gas is paid by the owner wallet.
@@ -698,7 +838,7 @@ export default function SpaceForm({
                   ? "Waiting for network confirmation"
                   : setupState === "confirmation-unavailable"
                     ? "Confirmation needs attention"
-                    : setupState === "fork-mismatch"
+                    : setupState === "testnet-mismatch"
                       ? "Network context changed"
                       : setupState === "action-required"
                         ? "Review required"
@@ -739,7 +879,7 @@ export default function SpaceForm({
               </details>
             )}
             <p className="text-sm leading-6 text-slate-400">
-              {appMode === "fork"
+              {appMode === "testnet"
                 ? setupState === "submitted"
                   ? "Your wallet request is waiting for confirmation. Check again before trying another request."
                   : setupState === "confirmation-unavailable"
@@ -772,7 +912,7 @@ export default function SpaceForm({
             </button>
           ) : (
             <>
-              {appMode === "fork" &&
+              {appMode === "testnet" &&
                 (setupState === "submitted" ||
                   setupState === "confirmation-unavailable") && (
                   <button
@@ -784,7 +924,7 @@ export default function SpaceForm({
                     Check again
                   </button>
                 )}
-              {appMode === "fork" &&
+              {appMode === "testnet" &&
                 setupState === "confirmation-unavailable" && (
                   <button
                     type="button"
@@ -798,7 +938,7 @@ export default function SpaceForm({
               <button
                 type="button"
                 disabled={
-                  busy || (appMode === "fork" && setupState === "submitted")
+                  busy || (appMode === "testnet" && setupState === "submitted")
                 }
                 onClick={() => void saveDraft()}
                 className="rounded-lg border border-slate-600 px-4 py-2.5 text-sm text-slate-100 disabled:opacity-40"
@@ -813,7 +953,7 @@ export default function SpaceForm({
                 )}
               </button>
               {!(
-                appMode === "fork" &&
+                appMode === "testnet" &&
                 (setupState === "submitted" ||
                   setupState === "confirmation-unavailable")
               ) && (
@@ -823,7 +963,7 @@ export default function SpaceForm({
                   onClick={() => void activate()}
                   className="rounded-lg bg-cyan-700 px-4 py-2.5 text-sm font-medium text-white disabled:opacity-40"
                 >
-                  {appMode === "fork"
+                  {appMode === "testnet"
                     ? saved?.identity.state === "ACTIVE" ||
                       saved?.identity.state === "REACTIVATION_REQUIRED" ||
                       saved?.identity.state === "PAUSED"
@@ -869,8 +1009,8 @@ export function SpaceOwnerControls({
         throw new Error(
           "Connect the recorded Space owner wallet before changing policy.",
         );
-      if (appMode === "fork") {
-        const next = await activateForkSpace(
+      if (appMode === "testnet") {
+        const next = await activateTestnetSpace(
           space.identity.id,
           wallet.address,
           wallet.provider,
@@ -901,6 +1041,7 @@ export function SpaceOwnerControls({
         authorization: { ...prepared.authorization, signature },
       });
       onChanged?.(result.space);
+      invalidateSpaceCache(space.identity.id);
       setMessage(
         operation === "PAUSE" ? "Trading paused." : "Trading resumed.",
       );

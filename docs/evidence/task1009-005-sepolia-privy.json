@@ -1,13 +1,96 @@
 {
   "task": "TASK1009-005",
   "date": "2026-09-11",
-  "status": "BLOCKED_PRE_DEPLOYMENT",
+  "status": "DEPLOYED_PRE_ACCEPTANCE",
   "complete": false,
   "chain": {
     "name": "Ethereum Sepolia",
     "chainId": 11155111,
-    "rpcConfigured": false,
-    "deploymentTransactions": []
+    "rpcConfigured": true,
+    "deploymentTransactions": [
+      {
+        "name": "mockUSDC",
+        "address": "0x8228fd953cdf5fac815d09ec5ea27ddd9412a714",
+        "transactionHash": "0xa7a4dc15799ccff7ce3ea1bfc26a688ad59e66690b0316960b01e0cc12d7b598",
+        "blockNumber": "11682713"
+      },
+      {
+        "name": "mockWETH",
+        "address": "0x33dca285758fd19d1f51c7b73d5a5fb8dae4d2c4",
+        "transactionHash": "0xfa67596a5bbd032bed29e68e5df174a24b86e002350d580eac3d696ccbdeecdf",
+        "blockNumber": "11682715"
+      },
+      {
+        "name": "aqua",
+        "address": "0x86cfe25f92da811b13a240f27722af4a0864adbb",
+        "transactionHash": "0x6007a14b0f1df81b080834bdba4ce9a5bafed0052ace660599540abeb46c9cce",
+        "blockNumber": "11682716"
+      },
+      {
+        "name": "swapVM",
+        "address": "0x58631608715c77284f28d40178fb0ad502d589eb",
+        "transactionHash": "0x8f0822ddf98578bfc8e559411248b9ed63e4ec46cde2feef177ffa9dd0e439fa",
+        "blockNumber": "11682717"
+      },
+      {
+        "name": "policyRegistry",
+        "address": "0x31e5a50ce05221ff691507e2cc95a92504f7a312",
+        "transactionHash": "0x1af33392280d5fc717035e9aae6785582d9aba116572946a4820710eaeeecec8",
+        "blockNumber": "11682719"
+      },
+      {
+        "name": "riskRegistry",
+        "address": "0xecd1b45a243796ed49273a68cd5d6e5c71814889",
+        "transactionHash": "0xebbc70954490bde6653207e4c2b7786553822205ab199fe97081bfc91b7a3f0c",
+        "blockNumber": "11682720"
+      },
+      {
+        "name": "orderValidator",
+        "address": "0x34f47216a712d9e107224dde6aed3aef20fc18c3",
+        "transactionHash": "0x0a2b26121d087d7dd0cd491a1cc2d3bf944665f6df038098a9e911943a95be73",
+        "blockNumber": "11682722"
+      },
+      {
+        "name": "tradeMath",
+        "address": "0xfbcdf12d322c94bba4657113db5561acbe7d6c80",
+        "transactionHash": "0x013df716481082c26f568ca254881396c1027f03527c3dc7bdb721363a418e4a",
+        "blockNumber": "11682723"
+      },
+      {
+        "name": "upstreamExecutor",
+        "address": "0x5434b0e037942d782ecbb00eb74d5159391a96d0",
+        "transactionHash": "0x84b72a2d9548d9a136dfade31cad35927d89e7940f9cab73259de33eaa6b042b",
+        "blockNumber": "11682724"
+      },
+      {
+        "name": "router",
+        "address": "0x550184f121ee6423477f0484c872eabd68b4d3a2",
+        "transactionHash": "0xa844be2c9e86233213a095dfee737833b266ba181ee48e67684600afda34ec86",
+        "blockNumber": "11682726"
+      },
+      {
+        "name": "vaultFactory",
+        "address": "0x98dea6ed2f71f6aee7727a33ce00d2b67a082f0f",
+        "transactionHash": "0x78b5e0b41b04b969a4f38778acc30bcf505c883eeb714110a053a608bd19994c",
+        "blockNumber": "11682728"
+      },
+      {
+        "name": "mockPriceOracle",
+        "address": "0x2324032336b394e0b2514da511cddce649870c9d",
+        "transactionHash": "0xdabd78c1635eea0abc036a320162b5350bc875ad8b8c01cd3ebbd1c808d14c03",
+        "blockNumber": "11682729"
+      },
+      {
+        "name": "executorInitializeRouter",
+        "transactionHash": "0xf9a8dd1fa887bc51393de25fc2cb26c4d2296dad63243a565064ab5fdf14b18a",
+        "blockNumber": "11682727"
+      },
+      {
+        "name": "setInitializationFactory",
+        "transactionHash": "0xae2671236a15302964d167689077c5e313497400da899bcc4684237e21b51f6e",
+        "blockNumber": "11682730"
+      }
+    ]
   },
   "preparedProfile": {
     "planCommand": "pnpm sepolia:plan",
@@ -31,7 +114,7 @@
     "upstreamArtifactCheck": "PASS",
     "forgeBuild": "PASS",
     "traderTypecheck": "PASS",
-    "sepoliaCheck": "PASS_ARTIFACTS_ONLY",
+    "sepoliaCheck": "PASS_CHAIN_AND_MANIFEST",
     "broadcastWithoutOptIn": "REFUSED"
   },
   "sizeGate": {
@@ -54,12 +137,37 @@
     "upstreamSwapVMWrapper": "PASS"
   },
   "liveAcceptance": {
-    "deployment": "NOT_RUN",
-    "aquaStrategy": "NOT_RUN",
-    "swapVMTrade": "NOT_RUN",
+    "deployment": "PASS",
+    "aquaStrategy": "PASS",
+    "swapVMTrade": "PASS_DEPLOYER_SIGNED",
     "privy": "NOT_RUN",
     "graph": "NOT_RUN",
-    "hostedRuntime": "NOT_RUN"
+    "hostedRuntime": "NOT_RUN",
+    "space": {
+      "spaceId": "0xa703ea78675f1bb6951f5af0f6c511b6aaef49458764897c2a1ad49585601299",
+      "policyId": "0x764b99b21f8e6a32b437822b2f037191082ac5b17ee5b2c2d84e80107d1aa3ae",
+      "vault": "0xD6AfBD11F580C744dd8Be4D62894051B18FaFf45",
+      "strategyHash": "0x3f4c38f6d81800b071403e9c564e5493a29e6fedc3bab562dc5c4db0ce1de658",
+      "funding": {
+        "usdcRaw": "60000000000",
+        "wethRaw": "12500000000000000000"
+      },
+      "createTransactionHash": "0x687c3763a928dd5ced513e4047e4ef04958d766255f3213e4546bfaf777a6c6",
+      "createBlockNumber": "11682813"
+    },
+    "swapVMTradeReceipt": {
+      "transactionHash": "0x4ead63aece58ad9e2db4224ffb7242f82d279d28b0a1ebc23cdaed63d8d6aafa",
+      "blockNumber": "11682847",
+      "trader": "0x25D40008ffC27D95D506224a246916d7E7ac0f36",
+      "solver": "0x25D40008ffC27D95D506224a246916d7E7ac0f36",
+      "inputToken": "0x33dca285758fd19d1f51c7b73d5a5fb8dae4d2c4",
+      "outputToken": "0x8228fd953cdf5fac815d09ec5ea27ddd9412a714",
+      "executedValue": "5000",
+      "traderOutputValue": "4976",
+      "treasuryOutputValue": "4980",
+      "totalFeeAmount": "24",
+      "capacityEpochId": "0xe78774156ea3ce22b8bfd300552b78555a7703972e088480c0068ef85f6be122"
+    }
   },
   "localSepoliaPathProof": {
     "sizeAndWiring": "PASS",
@@ -68,8 +176,8 @@
     "testCommand": "forge test --match-contract AurkaSepoliaUpstreamSwapVMRouterTest"
   },
   "limitations": [
-    "No RPC URL or funded Sepolia deployer key was present.",
+    "The RPC and funded deployer are operator-held and are not copied into sanitized evidence.",
     "The full legacy AURKA settlement router is oversized, so the Sepolia profile uses the reduced upstream-only router and helpers.",
-    "No Privy, Graph, hosted infrastructure, or public receipt evidence was created."
+    "Privy, Graph, and hosted infrastructure acceptance has not been run."
   ]
 }

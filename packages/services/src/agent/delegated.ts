@@ -18,6 +18,7 @@ import {
   type DelegatedStatus,
   type DelegatedControlAction,
   type DelegatedControlAuthorization,
+  formatTokenAmount,
 } from "@aurka/shared";
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
@@ -61,6 +62,7 @@ export interface DelegatedAgentProposalSource {
     readonly message: string;
     readonly trader: string;
     readonly chainId: number;
+    readonly spaceId?: string;
   }): Promise<AgentProposalResponse>;
 }
 
@@ -69,6 +71,10 @@ export interface DelegatedSessionServiceOptions {
   readonly authorizationContext?: () => Promise<WalletAuthorizationContext>;
   /** A server-trusted application identity bound to the configured wallet. */
   readonly trustedOwnerAddress?: string;
+  /** Resolves a durable per-user Privy wallet without mutating process.env. */
+  readonly walletResolver?: (
+    walletId: string,
+  ) => Promise<DelegatedWalletAdapter>;
 }
 
 type DelegatedOperatorModule = {
@@ -115,6 +121,7 @@ type DelegatedAuthorizationModule = {
 export async function createDelegatedSessionServiceFromEnv(
   service: AurkaService,
   agent: DelegatedAgentProposalSource,
+  options: Pick<DelegatedSessionServiceOptions, "walletResolver"> = {},
 ): Promise<DelegatedSessionService> {
   const walletId = process.env.PRIVY_DELEGATED_WALLET_ID?.trim();
   const signerId = process.env.PRIVY_DELEGATED_SIGNER_ID?.trim();
@@ -211,7 +218,7 @@ export async function createDelegatedSessionServiceFromEnv(
     service,
     agent,
     new PrivyDelegatedExecutionAdapter(adapterOptions),
-    { trustedOwnerAddress },
+    { trustedOwnerAddress, ...options },
   );
 }
 
@@ -473,6 +480,8 @@ export class DelegatedSessionService {
   private readonly now: () => number;
   private readonly authorizationContext: () => Promise<WalletAuthorizationContext>;
   private readonly trustedOwnerAddress: string | undefined;
+  private readonly walletResolver:
+    ((walletId: string) => Promise<DelegatedWalletAdapter>) | undefined;
   private walletOperation: Promise<void> = Promise.resolve();
 
   constructor(
@@ -486,6 +495,21 @@ export class DelegatedSessionService {
       options.authorizationContext ??
       (async () => ({}) as WalletAuthorizationContext);
     this.trustedOwnerAddress = options.trustedOwnerAddress;
+    this.walletResolver = options.walletResolver;
+  }
+
+  private async resolveWallet(
+    walletId: string,
+  ): Promise<DelegatedWalletAdapter> {
+    return this.walletResolver ? this.walletResolver(walletId) : this.wallet;
+  }
+
+  private async resolveWalletForAddress(
+    walletAddress: string,
+  ): Promise<DelegatedWalletAdapter> {
+    const agent =
+      this.service.repository.getTradingAgentByWalletAddress(walletAddress);
+    return agent ? this.resolveWallet(agent.walletId) : this.wallet;
   }
 
   private async withWalletOperation<T>(
@@ -512,7 +536,13 @@ export class DelegatedSessionService {
     );
   }
 
-  private assertTrustedOwner(ownerAddress: string): void {
+  private assertTrustedOwner(
+    ownerAddress: string,
+    chainId = this.service.runtime.chainId,
+  ): void {
+    // New per-user agents are authenticated by the durable agent registry.
+    // The legacy singleton remains bound to PRIVY_DELEGATED_OWNER_ADDRESS.
+    if (this.service.repository.getTradingAgent(ownerAddress, chainId)) return;
     if (this.trustedOwnerAddress === undefined)
       throw new ServiceError(
         "DELEGATED_OWNER_BINDING_MISSING",
@@ -630,6 +660,7 @@ export class DelegatedSessionService {
     const wallet = await this.wallet.getStatus();
     return delegatedStatusSchema.parse({
       wallet,
+      ownerAddress: this.trustedOwnerAddress ?? null,
       activeSessions: this.service.repository.activeDelegatedSessionCount(),
     });
   }
@@ -638,7 +669,10 @@ export class DelegatedSessionService {
     raw: DelegatedSessionAuthorization,
   ): Promise<DelegatedSession> {
     const value = raw;
-    const wallet = await this.wallet.getStatus();
+    const delegatedWallet = await this.resolveWalletForAddress(
+      value.agentWallet,
+    );
+    let wallet = await delegatedWallet.getStatus();
     if (
       !wallet.configured ||
       !wallet.address ||
@@ -656,12 +690,7 @@ export class DelegatedSessionService {
       this.service.runtime.chainId,
       this.now(),
     );
-    this.assertTrustedOwner(plan.ownerAddress);
-    if (!wallet.enabled || wallet.revoked)
-      throw new ServiceError(
-        "DELEGATED_REVOKED",
-        "Delegated Privy wallet is not enabled",
-      );
+    this.assertTrustedOwner(plan.ownerAddress, plan.chainId);
     checkSpaceEligibility(this.service, plan);
     let signer: string;
     try {
@@ -682,6 +711,31 @@ export class DelegatedSessionService {
         "INVALID_SIGNATURE",
         "Delegation authorization is not signed by the owner",
       );
+    if (wallet.revoked) {
+      if (!delegatedWallet.restore)
+        throw new ServiceError(
+          "DELEGATED_REVOKED",
+          "Delegated Privy wallet is revoked and cannot be restored",
+          409,
+        );
+      try {
+        await this.withWalletOperation(() => delegatedWallet.restore!());
+        wallet = await delegatedWallet.getStatus();
+      } catch (error) {
+        throw new ServiceError(
+          "DELEGATED_RESTORE_FAILED",
+          error instanceof Error
+            ? error.message
+            : "Delegated Privy signer restore failed",
+          409,
+        );
+      }
+    }
+    if (!wallet.address || !wallet.enabled || wallet.revoked)
+      throw new ServiceError(
+        "DELEGATED_REVOKED",
+        "Delegated Privy wallet is not enabled",
+      );
     const id = delegatedSessionId(plan, wallet.address);
     const existing = this.service.repository.getDelegatedSession(id);
     if (existing) return existing;
@@ -701,12 +755,43 @@ export class DelegatedSessionService {
     return session;
   }
 
+  list(ownerAddress?: string): readonly DelegatedSession[] {
+    return this.service.repository.listDelegatedSessions(ownerAddress);
+  }
+
+  assertOwner(id: string, ownerAddress: string): DelegatedSession {
+    const session = this.get(id);
+    if (!sameAddress(session.plan.ownerAddress, ownerAddress))
+      throw new ServiceError(
+        "DELEGATED_OWNER_UNAUTHORIZED",
+        "This delegated session belongs to a different wallet",
+        403,
+      );
+    return session;
+  }
+
   async start(
     id: string,
     message: string,
     authorization: DelegatedControlAuthorization,
   ): Promise<DelegatedSession> {
     await this.consumeControlAuthorization(id, "START", message, authorization);
+    return this.runActiveTick(id, message);
+  }
+
+  /** Called by the server worker after the owner has already approved the
+   * mandate. It deliberately cannot activate an AUTHORIZED session, bypass a
+   * stop, or accept a new owner instruction. */
+  async tick(id: string, message: string): Promise<DelegatedSession> {
+    const session = this.get(id);
+    if (session.state !== "ACTIVE") return session;
+    return this.runActiveTick(id, message);
+  }
+
+  private async runActiveTick(
+    id: string,
+    message: string,
+  ): Promise<DelegatedSession> {
     await this.reconcileInternal(id);
     let session = this.get(id);
     const now = this.now();
@@ -776,7 +861,8 @@ export class DelegatedSessionService {
         "Delegated session budget or trade count exhausted",
       );
     }
-    const wallet = await this.wallet.getStatus();
+    const delegatedWallet = await this.resolveWallet(session.wallet.walletId!);
+    const wallet = await delegatedWallet.getStatus();
     if (!wallet.enabled || wallet.revoked || wallet.address === null) {
       this.service.repository.stopDelegatedSession(
         id,
@@ -812,10 +898,24 @@ export class DelegatedSessionService {
       );
     }
     checkSpaceEligibility(this.service, session.plan);
+    const allowedSpaceId = session.plan.allowedSpaceIds[0]!;
+    const allowedSpace = this.service.getSpace(allowedSpaceId);
+    const inputAsset = allowedSpace.position?.policy.assets.find(
+      (asset) =>
+        asset.token.toLowerCase() ===
+        session.plan.traderInputToken.toLowerCase(),
+    );
+    const outputAsset = allowedSpace.position?.policy.assets.find(
+      (asset) =>
+        asset.token.toLowerCase() ===
+        session.plan.traderOutputToken.toLowerCase(),
+    );
+    const scopedMessage = `${message.slice(0, 500)} Use only Space ${allowedSpaceId}. Use exactly the reviewed direction ${inputAsset?.symbol ?? session.plan.traderInputToken} (${session.plan.traderInputToken}) to ${outputAsset?.symbol ?? session.plan.traderOutputToken} (${session.plan.traderOutputToken}), with no more than ${formatTokenAmount(BigInt(session.plan.perTradeInputAmount), inputAsset?.decimals ?? 0)} ${inputAsset?.symbol ?? "input token"}.`;
     const proposal = await this.agent.propose({
-      message,
+      message: scopedMessage.slice(0, 1_000),
       trader: wallet.address,
       chainId: session.plan.chainId,
+      spaceId: allowedSpaceId,
     });
     if (proposal.status !== "READY") {
       const resultMessage =
@@ -860,6 +960,16 @@ export class DelegatedSessionService {
       throw new ServiceError(
         "DELEGATED_SLIPPAGE",
         "Agent proposal exceeds the reviewed slippage limit",
+      );
+    if (
+      session.plan.minimumOutputPerInputBps !== undefined &&
+      BigInt(proposal.proposal.traderOutputValue) * 10_000n <
+        BigInt(proposal.proposal.traderInputValue) *
+          BigInt(session.plan.minimumOutputPerInputBps)
+    )
+      throw new ServiceError(
+        "DELEGATED_MINIMUM_RATE",
+        "Agent proposal is below the reviewed minimum output/input rate",
       );
     const intent = this.service.repository.getIntent(
       proposal.proposal.intentHash,
@@ -906,7 +1016,7 @@ export class DelegatedSessionService {
           409,
         );
       const snapshot = await this.service.provider.getSnapshot(intent);
-      await this.wallet.preflight?.({
+      await delegatedWallet.preflight?.({
         chainId: snapshot.chainId,
         inputToken: intent.traderInputToken,
         inputAmount: proposal.proposal.traderInputAmount,
@@ -932,7 +1042,7 @@ export class DelegatedSessionService {
             "Delegated session was stopped before signing",
             409,
           );
-        return this.wallet.signIntent(
+        return delegatedWallet.signIntent(
           typedData,
           await this.authorizationContext(),
         );
@@ -982,7 +1092,7 @@ export class DelegatedSessionService {
             "Delegated session was stopped before broadcast",
             409,
           );
-        return this.wallet.simulateAndSend(
+        return delegatedWallet.simulateAndSend(
           action,
           await this.authorizationContext(),
         );
@@ -1004,7 +1114,7 @@ export class DelegatedSessionService {
           lastResult: "Submitted to Privy; awaiting chain receipt",
         },
       );
-      const receipt = await this.wallet.getReceipt(
+      const receipt = await delegatedWallet.getReceipt(
         sent.transactionHash,
         receiptExpectation,
       );
@@ -1077,7 +1187,8 @@ export class DelegatedSessionService {
         `Delegated session is ${session.state}`,
         409,
       );
-    const wallet = await this.wallet.getStatus();
+    const delegatedWallet = await this.resolveWallet(session.wallet.walletId!);
+    const wallet = await delegatedWallet.getStatus();
     if (
       !wallet.address ||
       !sameAddress(wallet.address, session.wallet.address!) ||
@@ -1108,7 +1219,7 @@ export class DelegatedSessionService {
         );
       return current;
     }
-    if (!this.wallet.approveToken)
+    if (!delegatedWallet.approveToken)
       throw new ServiceError(
         "DELEGATED_APPROVAL_UNAVAILABLE",
         "The configured delegated wallet cannot approve its own token allowance",
@@ -1133,7 +1244,7 @@ export class DelegatedSessionService {
             "Delegated session was stopped before allowance approval",
             409,
           );
-        return this.wallet.approveToken!(
+        return delegatedWallet.approveToken!(
           {
             chainId: current.plan.chainId,
             token: current.plan.traderInputToken,
@@ -1184,8 +1295,9 @@ export class DelegatedSessionService {
       id,
       "Local signing disabled; revoking Privy permission",
     );
+    const delegatedWallet = await this.resolveWallet(session.wallet.walletId!);
     try {
-      await this.withWalletOperation(() => this.wallet.revoke());
+      await this.withWalletOperation(() => delegatedWallet.revoke());
     } catch (error) {
       this.service.repository.updateDelegatedSession(id, {
         state: "REVOKE_PENDING",
@@ -1264,7 +1376,8 @@ export class DelegatedSessionService {
         );
       tokens.add(token);
     }
-    const wallet = await this.wallet.getStatus();
+    const delegatedWallet = await this.resolveWallet(session.wallet.walletId!);
+    const wallet = await delegatedWallet.getStatus();
     if (
       !wallet.address ||
       !sameAddress(wallet.address, session.wallet.address!)
@@ -1298,7 +1411,7 @@ export class DelegatedSessionService {
         "INVALID_SIGNATURE",
         "Recovery authorization is not signed by the owner",
       );
-    if (typeof this.wallet.recover !== "function")
+    if (typeof delegatedWallet.recover !== "function")
       throw new ServiceError(
         "DELEGATED_RECOVERY_UNAVAILABLE",
         "Owner recovery is not configured for this delegated wallet",
@@ -1339,7 +1452,7 @@ export class DelegatedSessionService {
           "Recovery requires one reviewed token",
           400,
         );
-      const result = await this.wallet.recover({
+      const result = await delegatedWallet.recover({
         sessionId: session.id,
         ownerAddress: session.plan.ownerAddress,
         destination: request.destination,
@@ -1357,7 +1470,7 @@ export class DelegatedSessionService {
           409,
         );
       }
-      const receipt = await this.wallet.getReceipt(
+      const receipt = await delegatedWallet.getReceipt(
         result.transactionHash,
         recoveryReceiptExpectation(
           session.plan.chainId,
@@ -1410,6 +1523,7 @@ export class DelegatedSessionService {
 
   private async reconcileInternal(id: string): Promise<DelegatedSession> {
     const session = this.get(id);
+    const delegatedWallet = await this.resolveWallet(session.wallet.walletId!);
     for (const trade of session.trades) {
       if (
         (trade.status !== "SUBMITTED" &&
@@ -1417,7 +1531,7 @@ export class DelegatedSessionService {
         !trade.transactionHash
       )
         continue;
-      const receipt = await this.wallet.getReceipt(
+      const receipt = await delegatedWallet.getReceipt(
         trade.transactionHash,
         storedReceiptExpectation(
           this.service.repository.getDelegatedTradeReceiptExpectation(trade.id),
@@ -1471,7 +1585,7 @@ export class DelegatedSessionService {
       } catch {
         recoveryExpectation = undefined;
       }
-      const receipt = await this.wallet.getReceipt(
+      const receipt = await delegatedWallet.getReceipt(
         recovery.transactionHash,
         recoveryExpectation,
       );

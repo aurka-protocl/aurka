@@ -889,7 +889,11 @@ export class OpenRouterAgent {
         const spaces = this.service
           .listSpaces(100)
           .items.filter(
-            (space) => space.identity.state === "ACTIVE" && space.position,
+            (space) =>
+              space.identity.state === "ACTIVE" &&
+              space.position &&
+              (request.spaceId === undefined ||
+                space.identity.id === request.spaceId),
           )
           .map((space) => conditions(space));
         if (spaces.length === 0)
@@ -902,6 +906,8 @@ export class OpenRouterAgent {
       }
       if (name === "read_space_conditions") {
         const parsed = conditionsInputSchema.parse(argumentsValue);
+        if (request.spaceId !== undefined && parsed.spaceId !== request.spaceId)
+          throw new Error("The selected Space is outside the reviewed scope.");
         const space = await activeSpace(this.service, parsed.spaceId);
         throwIfAborted(requestSignal);
         return { ok: true, value: conditions(space) };
@@ -912,6 +918,8 @@ export class OpenRouterAgent {
       )
         throw new Error("The requested tool is not available.");
       const parsed = tradeInputSchema.parse(argumentsValue);
+      if (request.spaceId !== undefined && parsed.spaceId !== request.spaceId)
+        throw new Error("The selected Space is outside the reviewed scope.");
       const space = await activeSpace(this.service, parsed.spaceId);
       throwIfAborted(requestSignal);
       if (space.identity.chainId !== request.chainId)

@@ -43,6 +43,8 @@ import {
   type SpaceRecord,
   delegatedSessionSchema,
   delegatedTradeSchema,
+  tradingAgentSchema,
+  type TradingAgent,
   type DelegatedSession,
   type DelegatedTrade,
 } from "@aurka/shared";
@@ -56,6 +58,12 @@ import {
   delegatedRecoveries,
   delegatedSessions,
   delegatedTrades,
+  authChallenges,
+  authSessions,
+  tradingAgents,
+  agentProvisioningOperations,
+  agentFundingOperations,
+  delegatedWorkerLeases,
   idempotencyKeys,
   indexingCheckpoints,
   indexingHeaders,
@@ -103,6 +111,37 @@ export type DelegatedControlAuthorizationRecord = {
   readonly action: string;
   readonly nonce: string;
   readonly expiresAt: number;
+};
+
+export type AuthChallengeRecord = {
+  readonly id: string;
+  readonly address: string;
+  readonly chainId: number;
+  readonly nonce: string;
+  readonly origin: string;
+  readonly expiresAt: number;
+  readonly consumedAt: number | null;
+};
+
+export type AuthSessionRecord = {
+  readonly tokenHash: string;
+  readonly ownerAddress: string;
+  readonly chainId: number;
+  readonly expiresAt: number;
+};
+
+export type AgentProvisioningOperationRecord = {
+  readonly id: string;
+  readonly ownerAddress: string;
+  readonly chainId: number;
+  readonly idempotencyKey: string;
+  readonly state: "PROVISIONING" | "READY" | "FAILED";
+  readonly recoveryPolicyId?: string;
+  readonly walletId?: string;
+  readonly walletAddress?: string;
+  readonly lastError?: string | null;
+  readonly createdAt: number;
+  readonly updatedAt: number;
 };
 
 interface ActivityCursor {
@@ -190,6 +229,510 @@ export class IdempotencyConflictError extends Error {
 
 export class ServiceRepository {
   constructor(private readonly db: ServiceDrizzleDatabase) {}
+
+  saveAuthChallenge(input: AuthChallengeRecord): void {
+    this.db
+      .insert(authChallenges)
+      .values({ ...input, createdAt: now() })
+      .run();
+  }
+
+  getAuthChallenge(id: string): AuthChallengeRecord | undefined {
+    const row = this.db
+      .select()
+      .from(authChallenges)
+      .where(eq(authChallenges.id, id))
+      .get();
+    return row
+      ? {
+          id: row.id,
+          address: row.address,
+          chainId: row.chainId,
+          nonce: row.nonce,
+          origin: row.origin,
+          expiresAt: row.expiresAt,
+          consumedAt: row.consumedAt,
+        }
+      : undefined;
+  }
+
+  consumeAuthChallenge(
+    id: string,
+    at = now(),
+  ): AuthChallengeRecord | undefined {
+    const changed = this.db
+      .update(authChallenges)
+      .set({ consumedAt: at })
+      .where(
+        and(
+          eq(authChallenges.id, id),
+          sql`${authChallenges.consumedAt} IS NULL`,
+          gt(authChallenges.expiresAt, at),
+        ),
+      )
+      .run();
+    return changed.changes === 1 ? this.getAuthChallenge(id) : undefined;
+  }
+
+  saveAuthSession(input: AuthSessionRecord): void {
+    this.db
+      .insert(authSessions)
+      .values({
+        ...input,
+        ownerAddress: input.ownerAddress.toLowerCase(),
+        createdAt: now(),
+      })
+      .run();
+  }
+
+  getAuthSession(tokenHash: string, at = now()): AuthSessionRecord | undefined {
+    const row = this.db
+      .select()
+      .from(authSessions)
+      .where(
+        and(
+          eq(authSessions.tokenHash, tokenHash),
+          gt(authSessions.expiresAt, at),
+        ),
+      )
+      .get();
+    return row
+      ? {
+          tokenHash: row.tokenHash,
+          ownerAddress: row.ownerAddress,
+          chainId: row.chainId,
+          expiresAt: row.expiresAt,
+        }
+      : undefined;
+  }
+
+  deleteAuthSession(tokenHash: string): void {
+    this.db
+      .delete(authSessions)
+      .where(eq(authSessions.tokenHash, tokenHash))
+      .run();
+  }
+
+  private agentProvisioningFromRow(
+    row: typeof agentProvisioningOperations.$inferSelect,
+  ): AgentProvisioningOperationRecord {
+    return {
+      id: row.id,
+      ownerAddress: row.ownerAddress,
+      chainId: row.chainId,
+      idempotencyKey: row.idempotencyKey,
+      state: row.state as AgentProvisioningOperationRecord["state"],
+      ...(row.recoveryPolicyId === null
+        ? {}
+        : { recoveryPolicyId: row.recoveryPolicyId }),
+      ...(row.walletId === null ? {} : { walletId: row.walletId }),
+      ...(row.walletAddress === null
+        ? {}
+        : { walletAddress: row.walletAddress }),
+      ...(row.lastError === null ? {} : { lastError: row.lastError }),
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+    };
+  }
+
+  getAgentProvisioning(
+    ownerAddress: string,
+    chainId: number,
+  ): AgentProvisioningOperationRecord | undefined {
+    const row = this.db
+      .select()
+      .from(agentProvisioningOperations)
+      .where(
+        and(
+          eq(
+            agentProvisioningOperations.ownerAddress,
+            ownerAddress.toLowerCase(),
+          ),
+          eq(agentProvisioningOperations.chainId, chainId),
+        ),
+      )
+      .get();
+    return row ? this.agentProvisioningFromRow(row) : undefined;
+  }
+
+  reserveAgentProvisioning(input: {
+    readonly id: string;
+    readonly ownerAddress: string;
+    readonly chainId: number;
+    readonly idempotencyKey: string;
+  }): AgentProvisioningOperationRecord {
+    return this.db.transaction((tx) => {
+      const ownerAddress = input.ownerAddress.toLowerCase();
+      const existing = tx
+        .select()
+        .from(agentProvisioningOperations)
+        .where(
+          and(
+            eq(agentProvisioningOperations.ownerAddress, ownerAddress),
+            eq(agentProvisioningOperations.chainId, input.chainId),
+          ),
+        )
+        .get();
+      if (existing) return this.agentProvisioningFromRow(existing);
+      const timestamp = now();
+      tx.insert(agentProvisioningOperations)
+        .values({
+          id: input.id,
+          ownerAddress,
+          chainId: input.chainId,
+          idempotencyKey: input.idempotencyKey,
+          state: "PROVISIONING",
+          recoveryPolicyId: null,
+          walletId: null,
+          walletAddress: null,
+          lastError: null,
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        })
+        .onConflictDoNothing()
+        .run();
+      const inserted = tx
+        .select()
+        .from(agentProvisioningOperations)
+        .where(
+          and(
+            eq(agentProvisioningOperations.ownerAddress, ownerAddress),
+            eq(agentProvisioningOperations.chainId, input.chainId),
+          ),
+        )
+        .get();
+      if (!inserted)
+        throw new Error("Agent provisioning reservation was not created");
+      return this.agentProvisioningFromRow(inserted);
+    });
+  }
+
+  updateAgentProvisioning(
+    id: string,
+    update: Partial<
+      Pick<
+        AgentProvisioningOperationRecord,
+        | "state"
+        | "recoveryPolicyId"
+        | "walletId"
+        | "walletAddress"
+        | "lastError"
+      >
+    >,
+  ): AgentProvisioningOperationRecord {
+    this.db
+      .update(agentProvisioningOperations)
+      .set({
+        ...(update.state === undefined ? {} : { state: update.state }),
+        ...(update.recoveryPolicyId === undefined
+          ? {}
+          : { recoveryPolicyId: update.recoveryPolicyId }),
+        ...(update.walletId === undefined ? {} : { walletId: update.walletId }),
+        ...(update.walletAddress === undefined
+          ? {}
+          : { walletAddress: update.walletAddress }),
+        ...(update.lastError === undefined
+          ? {}
+          : { lastError: update.lastError }),
+        updatedAt: now(),
+      })
+      .where(eq(agentProvisioningOperations.id, id))
+      .run();
+    const row = this.db
+      .select()
+      .from(agentProvisioningOperations)
+      .where(eq(agentProvisioningOperations.id, id))
+      .get();
+    if (!row) throw new Error("Agent provisioning operation was not found");
+    return this.agentProvisioningFromRow(row);
+  }
+
+  saveTradingAgent(value: TradingAgent): void {
+    const agent = tradingAgentSchema.parse(value);
+    this.db
+      .insert(tradingAgents)
+      .values({
+        id: agent.id,
+        ownerAddress: agent.ownerAddress.toLowerCase(),
+        chainId: agent.chainId,
+        walletId: agent.walletId,
+        walletAddress: agent.walletAddress,
+        signerId: agent.signerId,
+        policyId: agent.policyId,
+        recoveryPolicyId: agent.recoveryPolicyId,
+        state: agent.state,
+        fundingJson: json(agent.fundingJson),
+        mandateJson: agent.mandateJson ? json(agent.mandateJson) : null,
+        lastError: agent.lastError,
+        createdAt: agent.createdAt,
+        updatedAt: agent.updatedAt,
+      })
+      .onConflictDoUpdate({
+        target: tradingAgents.id,
+        set: {
+          state: agent.state,
+          fundingJson: json(agent.fundingJson),
+          mandateJson: agent.mandateJson ? json(agent.mandateJson) : null,
+          lastError: agent.lastError,
+          updatedAt: agent.updatedAt,
+        },
+      })
+      .run();
+  }
+
+  private tradingAgentFromRow(
+    row: typeof tradingAgents.$inferSelect,
+  ): TradingAgent {
+    return tradingAgentSchema.parse({
+      id: row.id,
+      ownerAddress: row.ownerAddress,
+      chainId: row.chainId,
+      walletId: row.walletId,
+      walletAddress: row.walletAddress,
+      signerId: row.signerId,
+      policyId: row.policyId,
+      recoveryPolicyId: row.recoveryPolicyId,
+      state: row.state,
+      fundingJson: parse(row.fundingJson),
+      mandateJson: row.mandateJson ? parse(row.mandateJson) : null,
+      lastError: row.lastError,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+    });
+  }
+
+  getTradingAgent(
+    ownerAddress: string,
+    chainId: number,
+  ): TradingAgent | undefined {
+    const row = this.db
+      .select()
+      .from(tradingAgents)
+      .where(
+        and(
+          eq(tradingAgents.ownerAddress, ownerAddress.toLowerCase()),
+          eq(tradingAgents.chainId, chainId),
+        ),
+      )
+      .get();
+    return row ? this.tradingAgentFromRow(row) : undefined;
+  }
+
+  getTradingAgentById(id: string): TradingAgent | undefined {
+    const row = this.db
+      .select()
+      .from(tradingAgents)
+      .where(eq(tradingAgents.id, id))
+      .get();
+    return row ? this.tradingAgentFromRow(row) : undefined;
+  }
+
+  getTradingAgentByWalletId(walletId: string): TradingAgent | undefined {
+    const row = this.db
+      .select()
+      .from(tradingAgents)
+      .where(eq(tradingAgents.walletId, walletId))
+      .get();
+    return row ? this.tradingAgentFromRow(row) : undefined;
+  }
+
+  getTradingAgentByWalletAddress(
+    walletAddress: string,
+  ): TradingAgent | undefined {
+    const row = this.db
+      .select()
+      .from(tradingAgents)
+      .where(
+        sql`lower(${tradingAgents.walletAddress}) = ${walletAddress.toLowerCase()}`,
+      )
+      .get();
+    return row ? this.tradingAgentFromRow(row) : undefined;
+  }
+
+  updateTradingAgent(
+    id: string,
+    update: Partial<
+      Pick<
+        TradingAgent,
+        "state" | "fundingJson" | "mandateJson" | "lastError" | "updatedAt"
+      >
+    >,
+  ): TradingAgent {
+    this.db
+      .update(tradingAgents)
+      .set({
+        ...(update.state === undefined ? {} : { state: update.state }),
+        ...(update.fundingJson === undefined
+          ? {}
+          : { fundingJson: json(update.fundingJson) }),
+        ...(update.mandateJson === undefined
+          ? {}
+          : {
+              mandateJson: update.mandateJson ? json(update.mandateJson) : null,
+            }),
+        ...(update.lastError === undefined
+          ? {}
+          : { lastError: update.lastError }),
+        updatedAt: update.updatedAt ?? now(),
+      })
+      .where(eq(tradingAgents.id, id))
+      .run();
+    const result = this.getTradingAgentById(id);
+    if (!result) throw new Error("Trading agent was not found");
+    return result;
+  }
+
+  getPendingAgentFunding(agentId: string):
+    | {
+        readonly id: string;
+        readonly agentId: string;
+        readonly ownerAddress: string;
+        readonly chainId: number;
+        readonly ethAmount: string;
+        readonly usdcAmount: string;
+        readonly wethAmount: string;
+      }
+    | undefined {
+    const row = this.db
+      .select()
+      .from(agentFundingOperations)
+      .where(
+        and(
+          eq(agentFundingOperations.agentId, agentId),
+          eq(agentFundingOperations.status, "PENDING"),
+        ),
+      )
+      .get();
+    return row
+      ? {
+          id: row.id,
+          agentId: row.agentId,
+          ownerAddress: row.ownerAddress,
+          chainId: row.chainId,
+          ethAmount: row.ethAmount,
+          usdcAmount: row.usdcAmount,
+          wethAmount: row.wethAmount,
+        }
+      : undefined;
+  }
+
+  reserveAgentFunding(input: {
+    readonly id: string;
+    readonly agentId: string;
+    readonly ownerAddress: string;
+    readonly chainId: number;
+    readonly ethAmount: string;
+    readonly usdcAmount: string;
+    readonly wethAmount: string;
+    readonly maximum: {
+      readonly ethAmount: string;
+      readonly usdcAmount: string;
+      readonly wethAmount: string;
+    };
+  }): boolean {
+    return this.db.transaction((tx) => {
+      const existing = tx
+        .select()
+        .from(agentFundingOperations)
+        .where(
+          and(
+            eq(agentFundingOperations.agentId, input.agentId),
+            eq(agentFundingOperations.status, "PENDING"),
+          ),
+        )
+        .get();
+      if (existing)
+        return (
+          existing.ethAmount === input.ethAmount &&
+          existing.usdcAmount === input.usdcAmount &&
+          existing.wethAmount === input.wethAmount
+        );
+      const rows = tx.select().from(agentFundingOperations).all();
+      const used = rows
+        .filter((row) => row.status === "PENDING" || row.status === "CONFIRMED")
+        .reduce(
+          (total, row) => ({
+            eth: total.eth + BigInt(row.ethAmount),
+            usdc: total.usdc + BigInt(row.usdcAmount),
+            weth: total.weth + BigInt(row.wethAmount),
+          }),
+          { eth: 0n, usdc: 0n, weth: 0n },
+        );
+      if (
+        used.eth + BigInt(input.ethAmount) > BigInt(input.maximum.ethAmount) ||
+        used.usdc + BigInt(input.usdcAmount) >
+          BigInt(input.maximum.usdcAmount) ||
+        used.weth + BigInt(input.wethAmount) > BigInt(input.maximum.wethAmount)
+      )
+        return false;
+      const timestamp = now();
+      tx.insert(agentFundingOperations)
+        .values({
+          id: input.id,
+          agentId: input.agentId,
+          ownerAddress: input.ownerAddress.toLowerCase(),
+          chainId: input.chainId,
+          ethAmount: input.ethAmount,
+          usdcAmount: input.usdcAmount,
+          wethAmount: input.wethAmount,
+          status: "PENDING",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        })
+        .run();
+      return true;
+    });
+  }
+
+  completeAgentFunding(id: string): void {
+    this.db
+      .update(agentFundingOperations)
+      .set({ status: "CONFIRMED", updatedAt: now() })
+      .where(
+        and(
+          eq(agentFundingOperations.id, id),
+          eq(agentFundingOperations.status, "PENDING"),
+        ),
+      )
+      .run();
+  }
+
+  claimDelegatedWorkerLease(
+    sessionId: string,
+    leaseId: string,
+    expiresAt: number,
+    at = now(),
+  ): boolean {
+    return this.db.transaction((tx) => {
+      const existing = tx
+        .select()
+        .from(delegatedWorkerLeases)
+        .where(eq(delegatedWorkerLeases.sessionId, sessionId))
+        .get();
+      if (existing && existing.expiresAt > at && existing.leaseId !== leaseId)
+        return false;
+      tx.insert(delegatedWorkerLeases)
+        .values({ sessionId, leaseId, expiresAt, updatedAt: at })
+        .onConflictDoUpdate({
+          target: delegatedWorkerLeases.sessionId,
+          set: { leaseId, expiresAt, updatedAt: at },
+        })
+        .run();
+      return true;
+    });
+  }
+
+  releaseDelegatedWorkerLease(sessionId: string, leaseId: string): void {
+    this.db
+      .delete(delegatedWorkerLeases)
+      .where(
+        and(
+          eq(delegatedWorkerLeases.sessionId, sessionId),
+          eq(delegatedWorkerLeases.leaseId, leaseId),
+        ),
+      )
+      .run();
+  }
 
   savePosition(position: Position): Position {
     const value = positionSchema.parse(position);
@@ -1029,7 +1572,7 @@ export class ServiceRepository {
       .insert(delegatedSessions)
       .values({
         id: session.id,
-        ownerAddress: session.plan.ownerAddress,
+        ownerAddress: session.plan.ownerAddress.toLowerCase(),
         agentAddress: session.wallet.address!,
         state: session.state,
         planJson: json(session.plan),
@@ -1048,7 +1591,7 @@ export class ServiceRepository {
       .onConflictDoUpdate({
         target: delegatedSessions.id,
         set: {
-          ownerAddress: session.plan.ownerAddress,
+          ownerAddress: session.plan.ownerAddress.toLowerCase(),
           agentAddress: session.wallet.address!,
           state: session.state,
           planJson: json(session.plan),
@@ -1343,7 +1886,7 @@ export class ServiceRepository {
       .where(
         ownerAddress === undefined
           ? undefined
-          : eq(delegatedSessions.ownerAddress, ownerAddress),
+          : sql`lower(${delegatedSessions.ownerAddress}) = ${ownerAddress.toLowerCase()}`,
       )
       .orderBy(desc(delegatedSessions.updatedAt), desc(delegatedSessions.id))
       .all();

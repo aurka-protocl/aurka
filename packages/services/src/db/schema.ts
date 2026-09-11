@@ -473,6 +473,140 @@ export const delegatedControlAuthorizations = sqliteTable(
   ],
 );
 
+/** Wallet-login challenges are single-use and intentionally separate from
+ * long-lived agent records. The nonce is never reused after verification. */
+export const authChallenges = sqliteTable(
+  "auth_challenges",
+  {
+    id: text("id").primaryKey(),
+    address: text("address").notNull(),
+    chainId: integer("chain_id").notNull(),
+    nonce: text("nonce").notNull(),
+    origin: text("origin").notNull(),
+    expiresAt: createdAt("expires_at"),
+    consumedAt: integer("consumed_at"),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    index("auth_challenges_address_idx").on(table.address, table.createdAt),
+    index("auth_challenges_expiry_idx").on(table.expiresAt, table.consumedAt),
+  ],
+);
+
+/** Only a SHA-256 digest of the browser cookie is persisted. */
+export const authSessions = sqliteTable(
+  "auth_sessions",
+  {
+    tokenHash: text("token_hash").primaryKey(),
+    ownerAddress: text("owner_address").notNull(),
+    chainId: integer("chain_id").notNull(),
+    expiresAt: createdAt("expires_at"),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    index("auth_sessions_owner_idx").on(table.ownerAddress, table.createdAt),
+    index("auth_sessions_expiry_idx").on(table.expiresAt),
+  ],
+);
+
+/** Durable per-user Privy agent registry. The external owner wallet is the
+ * AURKA login identity; Privy resources remain server-side and are never
+ * exposed to the browser. */
+export const tradingAgents = sqliteTable(
+  "trading_agents",
+  {
+    id: text("id").primaryKey(),
+    ownerAddress: text("owner_address").notNull(),
+    chainId: integer("chain_id").notNull(),
+    walletId: text("wallet_id").notNull(),
+    walletAddress: text("wallet_address").notNull(),
+    signerId: text("signer_id").notNull(),
+    policyId: text("policy_id").notNull(),
+    recoveryPolicyId: text("recovery_policy_id").notNull(),
+    state: text("state").notNull(),
+    fundingJson: text("funding_json").notNull(),
+    mandateJson: text("mandate_json"),
+    lastError: text("last_error"),
+    createdAt: createdAt(),
+    updatedAt: createdAt("updated_at"),
+  },
+  (table) => [
+    uniqueIndex("trading_agents_owner_chain_idx").on(
+      table.ownerAddress,
+      table.chainId,
+    ),
+    uniqueIndex("trading_agents_wallet_idx").on(table.walletId),
+    index("trading_agents_state_idx").on(table.state, table.updatedAt),
+  ],
+);
+
+/** Durable provider-side provisioning checkpoint. The policy and wallet IDs
+ * are written as soon as Privy returns them, so an unknown provider outcome
+ * can be reconciled with the same idempotency key after a restart. */
+export const agentProvisioningOperations = sqliteTable(
+  "agent_provisioning_operations",
+  {
+    id: text("id").primaryKey(),
+    ownerAddress: text("owner_address").notNull(),
+    chainId: integer("chain_id").notNull(),
+    idempotencyKey: text("idempotency_key").notNull(),
+    state: text("state").notNull(),
+    recoveryPolicyId: text("recovery_policy_id"),
+    walletId: text("wallet_id"),
+    walletAddress: text("wallet_address"),
+    lastError: text("last_error"),
+    createdAt: createdAt(),
+    updatedAt: createdAt("updated_at"),
+  },
+  (table) => [
+    uniqueIndex("agent_provisioning_owner_chain_idx").on(
+      table.ownerAddress,
+      table.chainId,
+    ),
+    uniqueIndex("agent_provisioning_idempotency_idx").on(table.idempotencyKey),
+    index("agent_provisioning_state_idx").on(table.state, table.updatedAt),
+  ],
+);
+
+/** Durable Sepolia faucet reservations. Pending rows reserve the full
+ * operation across restarts; confirmed rows preserve global issuance
+ * accounting so a new browser session cannot reset the budget. */
+export const agentFundingOperations = sqliteTable(
+  "agent_funding_operations",
+  {
+    id: text("id").primaryKey(),
+    agentId: text("agent_id").notNull(),
+    ownerAddress: text("owner_address").notNull(),
+    chainId: integer("chain_id").notNull(),
+    ethAmount: text("eth_amount").notNull(),
+    usdcAmount: text("usdc_amount").notNull(),
+    wethAmount: text("weth_amount").notNull(),
+    status: text("status").notNull(),
+    createdAt: createdAt(),
+    updatedAt: createdAt("updated_at"),
+  },
+  (table) => [
+    index("agent_funding_operations_agent_idx").on(table.agentId, table.status),
+    index("agent_funding_operations_budget_idx").on(
+      table.status,
+      table.chainId,
+    ),
+  ],
+);
+
+/** Durable lease used by the background trading worker. A crashed process
+ * leaves the row behind; another process can claim it after expiry. */
+export const delegatedWorkerLeases = sqliteTable(
+  "delegated_worker_leases",
+  {
+    sessionId: text("session_id").primaryKey(),
+    leaseId: text("lease_id").notNull(),
+    expiresAt: createdAt("expires_at"),
+    updatedAt: createdAt("updated_at"),
+  },
+  (table) => [index("delegated_worker_leases_expiry_idx").on(table.expiresAt)],
+);
+
 export const indexingCheckpoints = sqliteTable(
   "indexing_checkpoints",
   {
@@ -594,6 +728,11 @@ export const schema = {
   delegatedTrades,
   delegatedRecoveries,
   delegatedControlAuthorizations,
+  authChallenges,
+  authSessions,
+  tradingAgents,
+  agentFundingOperations,
+  delegatedWorkerLeases,
   indexingCheckpoints,
   indexingHeaders,
   chainEvents,

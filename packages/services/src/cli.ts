@@ -59,7 +59,7 @@ if (command === "migrate" || command === "check") {
       cacheTtlSeconds: config.READINESS_CACHE_TTL_SECONDS,
     },
     ...(!config.RPC_URL ? { provider: new LocalDemoProvider() } : {}),
-    spaceMode: config.RPC_URL ? "fork" : "demo",
+    spaceMode: config.RPC_URL ? "testnet" : "demo",
     ...(config.SETTLEMENT_CONTRACT
       ? { settlementContract: config.SETTLEMENT_CONTRACT }
       : {}),

@@ -72,6 +72,7 @@ import {
   delegatedControlRequestSchema,
   delegatedRecoveryRequestSchema,
   delegatedSessionResponseSchema,
+  delegatedSessionsResponseSchema,
   delegatedStartRequestSchema,
   delegatedStatusSchema,
   type DelegatedSession,
@@ -80,6 +81,25 @@ import {
   type DelegatedStartRequest,
   type DelegatedControlRequest,
   type DelegatedStatus,
+  authChallengeRequestSchema,
+  authChallengeResponseSchema,
+  authVerifyRequestSchema,
+  authSessionSchema,
+  authLogoutResponseSchema,
+  agentsResponseSchema,
+  agentResponseSchema,
+  createAgentRequestSchema,
+  fundAgentRequestSchema,
+  setAgentMandateRequestSchema,
+  type AuthChallengeRequest,
+  type AuthChallengeResponse,
+  type AuthVerifyRequest,
+  type AuthSession,
+  type AuthLogoutResponse,
+  type CreateAgentRequest,
+  type FundAgentRequest,
+  type TradingAgent,
+  type AgentMandate,
 } from "@aurka/shared";
 
 export interface AurkaClientOptions {
@@ -118,6 +138,7 @@ export class AurkaClient {
       const response = await fetch(`${this.baseUrl}${path}`, {
         method,
         headers: this.defaultHeaders,
+        credentials: "include",
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
         signal,
       });
@@ -221,6 +242,88 @@ export class AurkaClient {
     );
   }
 
+  async authChallenge(
+    input: AuthChallengeRequest,
+  ): Promise<AuthChallengeResponse> {
+    return this.request(
+      "POST",
+      "/v1/auth/challenge",
+      authChallengeRequestSchema.parse(input),
+      authChallengeResponseSchema,
+    );
+  }
+
+  async authVerify(input: AuthVerifyRequest): Promise<AuthSession> {
+    return this.request(
+      "POST",
+      "/v1/auth/verify",
+      authVerifyRequestSchema.parse(input),
+      authSessionSchema,
+    );
+  }
+
+  async authSession(): Promise<AuthSession> {
+    return this.request(
+      "GET",
+      "/v1/auth/session",
+      undefined,
+      authSessionSchema,
+    );
+  }
+
+  async authLogout(): Promise<AuthLogoutResponse> {
+    return this.request(
+      "POST",
+      "/v1/auth/logout",
+      undefined,
+      authLogoutResponseSchema,
+    );
+  }
+
+  async myTradingAgent(): Promise<{ readonly agent: TradingAgent | null }> {
+    return this.request(
+      "GET",
+      "/v1/agents/me",
+      undefined,
+      agentsResponseSchema,
+    );
+  }
+
+  async createTradingAgent(
+    input: CreateAgentRequest,
+  ): Promise<{ readonly agent: TradingAgent }> {
+    return this.request(
+      "POST",
+      "/v1/agents",
+      createAgentRequestSchema.parse(input),
+      agentResponseSchema,
+    );
+  }
+
+  async fundTradingAgent(
+    id: string,
+    input: FundAgentRequest,
+  ): Promise<{ readonly agent: TradingAgent }> {
+    return this.request(
+      "POST",
+      `/v1/agents/${encodeURIComponent(id)}/fund`,
+      fundAgentRequestSchema.parse(input),
+      agentResponseSchema,
+    );
+  }
+
+  async setTradingAgentMandate(
+    id: string,
+    input: AgentMandate,
+  ): Promise<{ readonly agent: TradingAgent }> {
+    return this.request(
+      "POST",
+      `/v1/agents/${encodeURIComponent(id)}/mandate`,
+      setAgentMandateRequestSchema.parse(input),
+      agentResponseSchema,
+    );
+  }
+
   async delegatedStatus(): Promise<DelegatedStatus> {
     return this.request(
       "GET",
@@ -247,6 +350,17 @@ export class AurkaClient {
       `/v1/delegated/sessions/${encodeURIComponent(id)}`,
       undefined,
       delegatedSessionResponseSchema,
+    );
+  }
+
+  async delegatedSessions(): Promise<{
+    readonly sessions: readonly DelegatedSession[];
+  }> {
+    return this.request(
+      "GET",
+      "/v1/delegated/sessions",
+      undefined,
+      delegatedSessionsResponseSchema,
     );
   }
 

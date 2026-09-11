@@ -1,9 +1,18 @@
 import { useEffect, useState } from "react";
-import { Menu, X, Activity, ArrowLeftRight, Boxes, Info } from "lucide-react";
+import {
+  Menu,
+  X,
+  Activity,
+  ArrowLeftRight,
+  Boxes,
+  Info,
+  Bot,
+} from "lucide-react";
 import { NavLink, useLocation } from "react-router-dom";
 import { clsx } from "clsx";
 import { environmentLabel, appMode } from "../config";
 import { useWallet, WalletStateMessage, WalletStatusControl } from "../wallet";
+import LiveAssistant from "./LiveAssistant";
 
 interface LayoutProps {
   readonly children: React.ReactNode;
@@ -12,6 +21,7 @@ interface LayoutProps {
 const navigation = [
   { name: "Spaces", href: "/spaces", icon: Boxes },
   { name: "Trade", href: "/trade", icon: ArrowLeftRight },
+  { name: "Agent", href: "/agent", icon: Bot },
   { name: "Activity", href: "/activity", icon: Activity },
   { name: "About", href: "/about", icon: Info },
 ];
@@ -82,7 +92,7 @@ export default function Layout({ children }: LayoutProps) {
               <span
                 className={clsx(
                   "h-1.5 w-1.5 rounded-full",
-                  appMode === "fork" ? "bg-amber-300" : "bg-cyan-300",
+                  appMode === "testnet" ? "bg-amber-300" : "bg-cyan-300",
                 )}
                 aria-hidden="true"
               />
@@ -141,6 +151,7 @@ export default function Layout({ children }: LayoutProps) {
       <main className="mx-auto max-w-7xl px-4 py-6 sm:px-6 sm:py-8 lg:px-8">
         {children}
       </main>
+      <LiveAssistant />
     </div>
   );
 }

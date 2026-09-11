@@ -38,6 +38,8 @@ const json = (value) =>
     2,
   );
 const ZERO_HASH = `0x${"00".repeat(32)}`;
+const chainLabel = (environment) =>
+  environment === "testnet" ? "testnet" : "fork";
 
 function asObject(value, index, field) {
   return value && typeof value === "object" && field in value
@@ -114,6 +116,7 @@ export async function verifySpaceReceipt(
   expected,
   hash,
   minimumBlock,
+  environment = "fork",
 ) {
   if (!/^0x[0-9a-fA-F]{64}$/.test(hash ?? ""))
     fail("A transaction hash is required");
@@ -129,7 +132,7 @@ export async function verifySpaceReceipt(
   } catch (error) {
     throw new ServiceError(
       "SPACE_RPC_UNAVAILABLE",
-      `The fork RPC could not verify setup transaction ${hash}: ${error instanceof Error ? error.message : String(error)}`,
+      `The ${chainLabel(environment)} RPC could not verify setup transaction ${hash}: ${error instanceof Error ? error.message : String(error)}`,
       503,
       { hash, retryable: true },
     );
@@ -137,14 +140,14 @@ export async function verifySpaceReceipt(
   if (transaction && !receipt)
     throw new ServiceError(
       "SPACE_TRANSACTION_PENDING",
-      `Setup transaction ${hash} is known by the configured fork but is not mined yet; keep it pending and check again.`,
+      `Setup transaction ${hash} is known by the configured ${chainLabel(environment)} but is not mined yet; keep it pending and check again.`,
       409,
       { hash, retryable: true, state: "PENDING" },
     );
   if (!receipt || !transaction)
     throw new ServiceError(
       "SPACE_TRANSACTION_NOT_FOUND",
-      `Setup transaction ${hash} is not available on the configured fork yet; keep it pending and check again before retrying.`,
+      `Setup transaction ${hash} is not available on the configured ${chainLabel(environment)} yet; keep it pending and check again before retrying.`,
       409,
       { hash, retryable: true, state: "NOT_FOUND" },
     );
@@ -183,6 +186,7 @@ async function canonicalReceipt(
   hash,
   minimumBlock,
   allowReverted = false,
+  environment = "fork",
 ) {
   if (!/^0x[0-9a-fA-F]{64}$/.test(hash ?? ""))
     fail("A transaction hash is required");
@@ -198,7 +202,7 @@ async function canonicalReceipt(
   } catch (error) {
     throw new ServiceError(
       "SPACE_RPC_UNAVAILABLE",
-      `The fork RPC could not verify setup batch ${hash}: ${error instanceof Error ? error.message : String(error)}`,
+      `The ${chainLabel(environment)} RPC could not verify setup batch ${hash}: ${error instanceof Error ? error.message : String(error)}`,
       503,
       { hash, retryable: true },
     );
@@ -206,14 +210,14 @@ async function canonicalReceipt(
   if (transaction && !receipt)
     throw new ServiceError(
       "SPACE_TRANSACTION_PENDING",
-      `Setup batch transaction ${hash} is known by the configured fork but is not mined yet; keep it pending and check again.`,
+      `Setup batch transaction ${hash} is known by the configured ${chainLabel(environment)} but is not mined yet; keep it pending and check again.`,
       409,
       { hash, retryable: true, state: "PENDING" },
     );
   if (!receipt || !transaction)
     throw new ServiceError(
       "SPACE_TRANSACTION_NOT_FOUND",
-      `Setup batch transaction ${hash} is not available on the configured fork yet; keep it pending and check again before retrying.`,
+      `Setup batch transaction ${hash} is not available on the configured ${chainLabel(environment)} yet; keep it pending and check again before retrying.`,
       409,
       { hash, retryable: true, state: "NOT_FOUND" },
     );
@@ -371,6 +375,7 @@ export async function verifySpaceBatchReceipts(
   hashes,
   minimumBlock,
   atomic = false,
+  environment = "fork",
 ) {
   if (!Array.isArray(hashes) || hashes.length === 0)
     fail("Batch receipts are required");
@@ -384,6 +389,7 @@ export async function verifySpaceBatchReceipts(
           expected[index],
           hash,
           minimumBlock,
+          environment,
         ),
       ),
     );
@@ -392,7 +398,15 @@ export async function verifySpaceBatchReceipts(
   const calls = [];
   for (const hash of hashes) {
     receipts.push(
-      await canonicalReceipt(client, chainId, owner, hash, minimumBlock),
+      await canonicalReceipt(
+        client,
+        chainId,
+        owner,
+        hash,
+        minimumBlock,
+        false,
+        environment,
+      ),
     );
     let trace;
     try {
@@ -401,7 +415,9 @@ export async function verifySpaceBatchReceipts(
         params: [hash, { tracer: "callTracer" }],
       });
     } catch {
-      fail("This fork RPC cannot verify the atomic wallet execution trace");
+      fail(
+        `This ${chainLabel(environment)} RPC cannot verify the atomic wallet execution trace`,
+      );
     }
     if (traceHasFailure(trace))
       fail("Atomic receipt contains a reverted call or execution ancestor");
@@ -420,7 +436,11 @@ export async function verifySpaceBatchReceipts(
   return receipts;
 }
 
-/** Local fork composition only: no owner private keys and no server broadcasts. */
+/**
+ * Receipt-verified Space lifecycle for a configured EVM chain. The default
+ * remains `fork` for the legacy local runner; the Sepolia app passes
+ * `mode: "testnet"` and therefore never writes fork identities.
+ */
 export class ForkSpaceLifecycle {
   constructor({
     client,
@@ -434,6 +454,7 @@ export class ForkSpaceLifecycle {
     epochs,
     saveEpochs,
     saveManifest,
+    mode = "fork",
   }) {
     Object.assign(this, {
       client,
@@ -447,6 +468,7 @@ export class ForkSpaceLifecycle {
       epochs,
       saveEpochs,
       saveManifest,
+      mode,
     });
     const saved = existsSync(file)
       ? JSON.parse(readFileSync(file, "utf8"))
@@ -514,11 +536,11 @@ export class ForkSpaceLifecycle {
       else return existing;
     }
     if (
-      space.identity.mode !== "fork" ||
+      space.identity.mode !== this.mode ||
       space.identity.state !== "DRAFT" ||
       !space.draft
     )
-      fail("Save an owner-signed fork draft first");
+      fail(`Save an owner-signed ${this.mode} draft first`);
     const draft = space.draft;
     if (
       this.isSingleTransactionMode() &&
@@ -527,7 +549,7 @@ export class ForkSpaceLifecycle {
         !same(draft.assets[1]?.token, this.manifest.weth))
     )
       fail(
-        "This fork supports atomic creation only for the disclosed USDC/WETH configuration; unsupported asset configurations are unavailable.",
+        `This ${this.mode} supports atomic creation only for the disclosed USDC/WETH configuration; unsupported asset configurations are unavailable.`,
       );
     const { usdcAmount, wethAmount } = fundingUnits(draft);
     const definition = {
@@ -563,7 +585,9 @@ export class ForkSpaceLifecycle {
 
     if (this.manifest.executionEngine === "AURKA_UPSTREAM_LIMIT_SWAP_V1") {
       if (!this.manifest.swapVMGuard)
-        fail("Pinned upstream VM guard is missing from the fork manifest");
+        fail(
+          `Pinned upstream VM guard is missing from the ${this.mode} manifest`,
+        );
       const [usdcRaw, wethRaw] = await Promise.all(
         [usdc, weth].map((token) =>
           this.client.readContract({
@@ -744,7 +768,7 @@ export class ForkSpaceLifecycle {
         actor: draft.ownerAddress,
         status: "PENDING",
         payload: {
-          authority: "fork-receipts",
+          authority: `${this.mode}-receipts`,
           operation: "ACTIVATE",
           mode: "single-transaction",
         },
@@ -795,7 +819,7 @@ export class ForkSpaceLifecycle {
       ],
     );
     add(
-      "Configure fork price protection",
+      `Configure ${this.mode} price protection`,
       policyRegistry,
       "setPriceProtection",
       [definition.policyId, 86400n, 100],
@@ -831,7 +855,7 @@ export class ForkSpaceLifecycle {
       eventType: "SPACE_ACTIVATED",
       actor: draft.ownerAddress,
       status: "PENDING",
-      payload: { authority: "fork-receipts", operation: "ACTIVATE" },
+      payload: { authority: `${this.mode}-receipts`, operation: "ACTIVATE" },
       createdAt: Math.floor(Date.now() / 1000),
     });
     return plan;
@@ -895,6 +919,7 @@ export class ForkSpaceLifecycle {
           batch.receiptHashes,
           plan.minimumBlock,
           batch.atomic === true,
+          this.mode,
         );
         if (plan.operation)
           for (let index = batch.startIndex; index < batchEnd; index++) {
@@ -912,6 +937,8 @@ export class ForkSpaceLifecycle {
           plan.draft.ownerAddress,
           plan.steps[i].transaction,
           remembered.hash,
+          undefined,
+          this.mode,
         );
         if (plan.operation) await this.recordPolicyReceipt(plan, i);
       }
@@ -975,8 +1002,15 @@ export class ForkSpaceLifecycle {
         args: [plan.draft.ownerAddress],
       });
       if (balance < amount)
-        fail(
+        throw new ServiceError(
+          "INSUFFICIENT_FUNDING",
           `Insufficient ${symbol} funding: wallet has ${balance.toString()} raw units but the reviewed Space requires ${amount.toString()} raw units.`,
+          409,
+          {
+            symbol,
+            balance: balance.toString(),
+            required: amount.toString(),
+          },
         );
       const allowance = await this.client.readContract({
         address: token,
@@ -1081,6 +1115,7 @@ export class ForkSpaceLifecycle {
         plan.steps[index].transaction,
         hash,
         plan.minimumBlock,
+        this.mode,
       );
     } catch (error) {
       if (error.code === "SPACE_TRANSACTION_REVERTED") {
@@ -1170,7 +1205,7 @@ export class ForkSpaceLifecycle {
   }
 
   /**
-   * Re-check a submitted hash on the configured fork. This intentionally has
+   * Re-check a submitted hash on the configured chain. This intentionally has
    * the same strict verification and state transition as confirm(), but is a
    * separate endpoint so a wallet/RPC that temporarily cannot return a receipt
    * never forces the browser to broadcast a replacement.
@@ -1233,7 +1268,7 @@ export class ForkSpaceLifecycle {
         );
       if (error?.code === "SPACE_RPC_UNAVAILABLE")
         recoveryFail(
-          "The fork RPC could not determine whether the submitted setup transaction exists; keep it pending for reconciliation",
+          `The ${this.mode} RPC could not determine whether the submitted setup transaction exists; keep it pending for reconciliation`,
         );
       if (error?.code !== "SPACE_TRANSACTION_NOT_FOUND") throw error;
     }
@@ -1252,23 +1287,23 @@ export class ForkSpaceLifecycle {
       );
     if (stepIndex !== 0 || operation !== "ACTIVATE")
       recoveryFail(
-        "The submitted hash is unavailable and this operation has effects that cannot be proven absent; inspect the fork before retrying",
+        `The submitted hash is unavailable and this operation has effects that cannot be proven absent; inspect the ${this.mode} before retrying`,
       );
     if (typeof this.client.getCode !== "function")
       recoveryFail(
-        "The fork RPC cannot prove that the deterministic treasury was not created; keep the submitted hash for manual reconciliation",
+        `The ${this.mode} RPC cannot prove that the deterministic treasury was not created; keep the submitted hash for manual reconciliation`,
       );
     let code;
     try {
       code = await this.client.getCode({ address: plan.treasury });
     } catch (error) {
       recoveryFail(
-        `The fork RPC could not verify the deterministic treasury: ${error instanceof Error ? error.message : String(error)}`,
+        `The ${this.mode} RPC could not verify the deterministic treasury: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
     if (typeof code !== "string")
       recoveryFail(
-        "The fork RPC returned no deterministic treasury code; keep the submitted hash for manual reconciliation",
+        `The ${this.mode} RPC returned no deterministic treasury code; keep the submitted hash for manual reconciliation`,
       );
     if (code !== "0x")
       recoveryFail(
@@ -1353,6 +1388,7 @@ export class ForkSpaceLifecycle {
       submittedHashes,
       plan.minimumBlock,
       atomic,
+      this.mode,
     );
     const evidence = receipts[0];
     for (const hash of submittedHashes)
@@ -1476,6 +1512,7 @@ export class ForkSpaceLifecycle {
           hash,
           plan.minimumBlock,
           true,
+          this.mode,
         );
         if (!isRevertedReceipt(receipt))
           recoveryFail(
@@ -1566,6 +1603,7 @@ export class ForkSpaceLifecycle {
             batch.calls[index],
             submittedHashes[index],
             plan.minimumBlock,
+            this.mode,
           );
           receipts.push(receipt);
         } catch (error) {
@@ -1746,7 +1784,7 @@ export class ForkSpaceLifecycle {
                 : "SPACE_UPDATED",
         actor: space.identity.ownerAddress,
         status: "PENDING",
-        payload: { authority: "fork-receipts", operation },
+        payload: { authority: `${this.mode}-receipts`, operation },
         createdAt: Math.floor(Date.now() / 1000),
       });
     }
@@ -1874,7 +1912,7 @@ export class ForkSpaceLifecycle {
       actor: plan.draft.ownerAddress,
       status: "CONFIRMED",
       receiptHash: receipt.hash,
-      payload: { authority: "fork-receipts", operation, step: index },
+      payload: { authority: `${this.mode}-receipts`, operation, step: index },
       createdAt: Number(block.timestamp),
     });
   }
@@ -2057,7 +2095,7 @@ export class ForkSpaceLifecycle {
       policyId: position.policy.id,
       strategyId: plan.definition.strategyHash,
       policyRegistryAddress: position.policy.registry,
-      mode: "fork",
+      mode: this.mode,
       state: policy.paused ? "PAUSED" : "ACTIVE",
     });
     const last = plan.receipts.at(-1);
@@ -2074,7 +2112,7 @@ export class ForkSpaceLifecycle {
       payload: {
         treasury: plan.treasury,
         setupReceipts: plan.receipts,
-        authority: "fork-receipts",
+        authority: `${this.mode}-receipts`,
       },
       createdAt: Number(block.timestamp),
     });

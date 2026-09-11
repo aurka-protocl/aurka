@@ -40,10 +40,21 @@ import {
   agentProposalRequestSchema,
   agentProposalResponseSchema,
   agentStatusSchema,
+  authChallengeRequestSchema,
+  authChallengeResponseSchema,
+  authSessionSchema,
+  authLogoutResponseSchema,
+  authVerifyRequestSchema,
+  agentsResponseSchema,
+  agentResponseSchema,
+  createAgentRequestSchema,
+  fundAgentRequestSchema,
+  setAgentMandateRequestSchema,
   delegatedAuthorizationSchema,
   delegatedControlRequestSchema,
   delegatedRecoveryRequestSchema,
   delegatedSessionResponseSchema,
+  delegatedSessionsResponseSchema,
   delegatedStartRequestSchema,
   delegatedStatusSchema,
   spaceChangesResponseSchema,
@@ -77,12 +88,20 @@ import {
   riskEvaluateResponseSchema,
   riskPositionResponseSchema,
 } from "../risk-service.js";
+import {
+  requestOrigin,
+  type AuthService,
+  type AuthenticatedRequest,
+} from "./auth.js";
+import type { TradingAgentService } from "../agent/trading-agents.js";
 
 const MAX_BODY_BYTES = 1_048_576;
 export interface ApiServerOptions {
   readonly service?: AurkaService;
   readonly agent?: OpenRouterAgent;
   readonly delegated?: DelegatedSessionService;
+  readonly auth?: AuthService;
+  readonly agents?: TradingAgentService;
   readonly requestBodyLimitBytes?: number;
   readonly logger?: StructuredLogger;
 }
@@ -91,6 +110,8 @@ export interface ApiServerHandle {
   readonly server: Server;
   readonly service: AurkaService;
   readonly delegated: DelegatedSessionService;
+  readonly auth?: AuthService;
+  readonly agents?: TradingAgentService;
 }
 
 function requestId(request: IncomingMessage): string {
@@ -316,7 +337,36 @@ export function openApi(): Record<string, unknown> {
       agentProposalRequestSchema,
       agentProposalResponseSchema,
     ],
+    [
+      "/v1/auth/challenge",
+      "post",
+      authChallengeRequestSchema,
+      authChallengeResponseSchema,
+    ],
+    ["/v1/auth/verify", "post", authVerifyRequestSchema, authSessionSchema],
+    ["/v1/auth/session", "get", undefined, authSessionSchema],
+    ["/v1/auth/logout", "post", undefined, authLogoutResponseSchema],
+    ["/v1/agents/me", "get", undefined, agentsResponseSchema],
+    ["/v1/agents", "post", createAgentRequestSchema, agentResponseSchema],
+    [
+      "/v1/agents/{id}/fund",
+      "post",
+      fundAgentRequestSchema,
+      agentResponseSchema,
+    ],
+    [
+      "/v1/agents/{id}/mandate",
+      "post",
+      setAgentMandateRequestSchema,
+      agentResponseSchema,
+    ],
     ["/v1/delegated/status", "get", undefined, delegatedStatusSchema],
+    [
+      "/v1/delegated/sessions",
+      "get",
+      undefined,
+      delegatedSessionsResponseSchema,
+    ],
     [
       "/v1/delegated/sessions/authorize",
       "post",
@@ -477,12 +527,37 @@ async function handle(
   service: AurkaService,
   agent: OpenRouterAgent,
   delegated: DelegatedSessionService,
+  auth: AuthService | undefined,
+  agents: TradingAgentService | undefined,
   limit: number,
 ): Promise<void> {
   const url = new URL(request.url ?? "/", "http://localhost");
   const method = request.method ?? "GET";
   const path = url.pathname;
   try {
+    let authenticated: AuthenticatedRequest | undefined;
+    const requiresAuthentication =
+      path.startsWith("/v1/agents") ||
+      path.startsWith("/v1/delegated") ||
+      path === "/v1/auth/session";
+    if (requiresAuthentication && auth)
+      authenticated = auth.authenticate(request);
+    const requireAuthenticated = (): AuthenticatedRequest => {
+      if (authenticated) return authenticated;
+      throw new ServiceError(
+        "AUTH_REQUIRED",
+        "This endpoint requires a wallet-authenticated session",
+        401,
+      );
+    };
+    const requireAgents = (): TradingAgentService => {
+      if (agents) return agents;
+      throw new ServiceError(
+        "AGENT_PROVISIONING_UNAVAILABLE",
+        "Per-user trading agents are not configured on this service",
+        503,
+      );
+    };
     if (method === "GET" && path === "/health") {
       sendSuccess(
         response,
@@ -517,12 +592,39 @@ async function handle(
     }
 
     if (method === "GET" && path === "/v1/delegated/status") {
+      const identity = auth ? requireAuthenticated() : undefined;
       sendSuccess(
         response,
         200,
-        await delegated.status(),
+        identity && agents
+          ? await agents.status(identity.ownerAddress, identity.chainId)
+          : await delegated.status(),
         request,
         delegatedStatusSchema,
+      );
+      return;
+    }
+    if (method === "GET" && path === "/v1/delegated/sessions") {
+      const identity = auth ? requireAuthenticated() : undefined;
+      sendSuccess(
+        response,
+        200,
+        { sessions: delegated.list(identity?.ownerAddress) },
+        request,
+        delegatedSessionsResponseSchema,
+      );
+      return;
+    }
+
+    if (method === "GET" && path === "/v1/agents/me") {
+      const identity = requireAuthenticated();
+      const manager = requireAgents();
+      sendSuccess(
+        response,
+        200,
+        { agent: manager.get(identity.ownerAddress, identity.chainId) ?? null },
+        request,
+        agentsResponseSchema,
       );
       return;
     }
@@ -531,10 +633,13 @@ async function handle(
       /^\/v1\/delegated\/sessions\/([^/]+)$/,
     );
     if (method === "GET" && delegatedSessionMatch) {
+      const identity = auth ? requireAuthenticated() : undefined;
+      const sessionId = decodeURIComponent(delegatedSessionMatch[1]!);
+      if (identity) delegated.assertOwner(sessionId, identity.ownerAddress);
       sendSuccess(
         response,
         200,
-        delegated.get(decodeURIComponent(delegatedSessionMatch[1]!)),
+        delegated.get(sessionId),
         request,
         delegatedSessionResponseSchema,
       );
@@ -543,7 +648,10 @@ async function handle(
 
     if (method === "GET" && path === "/v1/spaces") {
       const query = spaceListQuerySchema.parse(queryValues(url));
-      await service.refreshSpaces(query.ownerAddress);
+      // Listing Spaces is a read from the service's durable registry. It must
+      // not trigger an RPC snapshot refresh: navigation, the assistant, and
+      // filters can all ask for this list at the same time. Trading and quote
+      // paths perform authoritative refreshes when current holdings matter.
       sendSuccess(
         response,
         200,
@@ -569,7 +677,9 @@ async function handle(
     const spaceMatch = path.match(/^\/v1\/spaces\/([^/]+)$/);
     if (method === "GET" && spaceMatch) {
       const spaceId = decodeURIComponent(spaceMatch[1]!);
-      await service.refreshSpace(spaceId);
+      // Space detail is a durable read. Current on-chain holdings are
+      // refreshed by the trading/quote paths; loading a page must remain
+      // available when the upstream RPC is slow or temporarily unavailable.
       sendSuccess(
         response,
         200,
@@ -661,6 +771,145 @@ async function handle(
     }
 
     const payload = method === "POST" ? await body(request, limit) : undefined;
+    if (method === "POST" && path === "/v1/auth/challenge") {
+      if (!auth)
+        throw new ServiceError(
+          "AUTH_UNAVAILABLE",
+          "Wallet authentication is not configured on this service",
+          503,
+        );
+      const input = authChallengeRequestSchema.parse(payload);
+      sendSuccess(
+        response,
+        200,
+        auth.challenge({ ...input, origin: requestOrigin(request) }),
+        request,
+        authChallengeResponseSchema,
+      );
+      return;
+    }
+    if (method === "POST" && path === "/v1/auth/verify") {
+      if (!auth)
+        throw new ServiceError(
+          "AUTH_UNAVAILABLE",
+          "Wallet authentication is not configured on this service",
+          503,
+        );
+      const result = await auth.verify(payload, requestOrigin(request));
+      response.setHeader("Set-Cookie", auth.cookie(result.token));
+      sendSuccess(response, 200, result.session, request, authSessionSchema);
+      return;
+    }
+    if (method === "GET" && path === "/v1/auth/session") {
+      const identity = requireAuthenticated();
+      sendSuccess(
+        response,
+        200,
+        {
+          address: identity.ownerAddress,
+          chainId: identity.chainId,
+          expiresAt: identity.expiresAt,
+        },
+        request,
+        authSessionSchema,
+      );
+      return;
+    }
+    if (method === "POST" && path === "/v1/auth/logout") {
+      if (auth) response.setHeader("Set-Cookie", auth.clearCookie(request));
+      sendSuccess(
+        response,
+        200,
+        { loggedOut: true },
+        request,
+        authLogoutResponseSchema,
+      );
+      return;
+    }
+    if (method === "POST" && path === "/v1/agents") {
+      const identity = requireAuthenticated();
+      const manager = requireAgents();
+      const input = createAgentRequestSchema.parse(payload);
+      if (input.chainId !== identity.chainId)
+        throw new ServiceError(
+          "CHAIN_MISMATCH",
+          "Agent chain must match the authenticated wallet",
+          409,
+        );
+      const result = await withIdempotency(
+        service,
+        request,
+        path,
+        { ownerAddress: identity.ownerAddress, payload },
+        async () => ({
+          statusCode: 201,
+          data: {
+            agent: await manager.provision(
+              identity.ownerAddress,
+              input.chainId,
+            ),
+          },
+        }),
+      );
+      sendSuccess(
+        response,
+        result.statusCode,
+        result.data,
+        request,
+        agentResponseSchema,
+      );
+      return;
+    }
+    const agentFundingMatch = path.match(/^\/v1\/agents\/([^/]+)\/fund$/);
+    if (method === "POST" && agentFundingMatch) {
+      const identity = requireAuthenticated();
+      const manager = requireAgents();
+      const input = fundAgentRequestSchema.parse(payload);
+      const id = decodeURIComponent(agentFundingMatch[1]!);
+      const result = await withIdempotency(
+        service,
+        request,
+        path,
+        { ownerAddress: identity.ownerAddress, payload },
+        async () => ({
+          statusCode: 200,
+          data: { agent: await manager.fund(identity.ownerAddress, id, input) },
+        }),
+      );
+      sendSuccess(
+        response,
+        result.statusCode,
+        result.data,
+        request,
+        agentResponseSchema,
+      );
+      return;
+    }
+    const agentMandateMatch = path.match(/^\/v1\/agents\/([^/]+)\/mandate$/);
+    if (method === "POST" && agentMandateMatch) {
+      const identity = requireAuthenticated();
+      const manager = requireAgents();
+      const input = setAgentMandateRequestSchema.parse(payload);
+      const id = decodeURIComponent(agentMandateMatch[1]!);
+      const result = await withIdempotency(
+        service,
+        request,
+        path,
+        { ownerAddress: identity.ownerAddress, payload },
+        async () => ({
+          statusCode: 200,
+          data: { agent: manager.setMandate(identity.ownerAddress, id, input) },
+        }),
+      );
+      sendSuccess(
+        response,
+        result.statusCode,
+        result.data,
+        request,
+        agentResponseSchema,
+      );
+      return;
+    }
     if (method === "POST" && path === "/v1/agent/propose") {
       const input = agentProposalRequestSchema.parse(payload);
       const controller = new AbortController();
@@ -685,6 +934,17 @@ async function handle(
     }
     if (method === "POST" && path === "/v1/delegated/sessions/authorize") {
       const input = delegatedAuthorizationSchema.parse(payload);
+      const identity = auth ? requireAuthenticated() : undefined;
+      if (
+        identity &&
+        identity.ownerAddress.toLowerCase() !==
+          input.plan.ownerAddress.toLowerCase()
+      )
+        throw new ServiceError(
+          "DELEGATED_OWNER_UNAUTHORIZED",
+          "Authorization owner does not match the authenticated wallet",
+          403,
+        );
       const result = await withIdempotency(
         service,
         request,
@@ -710,6 +970,8 @@ async function handle(
     if (method === "POST" && delegatedStartMatch) {
       const input = delegatedStartRequestSchema.parse(payload);
       const sessionId = decodeURIComponent(delegatedStartMatch[1]!);
+      const identity = auth ? requireAuthenticated() : undefined;
+      if (identity) delegated.assertOwner(sessionId, identity.ownerAddress);
       const result = await withIdempotency(
         service,
         request,
@@ -739,6 +1001,8 @@ async function handle(
     if (method === "POST" && delegatedControlMatch) {
       const input = delegatedControlRequestSchema.parse(payload);
       const sessionId = decodeURIComponent(delegatedControlMatch[1]!);
+      const identity = auth ? requireAuthenticated() : undefined;
+      if (identity) delegated.assertOwner(sessionId, identity.ownerAddress);
       const operation = delegatedControlMatch[2];
       const result = await withIdempotency(
         service,
@@ -770,6 +1034,8 @@ async function handle(
     if (method === "POST" && delegatedRecoveryMatch) {
       const input = delegatedRecoveryRequestSchema.parse(payload);
       const sessionId = decodeURIComponent(delegatedRecoveryMatch[1]!);
+      const identity = auth ? requireAuthenticated() : undefined;
+      if (identity) delegated.assertOwner(sessionId, identity.ownerAddress);
       const result = await withIdempotency(
         service,
         request,
@@ -1072,18 +1338,31 @@ export function createApiServer(
       method: request.method ?? "GET",
       path: request.url ?? "/",
     });
-    void handle(request, response, service, agent, delegated, limit).finally(
-      () => {
-        logger.info("api.response", {
-          requestId: id,
-          method: request.method ?? "GET",
-          path: request.url ?? "/",
-          statusCode: response.statusCode,
-        });
-      },
-    );
+    void handle(
+      request,
+      response,
+      service,
+      agent,
+      delegated,
+      options.auth,
+      options.agents,
+      limit,
+    ).finally(() => {
+      logger.info("api.response", {
+        requestId: id,
+        method: request.method ?? "GET",
+        path: request.url ?? "/",
+        statusCode: response.statusCode,
+      });
+    });
   });
-  return { server, service, delegated };
+  return {
+    server,
+    service,
+    delegated,
+    ...(options.auth ? { auth: options.auth } : {}),
+    ...(options.agents ? { agents: options.agents } : {}),
+  };
 }
 
 export async function listenApiServer(
@@ -1111,6 +1390,13 @@ export async function closeApiServer(
 ): Promise<void> {
   handleValue.service.close();
   if (!handleValue.server.listening) return;
+  // Node's fetch keeps completed test requests in an idle keep-alive socket;
+  // close it before waiting for server.close so suites and graceful shutdown
+  // do not hang for the socket timeout.
+  const serverWithIdleClose = handleValue.server as Server & {
+    closeIdleConnections?: () => void;
+  };
+  serverWithIdleClose.closeIdleConnections?.();
   await new Promise<void>((resolve, reject) =>
     handleValue.server.close((error) => (error ? reject(error) : resolve())),
   );
