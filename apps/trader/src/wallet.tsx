@@ -12,6 +12,14 @@ export interface BrowserWalletProvider {
   request(input: { method: string; params?: unknown[] }): Promise<unknown>;
   on?(event: string, listener: (...args: unknown[]) => void): void;
   removeListener?(event: string, listener: (...args: unknown[]) => void): void;
+  /** Common provider markers used when several injected wallets coexist. */
+  readonly isMetaMask?: boolean;
+  readonly isRabby?: boolean;
+  readonly isCoinbaseWallet?: boolean;
+  readonly isBraveWallet?: boolean;
+  readonly isPolkadot?: boolean;
+  readonly isSubWallet?: boolean;
+  readonly providers?: readonly BrowserWalletProvider[];
 }
 
 export type WalletStatus =
@@ -41,7 +49,25 @@ interface WindowWithEthereum extends Window {
 const WalletContext = createContext<WalletState | null>(null);
 
 function providerFromWindow(): BrowserWalletProvider | null {
-  return (window as WindowWithEthereum).ethereum ?? null;
+  const injected = (window as WindowWithEthereum).ethereum;
+  if (!injected) return null;
+  const candidates = injected.providers?.length
+    ? [...injected.providers]
+    : [injected];
+  // Multiple wallet extensions can share window.ethereum. Prefer the wallets
+  // supported by this EVM flow, then a non-Substrate provider, and only fall
+  // back to the first injected provider if no marker is available.
+  return (
+    candidates.find((candidate) => candidate.isMetaMask || candidate.isRabby) ??
+    candidates.find(
+      (candidate) => candidate.isCoinbaseWallet || candidate.isBraveWallet,
+    ) ??
+    candidates.find(
+      (candidate) => !candidate.isPolkadot && !candidate.isSubWallet,
+    ) ??
+    candidates[0] ??
+    null
+  );
 }
 
 function parseChainId(value: unknown): number | null {

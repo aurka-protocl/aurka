@@ -60,6 +60,19 @@ const erc20MintAbi = [
   },
 ] as const;
 
+const erc20ApproveAbi = [
+  {
+    type: "function",
+    name: "approve",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "spender", type: "address" },
+      { name: "amount", type: "uint256" },
+    ],
+    outputs: [{ name: "", type: "bool" }],
+  },
+] as const;
+
 type PrivyClientLike = {
   wallets(): {
     get(id: string): Promise<Record<string, any>>;
@@ -192,6 +205,321 @@ function recoveryRules(input: {
   }));
 }
 
+function routerExecutionAbi(): readonly Record<string, unknown>[] {
+  return [
+    {
+      type: "function",
+      name: routerMethod(),
+      stateMutability: "nonpayable",
+      inputs: [
+        { name: "intent", type: "tuple" },
+        { name: "intentSignature", type: "bytes" },
+        { name: "proposal", type: "tuple" },
+        { name: "proposalSignature", type: "bytes" },
+        { name: "assets", type: "tuple[]" },
+        { name: "epoch", type: "tuple" },
+        { name: "priceInput", type: "tuple" },
+        { name: "directProgram", type: "bytes" },
+        ...(routerMethod() === "executeWithSwapVM"
+          ? [
+              { name: "makerTraits", type: "uint256" },
+              { name: "orderData", type: "bytes" },
+              { name: "takerTraitsAndData", type: "bytes" },
+            ]
+          : []),
+      ],
+    },
+  ];
+}
+
+function condition(
+  rule: any,
+  fieldSource: string,
+  field: string,
+  operator: string,
+  expected: string,
+): boolean {
+  return (
+    Array.isArray(rule?.conditions) &&
+    rule.conditions.some(
+      (item: any) =>
+        item?.field_source === fieldSource &&
+        item?.field === field &&
+        item?.operator === operator &&
+        (Array.isArray(item.value) ? item.value : [item.value]).some(
+          (candidate: unknown) =>
+            String(candidate).toLowerCase() === expected.toLowerCase(),
+        ),
+    )
+  );
+}
+
+function abiFunction(
+  item: any,
+  expectedAbi: readonly Record<string, unknown>[],
+): boolean {
+  if (!Array.isArray(item?.abi) || item.abi.length !== 1) return false;
+  const expected = expectedAbi[0] as any;
+  const actual = item.abi[0];
+  return (
+    actual?.type === "function" &&
+    actual?.name === expected.name &&
+    actual?.stateMutability === expected.stateMutability &&
+    Array.isArray(actual.inputs) &&
+    actual.inputs.length === expected.inputs.length &&
+    actual.inputs.every(
+      (input: any, index: number) =>
+        input?.name === expected.inputs[index]?.name &&
+        input?.type === expected.inputs[index]?.type,
+    )
+  );
+}
+
+function calldataCondition(
+  rule: any,
+  field: string,
+  operator: string,
+  expected: string,
+  abi: readonly Record<string, unknown>[],
+): boolean {
+  return (
+    condition(rule, "ethereum_calldata", field, operator, expected) &&
+    Array.isArray(rule?.conditions) &&
+    rule.conditions.some(
+      (item: any) =>
+        item?.field_source === "ethereum_calldata" &&
+        item?.field === field &&
+        item?.operator === operator &&
+        abiFunction(item, abi),
+    )
+  );
+}
+
+function transactionRule(
+  rule: any,
+  method: string,
+  to: string,
+  chainId: number,
+): boolean {
+  return (
+    rule?.action === "ALLOW" &&
+    rule?.method === method &&
+    condition(
+      rule,
+      "ethereum_transaction",
+      "chain_id",
+      "eq",
+      `0x${chainId.toString(16)}`,
+    ) &&
+    condition(rule, "ethereum_transaction", "to", "eq", to) &&
+    condition(rule, "ethereum_transaction", "value", "eq", "0x0")
+  );
+}
+
+function exactIds(actual: unknown, expected: readonly string[]): boolean {
+  return (
+    Array.isArray(actual) &&
+    actual.length === expected.length &&
+    new Set(actual).size === actual.length &&
+    expected.every((id) => actual.includes(id))
+  );
+}
+
+function validateExecutionPolicy(
+  wallet: Record<string, any>,
+  policy: Record<string, any>,
+  ownerId: string,
+  signerId: string,
+  executionPolicyId: string,
+  recoveryPolicyId: string,
+  chainId: number,
+  router: string,
+  inputToken: string,
+  maximumInputAmount: string,
+  requireSigner: boolean,
+): void {
+  if (
+    policy.id !== executionPolicyId ||
+    policy.chain_type !== "ethereum" ||
+    policy.version !== "1.0" ||
+    policy.owner_id !== ownerId
+  )
+    throw new Error("Privy execution policy identity readback mismatch");
+  if (
+    !Array.isArray(wallet.policy_ids) ||
+    wallet.policy_ids.length !== 1 ||
+    wallet.policy_ids[0] !== recoveryPolicyId
+  )
+    throw new Error("Privy agent wallet recovery policy readback mismatch");
+  const signers = Array.isArray(wallet.additional_signers)
+    ? wallet.additional_signers
+    : [];
+  if (signers.some((item: any) => item?.signer_id !== signerId))
+    throw new Error("Privy agent wallet has an unexpected additional signer");
+  if (signers.length > 1)
+    throw new Error("Privy agent wallet has unexpected additional signers");
+  const signer = signers.find((item: any) => item?.signer_id === signerId);
+  if (requireSigner && !signer)
+    throw new Error("Privy agent execution signer is not attached");
+  if (signer && !exactIds(signer.override_policy_ids, [executionPolicyId]))
+    throw new Error("Privy agent signer policy override readback mismatch");
+  const rules = Array.isArray(policy.rules) ? policy.rules : [];
+  const method = transactionMethod();
+  if (
+    rules.some(
+      (rule: any) =>
+        rule?.action === "ALLOW" &&
+        ![method, "eth_signTypedData_v4"].includes(rule.method),
+    )
+  )
+    throw new Error(
+      "Privy execution policy contains an unexpected ALLOW method",
+    );
+  const typedRules = rules.filter(
+    (rule: any) =>
+      rule?.action === "ALLOW" && rule?.method === "eth_signTypedData_v4",
+  );
+  const typedRule = typedRules.find(
+    (rule: any) =>
+      condition(
+        rule,
+        "ethereum_typed_data_domain",
+        "chainId",
+        "eq",
+        String(chainId),
+      ) &&
+      condition(
+        rule,
+        "ethereum_typed_data_domain",
+        "verifyingContract",
+        "eq",
+        router,
+      ),
+  );
+  const methodRules = rules.filter(
+    (rule: any) =>
+      rule?.action === "ALLOW" &&
+      (rule?.method === method || rule?.method === "*"),
+  );
+  const routerRules = methodRules.filter(
+    (rule: any) =>
+      transactionRule(rule, method, router, chainId) &&
+      calldataCondition(
+        rule,
+        "function_name",
+        "eq",
+        routerMethod(),
+        routerExecutionAbi(),
+      ),
+  );
+  const approvalRules = methodRules.filter((rule: any) =>
+    transactionRule(rule, method, inputToken, chainId),
+  );
+  const exactApproval =
+    approvalRules.length === 1 &&
+    calldataCondition(
+      approvalRules[0],
+      "function_name",
+      "eq",
+      "approve",
+      erc20ApproveAbi,
+    ) &&
+    calldataCondition(
+      approvalRules[0],
+      "approve.spender",
+      "eq",
+      router,
+      erc20ApproveAbi,
+    ) &&
+    calldataCondition(
+      approvalRules[0],
+      "approve.amount",
+      "lte",
+      maximumInputAmount,
+      erc20ApproveAbi,
+    );
+  if (
+    typedRules.length !== 1 ||
+    !typedRule ||
+    methodRules.length !== 2 ||
+    routerRules.length !== 1 ||
+    !exactApproval
+  )
+    throw new Error(
+      "Privy execution policy is missing the exact typed-data, router, or approval restrictions",
+    );
+}
+
+function validateRecoveryPolicy(
+  wallet: Record<string, any>,
+  policy: Record<string, any>,
+  ownerId: string,
+  recoveryPolicyId: string,
+  ownerAddress: string,
+  chainId: number,
+  inputToken: string,
+  outputToken: string,
+  maximumRecoveryAmount: string,
+): void {
+  if (
+    !Array.isArray(wallet.policy_ids) ||
+    wallet.policy_ids.length !== 1 ||
+    wallet.policy_ids[0] !== recoveryPolicyId
+  )
+    throw new Error(
+      "Privy recovery policy is not attached to the agent wallet",
+    );
+  if (
+    policy.id !== recoveryPolicyId ||
+    policy.chain_type !== "ethereum" ||
+    policy.version !== "1.0" ||
+    policy.owner_id !== ownerId
+  )
+    throw new Error("Privy recovery policy identity readback mismatch");
+  const rules = Array.isArray(policy.rules) ? policy.rules : [];
+  const method = transactionMethod();
+  const allowed = rules.filter(
+    (rule: any) =>
+      rule?.action === "ALLOW" &&
+      (rule?.method === method || rule?.method === "*"),
+  );
+  const exactRecovery = (rule: any, token: string): boolean =>
+    transactionRule(rule, method, token, chainId) &&
+    calldataCondition(
+      rule,
+      "function_name",
+      "eq",
+      "transfer",
+      erc20TransferAbi,
+    ) &&
+    calldataCondition(
+      rule,
+      "transfer.to",
+      "eq",
+      ownerAddress,
+      erc20TransferAbi,
+    ) &&
+    calldataCondition(
+      rule,
+      "transfer.amount",
+      "lte",
+      maximumRecoveryAmount,
+      erc20TransferAbi,
+    );
+  if (
+    rules.some(
+      (rule: any) => rule?.action === "ALLOW" && rule?.method !== method,
+    ) ||
+    allowed.length !== 2 ||
+    allowed.filter((rule: any) => exactRecovery(rule, inputToken)).length !==
+      1 ||
+    allowed.filter((rule: any) => exactRecovery(rule, outputToken)).length !== 1
+  )
+    throw new Error(
+      "Privy recovery policy must contain only exact owner-directed token transfers",
+    );
+}
+
 function executionFingerprint(policy: Record<string, any>): string {
   return keccak256(
     stringToHex(
@@ -265,9 +593,18 @@ function fundingFrom(value_: Record<string, unknown>): AgentFunding {
 
 export class TradingAgentService {
   private readonly clientPromise: Promise<PrivyClientLike>;
+  private readonly provisioningLeaseId = randomUUID();
   private readonly provisioningInFlight = new Map<
     string,
     Promise<TradingAgent>
+  >();
+  private readonly fundingInFlight = new Map<
+    string,
+    {
+      readonly ownerAddress: string;
+      readonly input: FundAgentRequest;
+      readonly promise: Promise<TradingAgent>;
+    }
   >();
   private readonly rpc: DelegatedChainRpc;
   private readonly ownerId: string;
@@ -408,6 +745,7 @@ export class TradingAgentService {
           lastError: null,
         });
       }
+
       return existing;
     }
     const inFlight = this.provisioningInFlight.get(provisioningKey);
@@ -435,6 +773,20 @@ export class TradingAgentService {
       chainId,
       idempotencyKey,
     });
+    const claimed = this.repository.claimAgentProvisioning(
+      operation.id,
+      this.provisioningLeaseId,
+      Math.floor(Date.now() / 1000) + 120,
+    );
+    if (!claimed) {
+      const concurrent = this.get(normalizedOwner, chainId);
+      if (concurrent) return concurrent;
+      throw new ServiceError(
+        "AGENT_PROVISIONING_IN_PROGRESS",
+        "This agent is already being provisioned; retry after the current operation finishes",
+        409,
+      );
+    }
     this.repository.updateAgentProvisioning(operation.id, {
       state: "PROVISIONING",
       lastError: null,
@@ -490,6 +842,34 @@ export class TradingAgentService {
       if (typeof readback.address !== "string")
         throw new Error("Privy agent wallet has no address");
       const walletAddress = address(readback.address, "Privy agent address");
+      const executionPolicy = await client
+        .policies()
+        .get(this.executionPolicyId);
+      const recoveryPolicy = await client.policies().get(recoveryPolicyId);
+      validateExecutionPolicy(
+        readback,
+        executionPolicy,
+        this.ownerId,
+        this.signerId,
+        this.executionPolicyId,
+        recoveryPolicyId,
+        this.chainId,
+        this.router,
+        this.inputToken,
+        this.maximumInputAmount,
+        true,
+      );
+      validateRecoveryPolicy(
+        readback,
+        recoveryPolicy,
+        this.ownerId,
+        recoveryPolicyId,
+        normalizedOwner,
+        this.chainId,
+        this.inputToken,
+        this.outputToken,
+        this.maximumRecoveryAmount,
+      );
       this.repository.updateAgentProvisioning(operation.id, {
         walletId,
         walletAddress,
@@ -592,7 +972,7 @@ export class TradingAgentService {
     return createPublicClient({ chain, transport: http(this.rpcUrl) });
   }
 
-  async fund(
+  private async fundInternal(
     ownerAddress: string,
     id: string,
     input: FundAgentRequest,
@@ -862,6 +1242,49 @@ export class TradingAgentService {
     });
   }
 
+  async fund(
+    ownerAddress: string,
+    id: string,
+    input: FundAgentRequest,
+  ): Promise<TradingAgent> {
+    // A browser timeout does not cancel work already accepted by the API.
+    // Reuse the same in-process operation while its three receipts settle so
+    // a user retry cannot submit a second faucet batch concurrently.
+    const normalizedOwner = ownerAddress.toLowerCase();
+    const existing = this.fundingInFlight.get(id);
+    if (existing) {
+      if (existing.ownerAddress !== normalizedOwner)
+        throw new ServiceError(
+          "AGENT_NOT_FOUND",
+          "Trading agent was not found",
+          404,
+        );
+      if (
+        existing.input.eth !== input.eth ||
+        existing.input.usdc !== input.usdc ||
+        existing.input.weth !== input.weth
+      )
+        throw new ServiceError(
+          "AGENT_FUNDING_RECONCILIATION_REQUIRED",
+          "A previous faucet operation is still pending; retry it with the original amounts",
+          409,
+        );
+      return existing.promise;
+    }
+    const operation = this.fundInternal(ownerAddress, id, input);
+    this.fundingInFlight.set(id, {
+      ownerAddress: normalizedOwner,
+      input,
+      promise: operation,
+    });
+    try {
+      return await operation;
+    } finally {
+      if (this.fundingInFlight.get(id)?.promise === operation)
+        this.fundingInFlight.delete(id);
+    }
+  }
+
   setMandate(
     ownerAddress: string,
     id: string,
@@ -878,9 +1301,145 @@ export class TradingAgentService {
         "Trading agent was not found",
         404,
       );
+    const activeSession = this.repository
+      .listDelegatedSessions(ownerAddress)
+      .find(
+        (session) =>
+          session.wallet.address?.toLowerCase() ===
+            agent.walletAddress.toLowerCase() &&
+          [
+            "AUTHORIZED",
+            "ACTIVE",
+            "REVOKE_PENDING",
+            "RECONCILIATION_REQUIRED",
+          ].includes(session.state),
+      );
+    if (activeSession)
+      throw new ServiceError(
+        "AGENT_ACTIVE",
+        "Stop the active agent before changing its mandate",
+        409,
+      );
     return this.repository.updateTradingAgent(id, {
       state: agent.state === "ACTIVE" ? "ACTIVE" : "READY",
       mandateJson: input,
+      lastError: null,
+    });
+  }
+
+  /**
+   * Archive the application record and revoke this wallet's execution signer.
+   * The Privy wallet is retained for audit/recovery; this is intentionally a
+   * reversible product archive rather than destructive remote deletion.
+   */
+  async archive(ownerAddress: string, id: string): Promise<TradingAgent> {
+    const agent = this.repository.getTradingAgentById(id);
+    if (
+      !agent ||
+      agent.ownerAddress.toLowerCase() !== ownerAddress.toLowerCase()
+    )
+      throw new ServiceError(
+        "AGENT_NOT_FOUND",
+        "Trading agent was not found",
+        404,
+      );
+    if (agent.state === "REVOKED") return agent;
+    if (agent.state === "FUNDING")
+      throw new ServiceError(
+        "AGENT_RECONCILIATION_REQUIRED",
+        "Wait for the agent funding operation to settle before archiving it",
+        409,
+      );
+    const sessions = this.repository
+      .listDelegatedSessions(ownerAddress)
+      .filter(
+        (session) =>
+          session.wallet.address?.toLowerCase() ===
+          agent.walletAddress.toLowerCase(),
+      );
+    if (
+      sessions.some((session) =>
+        ["AUTHORIZED", "ACTIVE", "REVOKE_PENDING"].includes(session.state),
+      )
+    )
+      throw new ServiceError(
+        "AGENT_ACTIVE",
+        "Stop and revoke the active agent before archiving it",
+        409,
+      );
+    if (
+      sessions.some((session) =>
+        session.trades.some((trade) =>
+          [
+            "RESERVED",
+            "SIGNING",
+            "SUBMITTED",
+            "RECONCILIATION_REQUIRED",
+          ].includes(trade.status),
+        ),
+      )
+    )
+      throw new ServiceError(
+        "AGENT_RECONCILIATION_REQUIRED",
+        "Reconcile pending agent activity before archiving it",
+        409,
+      );
+    const pendingRecovery = sessions.some((session) =>
+      this.repository
+        .listDelegatedRecoveries(session.id)
+        .some((recovery) =>
+          ["PENDING", "SUBMITTED", "UNKNOWN"].includes(recovery.status),
+        ),
+    );
+    if (pendingRecovery)
+      throw new ServiceError(
+        "AGENT_RECONCILIATION_REQUIRED",
+        "Reconcile pending recovery activity before archiving the agent",
+        409,
+      );
+    let delegatedWallet: DelegatedWalletAdapter;
+    let wallet: DelegatedStatus["wallet"];
+    try {
+      delegatedWallet = await this.adapter(agent);
+      wallet = await delegatedWallet.getStatus();
+    } catch (error) {
+      throw new ServiceError(
+        "AGENT_ARCHIVE_FAILED",
+        error instanceof Error
+          ? error.message.slice(0, 500)
+          : "Agent wallet status could not be verified",
+        409,
+      );
+    }
+    if (!wallet.balances)
+      throw new ServiceError(
+        "AGENT_BALANCE_UNAVAILABLE",
+        "Verify the agent wallet balances before archiving it",
+        409,
+      );
+    if (
+      BigInt(wallet.balances.inputToken) > 0n ||
+      BigInt(wallet.balances.outputToken) > 0n
+    )
+      throw new ServiceError(
+        "AGENT_FUNDS_REMAINING",
+        "Recover the agent's WETH and USDC before archiving it",
+        409,
+      );
+    try {
+      await delegatedWallet.revoke();
+    } catch (error) {
+      throw new ServiceError(
+        "AGENT_ARCHIVE_FAILED",
+        error instanceof Error
+          ? error.message.slice(0, 500)
+          : "Agent signer revocation failed",
+        409,
+      );
+    }
+    return this.repository.updateTradingAgent(id, {
+      state: "REVOKED",
+      mandateJson: null,
       lastError: null,
     });
   }
@@ -897,6 +1456,35 @@ export class TradingAgentService {
         )
           .policies()
           .get(this.executionPolicyId);
+        validateExecutionPolicy(
+          wallet,
+          execution,
+          this.ownerId,
+          this.signerId,
+          this.executionPolicyId,
+          agent.recoveryPolicyId,
+          this.chainId,
+          this.router,
+          this.inputToken,
+          this.maximumInputAmount,
+          false,
+        );
+        const recovery = await (
+          await this.client()
+        )
+          .policies()
+          .get(agent.recoveryPolicyId);
+        validateRecoveryPolicy(
+          wallet,
+          recovery,
+          this.ownerId,
+          agent.recoveryPolicyId,
+          agent.ownerAddress,
+          this.chainId,
+          this.inputToken,
+          this.outputToken,
+          this.maximumRecoveryAmount,
+        );
         const signers = Array.isArray(wallet.additional_signers)
           ? wallet.additional_signers
           : [];
@@ -984,6 +1572,23 @@ export class TradingAgentService {
       recoverRemote: async ({ destination, assets, authorizationHash }) => {
         const asset = assets[0];
         if (!asset) throw new Error("Recovery asset is missing");
+        const recoveryWallet = await this.readWallet(agent.walletId);
+        const recoveryPolicy = await (
+          await this.client()
+        )
+          .policies()
+          .get(agent.recoveryPolicyId);
+        validateRecoveryPolicy(
+          recoveryWallet,
+          recoveryPolicy,
+          this.ownerId,
+          agent.recoveryPolicyId,
+          agent.ownerAddress,
+          this.chainId,
+          this.inputToken,
+          this.outputToken,
+          this.maximumRecoveryAmount,
+        );
         const data = (await import("viem")).encodeFunctionData({
           abi: erc20TransferAbi,
           functionName: "transfer",

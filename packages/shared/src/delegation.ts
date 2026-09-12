@@ -244,6 +244,12 @@ export type DelegationTypedData = {
     readonly verifyingContract: string;
   };
   readonly types: {
+    readonly EIP712Domain: readonly [
+      { readonly name: "name"; readonly type: "string" },
+      { readonly name: "version"; readonly type: "string" },
+      { readonly name: "chainId"; readonly type: "uint256" },
+      { readonly name: "verifyingContract"; readonly type: "address" },
+    ];
     readonly DelegationAuthorization: readonly [
       { readonly name: "commitment"; readonly type: "bytes32" },
       { readonly name: "owner"; readonly type: "address" },
@@ -302,6 +308,12 @@ export function delegatedAuthorizationTypedData(
       verifyingContract: agentWallet,
     },
     types: {
+      EIP712Domain: [
+        { name: "name", type: "string" },
+        { name: "version", type: "string" },
+        { name: "chainId", type: "uint256" },
+        { name: "verifyingContract", type: "address" },
+      ],
       DelegationAuthorization: [
         { name: "commitment", type: "bytes32" },
         { name: "owner", type: "address" },
@@ -356,6 +368,12 @@ export function delegatedControlTypedData(
       verifyingContract: agentWallet,
     },
     types: {
+      EIP712Domain: [
+        { name: "name", type: "string" },
+        { name: "version", type: "string" },
+        { name: "chainId", type: "uint256" },
+        { name: "verifyingContract", type: "address" },
+      ],
       ControlAuthorization: [
         { name: "sessionId", type: "bytes32" },
         { name: "owner", type: "address" },
@@ -405,6 +423,12 @@ export function delegatedRecoveryTypedData(
       verifyingContract: agentWallet,
     },
     types: {
+      EIP712Domain: [
+        { name: "name", type: "string" },
+        { name: "version", type: "string" },
+        { name: "chainId", type: "uint256" },
+        { name: "verifyingContract", type: "address" },
+      ],
       RecoveryAuthorization: [
         { name: "sessionId", type: "bytes32" },
         { name: "owner", type: "address" },

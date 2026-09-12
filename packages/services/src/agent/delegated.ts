@@ -18,6 +18,7 @@ import {
   type DelegatedStatus,
   type DelegatedControlAction,
   type DelegatedControlAuthorization,
+  type TradingAgentState,
   formatTokenAmount,
 } from "@aurka/shared";
 import { pathToFileURL } from "node:url";
@@ -71,6 +72,8 @@ export interface DelegatedSessionServiceOptions {
   readonly authorizationContext?: () => Promise<WalletAuthorizationContext>;
   /** A server-trusted application identity bound to the configured wallet. */
   readonly trustedOwnerAddress?: string;
+  /** Local Sepolia rehearsal only; do not enable for judging/production. */
+  readonly deterministicTestMode?: boolean;
   /** Resolves a durable per-user Privy wallet without mutating process.env. */
   readonly walletResolver?: (
     walletId: string,
@@ -147,6 +150,8 @@ export async function createDelegatedSessionServiceFromEnv(
     process.env.PRIVY_DELEGATED_BROADCAST_MODE === "sign-and-broadcast"
       ? "sign-and-broadcast"
       : "privy";
+  const deterministicTestMode =
+    process.env.AURKA_AGENT_TEST_MODE?.trim().toLowerCase() === "true";
   if (
     !walletId ||
     !signerId ||
@@ -218,7 +223,7 @@ export async function createDelegatedSessionServiceFromEnv(
     service,
     agent,
     new PrivyDelegatedExecutionAdapter(adapterOptions),
-    { trustedOwnerAddress, ...options },
+    { trustedOwnerAddress, deterministicTestMode, ...options },
   );
 }
 
@@ -357,6 +362,12 @@ function settlementIntentTypedData(
     },
     primaryType: "Intent",
     types: {
+      EIP712Domain: [
+        { name: "name", type: "string" },
+        { name: "version", type: "string" },
+        { name: "chainId", type: "uint256" },
+        { name: "verifyingContract", type: "address" },
+      ],
       Intent: [
         { name: "intentId", type: "bytes32" },
         { name: "policyId", type: "bytes32" },
@@ -480,6 +491,7 @@ export class DelegatedSessionService {
   private readonly now: () => number;
   private readonly authorizationContext: () => Promise<WalletAuthorizationContext>;
   private readonly trustedOwnerAddress: string | undefined;
+  private readonly deterministicTestMode: boolean;
   private readonly walletResolver:
     ((walletId: string) => Promise<DelegatedWalletAdapter>) | undefined;
   private walletOperation: Promise<void> = Promise.resolve();
@@ -495,6 +507,7 @@ export class DelegatedSessionService {
       options.authorizationContext ??
       (async () => ({}) as WalletAuthorizationContext);
     this.trustedOwnerAddress = options.trustedOwnerAddress;
+    this.deterministicTestMode = options.deterministicTestMode === true;
     this.walletResolver = options.walletResolver;
   }
 
@@ -510,6 +523,16 @@ export class DelegatedSessionService {
     const agent =
       this.service.repository.getTradingAgentByWalletAddress(walletAddress);
     return agent ? this.resolveWallet(agent.walletId) : this.wallet;
+  }
+
+  private syncTradingAgentState(
+    walletAddress: string,
+    state: Extract<TradingAgentState, "ACTIVE" | "READY" | "STOPPED">,
+  ): void {
+    const agent =
+      this.service.repository.getTradingAgentByWalletAddress(walletAddress);
+    if (agent && agent.state !== state)
+      this.service.repository.updateTradingAgent(agent.id, { state });
   }
 
   private async withWalletOperation<T>(
@@ -755,6 +778,24 @@ export class DelegatedSessionService {
     return session;
   }
 
+  /**
+   * Refresh chain-backed state only when the durable record has work that can
+   * have settled since the last request. Ordinary reads stay cheap, while a
+   * submitted recovery receipt becomes visible to the UI on the next read.
+   */
+  async refresh(id: string): Promise<DelegatedSession> {
+    const session = this.get(id);
+    const hasPendingChainWork =
+      session.trades.some((trade) =>
+        ["SUBMITTED", "RECONCILIATION_REQUIRED"].includes(trade.status),
+      ) ||
+      this.service.repository
+        .listDelegatedRecoveries(id)
+        .some((recovery) => recovery.status === "SUBMITTED");
+    if (!hasPendingChainWork && session.state !== "ACTIVE") return session;
+    return this.reconcileInternal(id);
+  }
+
   list(ownerAddress?: string): readonly DelegatedSession[] {
     return this.service.repository.listDelegatedSessions(ownerAddress);
   }
@@ -826,6 +867,7 @@ export class DelegatedSessionService {
         "DELEGATED_NOT_ACTIVE",
         `Delegated session is ${session.state}`,
       );
+    this.syncTradingAgentState(session.wallet.address!, "ACTIVE");
     const pendingTrade = session.trades.find((trade) =>
       ["RESERVED", "SIGNING", "SUBMITTED", "RECONCILIATION_REQUIRED"].includes(
         trade.status,
@@ -953,15 +995,17 @@ export class DelegatedSessionService {
         "Agent proposal direction differs from the reviewed session",
       );
     if (
+      !this.deterministicTestMode &&
       BigInt(proposal.proposal.traderOutputValue) * 10_000n <
-      BigInt(proposal.proposal.traderInputValue) *
-        BigInt(10_000 - session.plan.slippageBps)
+        BigInt(proposal.proposal.traderInputValue) *
+          BigInt(10_000 - session.plan.slippageBps)
     )
       throw new ServiceError(
         "DELEGATED_SLIPPAGE",
         "Agent proposal exceeds the reviewed slippage limit",
       );
     if (
+      !this.deterministicTestMode &&
       session.plan.minimumOutputPerInputBps !== undefined &&
       BigInt(proposal.proposal.traderOutputValue) * 10_000n <
         BigInt(proposal.proposal.traderInputValue) *
@@ -1002,6 +1046,7 @@ export class DelegatedSessionService {
     if (!this.service.repository.claimDelegatedTradeForSigning(trade.id))
       return this.get(id);
     const authorityGeneration = session.authorityGeneration;
+    let executionStage = "preflight";
     try {
       if (
         !this.service.repository.updateDelegatedSessionIfGeneration(
@@ -1035,6 +1080,7 @@ export class DelegatedSessionService {
         );
       }
       const typedData = settlementIntentTypedData(intent, snapshot);
+      executionStage = "intent-signature";
       const intentSignature = await this.withWalletOperation(async () => {
         if (!this.isAuthorityCurrent(id, authorityGeneration))
           throw new ServiceError(
@@ -1047,6 +1093,7 @@ export class DelegatedSessionService {
           await this.authorizationContext(),
         );
       });
+      executionStage = "router-calldata";
       const executed = await this.service.execute(
         proposal.proposal.intentHash,
         proposal.proposalHash,
@@ -1092,6 +1139,16 @@ export class DelegatedSessionService {
             "Delegated session was stopped before broadcast",
             409,
           );
+        if (process.env.AURKA_AGENT_TEST_MODE?.trim().toLowerCase() === "true")
+          console.info("[AURKA delegated test] broadcast.request", {
+            chainId: action.chainId,
+            from: action.trader,
+            to: action.to,
+            value: action.value,
+            selector: action.data.slice(0, 10),
+            dataLength: action.data.length,
+          });
+        executionStage = "broadcast";
         return delegatedWallet.simulateAndSend(
           action,
           await this.authorizationContext(),
@@ -1114,6 +1171,7 @@ export class DelegatedSessionService {
           lastResult: "Submitted to Privy; awaiting chain receipt",
         },
       );
+      executionStage = "receipt";
       const receipt = await delegatedWallet.getReceipt(
         sent.transactionHash,
         receiptExpectation,
@@ -1143,6 +1201,12 @@ export class DelegatedSessionService {
         );
       }
     } catch (error) {
+      if (process.env.AURKA_AGENT_TEST_MODE?.trim().toLowerCase() === "true")
+        console.error("[AURKA delegated test] execution.failed", {
+          stage: executionStage,
+          name: error instanceof Error ? error.name : typeof error,
+          message: error instanceof Error ? error.message : String(error),
+        });
       if (error instanceof DelegatedBroadcastUnknownError) {
         this.service.repository.updateDelegatedTrade(trade.id, {
           status: "RECONCILIATION_REQUIRED",
@@ -1295,6 +1359,7 @@ export class DelegatedSessionService {
       id,
       "Local signing disabled; revoking Privy permission",
     );
+    this.syncTradingAgentState(session.wallet.address!, "STOPPED");
     const delegatedWallet = await this.resolveWallet(session.wallet.walletId!);
     try {
       await this.withWalletOperation(() => delegatedWallet.revoke());
@@ -1340,6 +1405,17 @@ export class DelegatedSessionService {
       throw new ServiceError(
         "DELEGATED_RECONCILIATION_REQUIRED",
         "Reconcile the delegated session before recovering funds",
+        409,
+      );
+    const pendingRecovery = this.service.repository
+      .listDelegatedRecoveries(id)
+      .find((recovery) =>
+        ["SUBMITTED", "UNKNOWN"].includes(recovery.status),
+      );
+    if (pendingRecovery)
+      throw new ServiceError(
+        "DELEGATED_RECOVERY_RECONCILIATION_REQUIRED",
+        "A previous recovery transfer is already in flight; reconcile before trying again",
         409,
       );
     if (

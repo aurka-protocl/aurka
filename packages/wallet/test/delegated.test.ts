@@ -38,6 +38,7 @@ function adapter(
     readonly broadcastMode?: "privy" | "sign-and-broadcast";
     readonly walletAddress?: string;
     readonly signAccount?: ReturnType<typeof privateKeyToAccount>;
+    readonly eip1559?: boolean;
     readonly restoreRemote?: () => Promise<void>;
   } = {},
 ) {
@@ -54,10 +55,23 @@ function adapter(
             const transaction = input.params as {
               transaction: Record<string, string>;
             };
-            return {
-              encoding: "rlp",
-              signed_transaction: options.signAccount
+            const signed = options.signAccount
+              ? options.eip1559
                 ? await options.signAccount.signTransaction({
+                    to: transaction.transaction.to! as `0x${string}`,
+                    value: BigInt(transaction.transaction.value!),
+                    data: transaction.transaction.data! as `0x${string}`,
+                    nonce: Number(BigInt(transaction.transaction.nonce!)),
+                    gas: BigInt(transaction.transaction.gas_limit!),
+                    maxFeePerGas: BigInt(
+                      transaction.transaction.max_fee_per_gas!,
+                    ),
+                    maxPriorityFeePerGas: BigInt(
+                      transaction.transaction.max_priority_fee_per_gas!,
+                    ),
+                    chainId: Number(BigInt(transaction.transaction.chain_id!)),
+                  })
+                : await options.signAccount.signTransaction({
                     to: transaction.transaction.to! as `0x${string}`,
                     value: BigInt(transaction.transaction.value!),
                     data: transaction.transaction.data! as `0x${string}`,
@@ -66,7 +80,10 @@ function adapter(
                     gasPrice: BigInt(transaction.transaction.gas_price!),
                     chainId: Number(BigInt(transaction.transaction.chain_id!)),
                   })
-                : `0x02${"00".repeat(65)}`,
+              : undefined;
+            return {
+              encoding: "rlp",
+              signed_transaction: signed ?? `0x02${"00".repeat(65)}`,
             };
           },
           sendTransaction: async () => ({
@@ -182,6 +199,41 @@ describe("delegated Privy execution boundary", () => {
         broadcastMode: "sign-and-broadcast",
         walletAddress: account.address,
         signAccount: account,
+      },
+    );
+    await expect(
+      value.approveToken!(
+        {
+          chainId: 31_337,
+          token: INPUT,
+          spender: ROUTER,
+          amount: "10",
+          expiresAt: 200,
+          policyFingerprint: FINGERPRINT,
+        },
+        {} as never,
+      ),
+    ).resolves.toEqual({ transactionHash: `0x${"88".repeat(32)}` });
+  });
+
+  it("constructs and verifies the EIP-1559 fee fields used by the live Privy signer", async () => {
+    const account = privateKeyToAccount(`0x${"02".repeat(32)}`);
+    const value = adapter(
+      (method) => {
+        if (method === "eth_chainId") return "0x7a69";
+        if (method === "eth_getBalance") return "0x1";
+        if (method === "eth_getTransactionCount") return "0x0";
+        if (method === "eth_estimateGas") return "0x5208";
+        if (method === "eth_gasPrice") return "0x3";
+        if (method === "eth_maxPriorityFeePerGas") return "0x2";
+        if (method === "eth_sendRawTransaction") return `0x${"88".repeat(32)}`;
+        return "0x0";
+      },
+      {
+        broadcastMode: "sign-and-broadcast",
+        walletAddress: account.address,
+        signAccount: account,
+        eip1559: true,
       },
     );
     await expect(

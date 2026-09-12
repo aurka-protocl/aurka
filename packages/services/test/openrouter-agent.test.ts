@@ -189,6 +189,32 @@ describe("OpenRouter trade agent", () => {
     }
   });
 
+  it("runs the explicit deterministic test path without a provider", async () => {
+    const service = new AurkaService();
+    const fetchImpl = vi.fn();
+    const agent = new OpenRouterAgent(service, {
+      deterministicTestMode: true,
+      fetchImpl,
+    });
+
+    try {
+      const result = await agent.propose({
+        ...request,
+        message: "Find a feasible 1 WETH to USDC trade.",
+      });
+      expect(result.status).toBe("READY");
+      expect(result.toolTrace).toEqual([
+        { tool: "discover_spaces", status: "SUCCEEDED" },
+        { tool: "read_space_conditions", status: "SUCCEEDED" },
+        { tool: "request_deterministic_quote", status: "SUCCEEDED" },
+        { tool: "simulate_proposal", status: "SUCCEEDED" },
+      ]);
+      expect(fetchImpl).not.toHaveBeenCalled();
+    } finally {
+      service.close();
+    }
+  });
+
   it("returns the typed unavailable state for missing credentials and upstream failure", async () => {
     const service = new AurkaService();
     try {

@@ -11,17 +11,78 @@ import {
   type DelegatedSession,
   type DelegatedSessionPlan,
   type DelegatedStatus,
+  type SpaceRecord,
   type TradingAgent,
+  formatTokenAmount,
   parseTokenAmount,
 } from "@aurka/shared";
-import { apiBaseUrl, supportedChainId } from "../config";
+import { agentTestMode, apiBaseUrl, supportedChainId } from "../config";
 import { spaceAdapter } from "../domain/spaces";
 import { userFacingError, shortAddress } from "../ui";
 import { useWallet, WalletStateMessage } from "../wallet";
 
-const client = new AurkaClient({ baseUrl: apiBaseUrl });
+// Faucet funding waits for three Sepolia receipts and can take longer than
+// ordinary API reads. Keep the agent flow open long enough to receive the
+// durable result instead of showing a misleading client timeout.
+const client = new AurkaClient({ baseUrl: apiBaseUrl, timeout: 120_000 });
 
 type Step = 1 | 2 | 3 | 4;
+
+// These are the deployed mock assets in the Sepolia manifest. Their display
+// symbols are intentionally descriptive ("AURKA Demo WETH/USDC"), so symbol
+// equality alone cannot identify the pair.
+const SEPOLIA_USDC = "0x8228fd953cdf5fac815d09ec5ea27ddd9412a714";
+const SEPOLIA_WETH = "0x33dca285758fd19d1f51c7b73d5a5fb8dae4d2c4";
+
+function agentLog(event: string, details: Record<string, unknown> = {}): void {
+  if (import.meta.env.DEV) console.info(`[AURKA agent] ${event}`, details);
+}
+
+function agentErrorDetails(error: unknown): Record<string, unknown> {
+  if (error instanceof AurkaError) {
+    const details = error.details ?? {};
+    return {
+      code: error.code,
+      status: error.statusCode,
+      message: error.message,
+      ...(typeof details.requestedAddress === "string"
+        ? {
+            requestedAddress: `${details.requestedAddress.slice(0, 6)}…${details.requestedAddress.slice(-4)}`,
+          }
+        : {}),
+      ...(typeof details.recoveredAddress === "string"
+        ? {
+            recoveredAddress: `${details.recoveredAddress.slice(0, 6)}…${details.recoveredAddress.slice(-4)}`,
+          }
+        : {}),
+    };
+  }
+  if (error instanceof Error)
+    return { name: error.name, message: error.message.slice(0, 240) };
+  return { errorType: typeof error };
+}
+
+function shortWalletList(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value
+    .filter((item): item is string => typeof item === "string")
+    .map((item) => `${item.slice(0, 6)}…${item.slice(-4)}`);
+}
+
+function providerAccountMismatch(
+  address: string,
+  accounts: unknown,
+): Error | null {
+  if (!Array.isArray(accounts) || accounts.length === 0) return null;
+  const active = accounts.find(
+    (item): item is string => typeof item === "string",
+  );
+  if (active && active.toLowerCase() !== address.toLowerCase())
+    return new Error(
+      `Browser wallet provider account ${active} differs from the connected app account ${address}`,
+    );
+  return null;
+}
 
 function bytes32(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(32));
@@ -31,17 +92,44 @@ function bytes32(): string {
 async function signTypedData(
   provider: {
     request(input: { method: string; params?: unknown[] }): Promise<unknown>;
+    readonly isMetaMask?: boolean;
+    readonly isRabby?: boolean;
+    readonly isCoinbaseWallet?: boolean;
+    readonly isPolkadot?: boolean;
+    readonly isSubWallet?: boolean;
   },
   address: string,
   typedData: unknown,
   label: string,
 ): Promise<string> {
+  const providerAccounts = await provider
+    .request({ method: "eth_accounts" })
+    .catch(() => undefined);
+  agentLog("wallet.provider.accounts", {
+    label,
+    accounts: JSON.stringify(shortWalletList(providerAccounts) ?? []),
+    isMetaMask: provider.isMetaMask === true,
+    isRabby: provider.isRabby === true,
+    isCoinbaseWallet: provider.isCoinbaseWallet === true,
+    isPolkadot: provider.isPolkadot === true,
+    isSubWallet: provider.isSubWallet === true,
+  });
+  const mismatch = providerAccountMismatch(address, providerAccounts);
+  if (mismatch) throw mismatch;
+  agentLog("wallet.signature.request", {
+    label,
+    address: `${address.slice(0, 6)}…${address.slice(-4)}`,
+  });
   const result = await provider.request({
     method: "eth_signTypedData_v4",
     params: [address, JSON.stringify(typedData)],
   });
   if (typeof result !== "string")
     throw new Error(`Wallet returned no ${label} signature`);
+  agentLog("wallet.signature.returned", {
+    label,
+    signatureLength: result.length,
+  });
   return result;
 }
 
@@ -49,13 +137,133 @@ function activeSpacePair(
   space: Awaited<ReturnType<typeof spaceAdapter.getSpace>>,
 ) {
   const assets = space.position?.policy.assets ?? [];
-  const weth = assets.find((asset) => asset.symbol.toUpperCase() === "WETH");
-  const usdc = assets.find((asset) => asset.symbol.toUpperCase() === "USDC");
+  const weth = assets.find(
+    (asset) =>
+      asset.token.toLowerCase() === SEPOLIA_WETH ||
+      asset.symbol.toUpperCase().includes("WETH"),
+  );
+  const usdc = assets.find(
+    (asset) =>
+      asset.token.toLowerCase() === SEPOLIA_USDC ||
+      asset.symbol.toUpperCase().includes("USDC"),
+  );
   if (!weth || !usdc)
     throw new Error(
       "The active Sepolia Space does not expose the WETH/USDC pair",
     );
   return { weth, usdc };
+}
+
+function hasConfirmedAgentFunding(agent: TradingAgent): boolean {
+  return ["eth", "usdc", "weth"].some(
+    (asset) =>
+      typeof agent.fundingJson[asset] === "string" &&
+      agent.fundingJson[asset] !== "0",
+  );
+}
+
+type RecoverableBalanceState = "unknown" | "available" | "empty";
+
+function recoverableBalanceState(
+  status: DelegatedStatus | null,
+): RecoverableBalanceState {
+  const balances = status?.wallet.balances;
+  if (!balances) return "unknown";
+  return BigInt(balances.inputToken) > 0n || BigInt(balances.outputToken) > 0n
+    ? "available"
+    : "empty";
+}
+
+function displayTokenBalance(raw: string, decimals: number): string {
+  try {
+    return formatTokenAmount(raw, decimals);
+  } catch {
+    return "Unavailable";
+  }
+}
+
+function AgentBalanceCard({
+  status,
+  busy,
+  onRefresh,
+}: {
+  readonly status: DelegatedStatus | null;
+  readonly busy: boolean;
+  readonly onRefresh: () => void;
+}) {
+  const balances = status?.wallet.balances;
+  return (
+    <div className="mt-5 rounded-xl border border-cyan-900/70 bg-cyan-950/20 p-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <p className="text-sm font-semibold uppercase tracking-[0.16em] text-cyan-300">
+            Agent wallet balance
+          </p>
+          <p className="mt-1 text-xs text-slate-400">
+            Live Sepolia balance · not the mandate budget
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={onRefresh}
+          disabled={busy}
+          className="rounded-lg border border-cyan-800 px-3 py-2 text-sm font-semibold text-cyan-200 disabled:opacity-50"
+        >
+          Refresh balance
+        </button>
+      </div>
+      {balances ? (
+        <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-3">
+          <div>
+            <dt className="text-slate-500">ETH for gas</dt>
+            <dd className="font-mono text-lg text-white">
+              {displayTokenBalance(balances.native, 18)} ETH
+            </dd>
+          </div>
+          <div>
+            <dt className="text-slate-500">Mock WETH</dt>
+            <dd className="font-mono text-lg text-white">
+              {displayTokenBalance(balances.inputToken, 18)} WETH
+            </dd>
+          </div>
+          <div>
+            <dt className="text-slate-500">Mock USDC</dt>
+            <dd className="font-mono text-lg text-white">
+              {displayTokenBalance(balances.outputToken, 6)} USDC
+            </dd>
+          </div>
+        </dl>
+      ) : (
+        <p className="mt-4 text-sm text-amber-200">
+          {status
+            ? "The wallet is available, but its live balances could not be read yet. Click Refresh balance."
+            : "Live balances have not loaded yet. Click Refresh balance."}
+        </p>
+      )}
+    </div>
+  );
+}
+
+function agentMandateSpaceId(agent: TradingAgent | null): string | undefined {
+  const value = agent?.mandateJson?.spaceIds;
+  return Array.isArray(value) && typeof value[0] === "string"
+    ? value[0]
+    : undefined;
+}
+
+function supportsAgentSpace(space: SpaceRecord): boolean {
+  if (
+    space.identity.state !== "ACTIVE" ||
+    space.identity.chainId !== supportedChainId ||
+    !space.position
+  )
+    return false;
+  try {
+    activeSpacePair(space);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export default function Agent() {
@@ -66,9 +274,15 @@ export default function Agent() {
   const [walletStatus, setWalletStatus] = useState<DelegatedStatus | null>(
     null,
   );
+  const [eligibleSpaces, setEligibleSpaces] = useState<readonly SpaceRecord[]>(
+    [],
+  );
+  const [spacesLoading, setSpacesLoading] = useState(false);
+  const [selectedSpaceId, setSelectedSpaceId] = useState("");
   const [spaceId, setSpaceId] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [message, setMessage] = useState(
     "Find small, conservative WETH to USDC opportunities in my selected Space.",
   );
@@ -78,7 +292,7 @@ export default function Agent() {
   const [perTradeInput, setPerTradeInput] = useState("0.0025");
   const [totalInput, setTotalInput] = useState("0.0075");
   const [maxTradeCount, setMaxTradeCount] = useState("3");
-  const [minimumRate, setMinimumRate] = useState("95");
+  const [minimumRate, setMinimumRate] = useState(agentTestMode ? "0" : "95");
   const [slippage, setSlippage] = useState("1");
   const [draftReadyOwner, setDraftReadyOwner] = useState<string | null>(null);
 
@@ -107,6 +321,8 @@ export default function Agent() {
         if (typeof draft.minimumRate === "string")
           setMinimumRate(draft.minimumRate);
         if (typeof draft.slippage === "string") setSlippage(draft.slippage);
+        if (typeof draft.spaceId === "string")
+          setSelectedSpaceId(draft.spaceId);
       }
     } catch {
       // A browser storage failure must not prevent wallet-agent use.
@@ -126,6 +342,7 @@ export default function Agent() {
           maxTradeCount,
           minimumRate,
           slippage,
+          spaceId: selectedSpaceId,
         }),
       );
     } catch {
@@ -139,8 +356,50 @@ export default function Agent() {
     minimumRate,
     perTradeInput,
     slippage,
+    selectedSpaceId,
     totalInput,
   ]);
+
+  useEffect(() => {
+    if (step !== 3 || !agent) return;
+    let active = true;
+    setSpacesLoading(true);
+    void spaceAdapter
+      .listSpaces(50)
+      .then((spaces) => {
+        if (!active) return;
+        const eligible = spaces.filter(supportsAgentSpace);
+        setEligibleSpaces(eligible);
+        setSelectedSpaceId((current) => {
+          if (
+            current &&
+            eligible.some((space) => space.identity.id === current)
+          )
+            return current;
+          return (
+            session?.plan.allowedSpaceIds[0] ??
+            agentMandateSpaceId(agent) ??
+            eligible[0]?.identity.id ??
+            ""
+          );
+        });
+      })
+      .catch((requestError) => {
+        if (active)
+          setError(
+            userFacingError(
+              requestError,
+              "The available agent Spaces could not be loaded",
+            ),
+          );
+      })
+      .finally(() => {
+        if (active) setSpacesLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [agent, session, step]);
 
   useEffect(() => {
     if (
@@ -180,6 +439,11 @@ export default function Agent() {
           setStep(1);
           return;
         }
+        if (result.agent.state === "REVOKED") {
+          setSession(null);
+          setStep(1);
+          return;
+        }
         const [sessions, status] = await Promise.all([
           client
             .delegatedSessions()
@@ -191,10 +455,26 @@ export default function Agent() {
             candidate.wallet.address?.toLowerCase() ===
             result.agent?.walletAddress.toLowerCase(),
         );
+        // The list endpoint is deliberately durable and cheap. Refresh the
+        // selected session once so a recovery receipt that settled after the
+        // list read is reflected immediately in the status card.
+        const refreshed = current
+          ? await client.delegatedSession(current.id).catch(() => current)
+          : null;
         if (!active) return;
-        setSession(current ?? null);
+        setSession(refreshed);
         setWalletStatus(status);
-        setStep(current ? 4 : result.agent.fundingJson.eth === "0" ? 2 : 3);
+        setSelectedSpaceId(
+          refreshed?.plan.allowedSpaceIds[0] ??
+            agentMandateSpaceId(result.agent) ??
+            "",
+        );
+        setSpaceId(
+          refreshed?.plan.allowedSpaceIds[0] ??
+            agentMandateSpaceId(result.agent) ??
+            null,
+        );
+        setStep(refreshed ? 4 : result.agent.fundingJson.eth === "0" ? 2 : 3);
       } catch {
         // A missing auth cookie is expected until the user starts the wizard.
       }
@@ -222,35 +502,104 @@ export default function Agent() {
       throw new Error(
         `Connect the browser wallet to Sepolia (chain ${supportedChainId}) first`,
       );
-    const challenge = await client.authChallenge({
-      address: wallet.address,
+    agentLog("auth.start", {
+      address: `${wallet.address.slice(0, 6)}…${wallet.address.slice(-4)}`,
       chainId: wallet.chainId,
     });
-    const signature = await signTypedData(
-      wallet.provider,
-      wallet.address,
-      challenge.typedData,
-      "login",
-    );
-    await client.authVerify({
-      challengeId: challenge.challengeId,
-      address: wallet.address,
-      chainId: wallet.chainId,
-      signature,
-    });
+    try {
+      const existing = await client.authSession();
+      if (
+        existing.address.toLowerCase() === wallet.address.toLowerCase() &&
+        existing.chainId === wallet.chainId
+      ) {
+        agentLog("auth.session.reused", {
+          address: `${existing.address.slice(0, 6)}…${existing.address.slice(-4)}`,
+          chainId: existing.chainId,
+        });
+        return;
+      }
+      agentLog("auth.session.ignored", {
+        reason: "address-or-chain-mismatch",
+        sessionAddress: `${existing.address.slice(0, 6)}…${existing.address.slice(-4)}`,
+        sessionChainId: existing.chainId,
+      });
+    } catch {
+      // A new wallet session is expected on the first visit or after expiry.
+      agentLog("auth.session.missing", { reason: "no-valid-session" });
+    }
+    const attempt = async (attemptNumber: number): Promise<void> => {
+      agentLog("auth.challenge.request", { attempt: attemptNumber });
+      const challenge = await client.authChallenge({
+        address: wallet.address!,
+        chainId: wallet.chainId!,
+      });
+      agentLog("auth.challenge.received", {
+        attempt: attemptNumber,
+        origin: challenge.origin,
+        chainId: challenge.chainId,
+        challengeId: challenge.challengeId.slice(0, 8),
+        expiresAt: challenge.expiresAt,
+      });
+      const signature = await signTypedData(
+        wallet.provider!,
+        wallet.address!,
+        challenge.typedData,
+        "login",
+      );
+      await client.authVerify({
+        challengeId: challenge.challengeId,
+        address: wallet.address!,
+        chainId: wallet.chainId!,
+        signature,
+      });
+      agentLog("auth.verify.succeeded", { attempt: attemptNumber });
+    };
+    try {
+      await attempt(1);
+    } catch (requestError) {
+      agentLog("auth.verify.failed", agentErrorDetails(requestError));
+      // A stale/duplicate browser request can consume a challenge before the
+      // wallet popup finishes. Give the user one fresh challenge instead of
+      // forcing a page reload; signature and origin failures still surface.
+      if (
+        requestError instanceof AurkaError &&
+        requestError.code === "AUTH_CHALLENGE_INVALID"
+      ) {
+        agentLog("auth.retry", { reason: "challenge-invalid" });
+        await attempt(2);
+        return;
+      }
+      throw requestError;
+    }
   }
 
   async function createAgent(): Promise<void> {
     setBusy("Creating your private trading wallet…");
     setError(null);
+    setNotice(null);
+    let stage = "starting";
+    agentLog("create.started", {
+      address: wallet.address
+        ? `${wallet.address.slice(0, 6)}…${wallet.address.slice(-4)}`
+        : null,
+      chainId: wallet.chainId,
+    });
     try {
+      stage = "authentication";
       await authenticate();
+      stage = "provisioning";
+      agentLog("agent.provision.request", { chainId: supportedChainId });
       const result = await client.createTradingAgent({
         chainId: supportedChainId,
+      });
+      agentLog("agent.provision.succeeded", {
+        agentId: result.agent.id,
+        walletAddress: `${result.agent.walletAddress.slice(0, 6)}…${result.agent.walletAddress.slice(-4)}`,
       });
       setAgent(result.agent);
       setStep(2);
     } catch (requestError) {
+      agentLog("create.failed", { stage, ...agentErrorDetails(requestError) });
       setError(
         userFacingError(
           requestError,
@@ -266,12 +615,40 @@ export default function Agent() {
     if (!agent) return;
     setBusy("Funding your agent with Sepolia test assets…");
     setError(null);
+    setNotice(null);
     try {
       const result = await client.fundTradingAgent(agent.id, funding);
       setAgent(result.agent);
       setWalletStatus(await client.delegatedStatus());
       setStep(3);
     } catch (requestError) {
+      // The server may still be confirming the three faucet receipts when a
+      // network/proxy timeout reaches the browser. Read the durable agent
+      // record before showing a failure so a completed operation advances the
+      // wizard instead of making the user fund the same wallet again.
+      if (
+        requestError instanceof AurkaError &&
+        requestError.code === "TIMEOUT"
+      ) {
+        const latest = await client.myTradingAgent().catch(() => null);
+        if (latest?.agent?.id === agent.id) {
+          setAgent(latest.agent);
+          if (
+            latest.agent.state === "READY" &&
+            hasConfirmedAgentFunding(latest.agent)
+          ) {
+            setError(null);
+            setStep(3);
+            return;
+          }
+          if (latest.agent.state === "FUNDING") {
+            setError(
+              "Funding is still confirming on Sepolia. Wait a moment, then refresh this page; do not start a second funding request.",
+            );
+            return;
+          }
+        }
+      }
       setError(userFacingError(requestError, "The agent could not be funded"));
     } finally {
       setBusy(null);
@@ -282,15 +659,34 @@ export default function Agent() {
     if (!agent || !wallet.address || !wallet.provider) return;
     setBusy("Reviewing the mandate and starting the worker…");
     setError(null);
+    setNotice(null);
+    let stage = "loading-space";
+    agentLog("mandate.start", {
+      agentId: agent.id,
+      agentWallet: shortAddress(agent.walletAddress),
+      chainId: supportedChainId,
+    });
     try {
       const spaces = await spaceAdapter.listSpaces(50);
-      const space = spaces.find(
-        (candidate) => candidate.identity.state === "ACTIVE",
-      );
+      const availableSpaces = spaces.filter(supportsAgentSpace);
+      const space =
+        availableSpaces.find(
+          (candidate) => candidate.identity.id === selectedSpaceId,
+        ) ?? availableSpaces[0];
       if (!space?.position)
-        throw new Error("No active Sepolia Space is available for this agent");
+        throw new AurkaError(
+          "DELEGATED_SPACE_INELIGIBLE",
+          "No active Sepolia WETH/USDC Space is available for this agent",
+          409,
+        );
+      agentLog("mandate.space.loaded", {
+        spaceId: space.identity.id,
+        state: space.identity.state,
+      });
+      stage = "selecting-assets";
       const selectedPair = activeSpacePair(space);
       setSpaceId(space.identity.id);
+      setSelectedSpaceId(space.identity.id);
       const parsedPerTradeInput = parseTokenAmount(
         perTradeInput.trim(),
         selectedPair.weth.decimals,
@@ -327,7 +723,16 @@ export default function Agent() {
         slippageBps: parsedSlippage,
         expiresAt,
       };
+      stage = "saving-mandate";
+      agentLog("mandate.save.request", {
+        spaceId: space.identity.id,
+        expiresAt,
+        perTradeInputAmount: parsedPerTradeInput,
+        cumulativeInputBudget: parsedTotalInput,
+        maxTradeCount: mandate.maxTradeCount,
+      });
       const saved = await client.setTradingAgentMandate(agent.id, mandate);
+      agentLog("mandate.save.succeeded", { agentId: saved.agent.id });
       setAgent(saved.agent);
       const { spaceIds, ...mandatePlan } = mandate;
       const plan: DelegatedSessionPlan = {
@@ -343,10 +748,19 @@ export default function Agent() {
         delegatedAuthorizationTypedData(plan, agent.walletAddress),
         "agent authorization",
       );
+      stage = "authorizing-session";
+      agentLog("delegated.authorize.request", {
+        sessionExpiresAt: plan.expiresAt,
+        spaceId: space.identity.id,
+      });
       const session = await client.authorizeDelegatedSession({
         plan,
         agentWallet: agent.walletAddress,
         signature: authorizationSignature,
+      });
+      agentLog("delegated.authorize.succeeded", {
+        sessionId: shortAddress(session.id),
+        state: session.state,
       });
       setSession(session);
       const controlMessage =
@@ -368,6 +782,11 @@ export default function Agent() {
         ),
         "start authorization",
       );
+      stage = "starting-session";
+      agentLog("delegated.start.request", {
+        sessionId: shortAddress(session.id),
+        messageLength: controlMessage.length,
+      });
       const started = await client.startDelegatedSession(session.id, {
         message: controlMessage,
         authorization: {
@@ -382,9 +801,24 @@ export default function Agent() {
           signature: controlSignature,
         },
       });
+      agentLog("delegated.start.succeeded", {
+        sessionId: shortAddress(started.id),
+        state: started.state,
+        lastResult: started.lastResult ?? null,
+      });
       setSession(started);
       setStep(4);
+      setNotice(
+        started.state === "ACTIVE"
+          ? "Your Privy trading agent is running within the reviewed mandate."
+          : (started.lastResult ??
+              "The mandate was saved for the background worker."),
+      );
     } catch (requestError) {
+      agentLog("mandate.start.failed", {
+        stage,
+        ...agentErrorDetails(requestError),
+      });
       if (
         requestError instanceof AurkaError &&
         requestError.code === "DELEGATED_EXECUTION_FAILED"
@@ -413,6 +847,7 @@ export default function Agent() {
         : "Refreshing agent status…",
     );
     setError(null);
+    setNotice(null);
     try {
       const controlMessage = "";
       const expiresAt = Math.min(
@@ -461,17 +896,23 @@ export default function Agent() {
   }
 
   async function recoverAgent(): Promise<void> {
-    if (
-      !session ||
-      !wallet.address ||
-      !wallet.provider ||
-      !session.wallet.balances
-    )
-      return;
+    if (!session || !wallet.address || !wallet.provider) return;
     setBusy("Preparing owner-approved recovery…");
     setError(null);
+    setNotice(null);
     try {
-      const balances = session.wallet.balances;
+      // The session record contains a snapshot. Recovery must use the live
+      // Privy balances because a previous receipt may have settled after the
+      // last session read.
+      const liveStatus = await client.delegatedStatus();
+      setWalletStatus(liveStatus);
+      const balances = liveStatus.wallet.balances ?? session.wallet.balances;
+      if (!balances)
+        throw new AurkaError(
+          "DELEGATED_RECOVERY_ASSET",
+          "The agent balance is not available yet",
+          409,
+        );
       const asset =
         BigInt(balances.inputToken) > 0n
           ? {
@@ -482,8 +923,17 @@ export default function Agent() {
               token: session.plan.traderOutputToken,
               amount: balances.outputToken,
             };
+      agentLog("recovery.request", {
+        sessionId: shortAddress(session.id),
+        token: shortAddress(asset.token),
+        amount: asset.amount,
+      });
       if (asset.amount === "0")
-        throw new Error("The agent has no recoverable test-token balance");
+        throw new AurkaError(
+          "DELEGATED_RECOVERY_ASSET",
+          "The agent has no recoverable test-token balance",
+          409,
+        );
       const recoveryNonce = bytes32();
       const signature = await signTypedData(
         wallet.provider,
@@ -504,10 +954,138 @@ export default function Agent() {
         recoveryNonce,
         signature,
       });
+      agentLog("recovery.response", {
+        sessionId: shortAddress(next.id),
+        state: next.state,
+        lastResult: next.lastResult ?? null,
+      });
       setSession(next);
+      const refreshedStatus = await client.delegatedStatus().catch(() => null);
+      if (refreshedStatus) setWalletStatus(refreshedStatus);
+      setNotice(
+        next.lastResult?.startsWith("Recovered") ||
+          next.lastResult?.startsWith("Confirmed recovery")
+          ? "Test funds recovered to your connected owner wallet."
+          : "Recovery was submitted to Sepolia. Refresh status in a few seconds to confirm the receipt.",
+      );
     } catch (requestError) {
+      agentLog("recovery.failed", agentErrorDetails(requestError));
+      // A provider or gateway timeout may happen after Privy has already
+      // broadcast the transfer. Re-read the durable session before showing a
+      // failure, so the owner never retries an unknown recovery blindly.
+      if (
+        requestError instanceof AurkaError &&
+        requestError.code === "TIMEOUT"
+      ) {
+        const latest = await client
+          .delegatedSession(session.id)
+          .catch(() => null);
+        if (latest) {
+          setSession(latest);
+          const latestStatus = await client.delegatedStatus().catch(() => null);
+          if (latestStatus) setWalletStatus(latestStatus);
+          setError(null);
+          setNotice(
+            latest.lastResult && /recovery/i.test(latest.lastResult)
+              ? "The recovery request was accepted. The status was reconciled; do not submit it again."
+              : "The recovery request timed out before the result arrived. Refresh status before trying again.",
+          );
+          return;
+        }
+      }
       setError(
         userFacingError(requestError, "The agent funds could not be recovered"),
+      );
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function refreshAgentStatus(): Promise<void> {
+    if (!session) return;
+    setBusy("Refreshing the agent and Privy wallet status…");
+    setError(null);
+    setNotice(null);
+    try {
+      const [next, status] = await Promise.all([
+        client.delegatedSession(session.id),
+        client.delegatedStatus(),
+      ]);
+      setSession(next);
+      setWalletStatus(status);
+      setNotice(next.lastResult ?? "Agent status refreshed.");
+    } catch (requestError) {
+      setError(
+        userFacingError(
+          requestError,
+          "The agent status could not be refreshed",
+        ),
+      );
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function refreshWalletStatus(): Promise<void> {
+    setBusy("Refreshing the agent wallet balance…");
+    setError(null);
+    setNotice(null);
+    try {
+      setWalletStatus(await client.delegatedStatus());
+      setNotice("Agent wallet balance refreshed.");
+    } catch (requestError) {
+      setError(
+        userFacingError(
+          requestError,
+          "The agent wallet balance could not be refreshed",
+        ),
+      );
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  function beginMandateEdit(): void {
+    if (session && ["AUTHORIZED", "ACTIVE"].includes(session.state)) {
+      setError("Stop the agent before editing its mandate.");
+      return;
+    }
+    setSelectedSpaceId(
+      session?.plan.allowedSpaceIds[0] ??
+        agentMandateSpaceId(agent) ??
+        selectedSpaceId,
+    );
+    setError(null);
+    setNotice(
+      "Edit the mandate below, then review and approve a fresh session.",
+    );
+    setStep(3);
+  }
+
+  async function archiveAgent(): Promise<void> {
+    if (!agent) return;
+    if (
+      typeof window !== "undefined" &&
+      !window.confirm(
+        "Archive this agent? It must be stopped, empty of WETH/USDC, and will need a new mandate before it can run again.",
+      )
+    )
+      return;
+    setBusy("Revoking the Privy signer and archiving the agent…");
+    setError(null);
+    setNotice(null);
+    try {
+      const result = await client.archiveTradingAgent(agent.id);
+      setAgent(result.agent);
+      setSession(null);
+      setSpaceId(null);
+      setStep(1);
+      setNotice(
+        "Agent archived. Its Privy wallet record is retained for audit; configure a new mandate to use it again.",
+      );
+    } catch (requestError) {
+      setError(
+        userFacingError(requestError, "The agent could not be archived"),
       );
     } finally {
       setBusy(null);
@@ -520,6 +1098,10 @@ export default function Agent() {
     "Trading instruction",
     "Review and start",
   ];
+  const selectedSpace = eligibleSpaces.find(
+    (space) => space.identity.id === selectedSpaceId,
+  );
+  const recoveryBalanceState = recoverableBalanceState(walletStatus);
 
   return (
     <section className="mx-auto max-w-4xl space-y-6">
@@ -568,6 +1150,15 @@ export default function Agent() {
           {error}
         </p>
       ) : null}
+      {notice ? (
+        <p
+          role="status"
+          aria-live="polite"
+          className="rounded-xl border border-emerald-800/70 bg-emerald-950/30 p-4 text-emerald-200"
+        >
+          {notice}
+        </p>
+      ) : null}
       {busy ? (
         <p
           aria-live="polite"
@@ -592,7 +1183,12 @@ export default function Agent() {
               {shortAddress(session.wallet.address ?? "")}
             </span>
           </div>
-          <dl className="mt-5 grid gap-3 text-sm sm:grid-cols-3">
+          <AgentBalanceCard
+            status={walletStatus}
+            busy={!!busy}
+            onRefresh={() => void refreshAgentStatus()}
+          />
+          <dl className="mt-5 grid gap-3 text-sm sm:grid-cols-4">
             <div>
               <dt className="text-slate-500">Remaining budget</dt>
               <dd className="text-white">
@@ -611,6 +1207,12 @@ export default function Agent() {
                 {session.lastResult ?? "No decision recorded yet"}
               </dd>
             </div>
+            <div>
+              <dt className="text-slate-500">Allowed Space</dt>
+              <dd className="break-all text-white">
+                {session.plan.allowedSpaceIds.join(", ")}
+              </dd>
+            </div>
           </dl>
           <div className="mt-5 flex flex-wrap gap-3">
             {["AUTHORIZED", "ACTIVE"].includes(session.state) ? (
@@ -626,28 +1228,49 @@ export default function Agent() {
             {["STOPPED", "EXPIRED", "EXHAUSTED"].includes(session.state) ? (
               <button
                 type="button"
-                onClick={() => void recoverAgent()}
-                disabled={!!busy}
-                className="rounded-lg bg-emerald-400 px-4 py-2 font-semibold text-slate-950 disabled:opacity-50"
+                onClick={() =>
+                  void (recoveryBalanceState === "unknown"
+                    ? refreshWalletStatus()
+                    : recoverAgent())
+                }
+                disabled={!!busy || recoveryBalanceState === "empty"}
+                title={
+                  recoveryBalanceState === "empty"
+                    ? "The agent has no WETH or USDC to recover"
+                    : undefined
+                }
+                className="rounded-lg bg-emerald-400 px-4 py-2 font-semibold text-slate-950 disabled:cursor-not-allowed disabled:opacity-50"
               >
-                Recover test funds
+                {recoveryBalanceState === "available"
+                  ? "Recover test funds"
+                  : recoveryBalanceState === "empty"
+                    ? "No WETH/USDC to recover"
+                    : "Check balance before recovery"}
               </button>
+            ) : null}
+            {["STOPPED", "EXPIRED", "EXHAUSTED"].includes(session.state) ? (
+              <>
+                <button
+                  type="button"
+                  onClick={beginMandateEdit}
+                  disabled={!!busy}
+                  className="rounded-lg border border-cyan-700 px-4 py-2 font-semibold text-cyan-200 disabled:opacity-50"
+                >
+                  Edit mandate
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void archiveAgent()}
+                  disabled={!!busy}
+                  className="rounded-lg border border-slate-600 px-4 py-2 font-semibold text-slate-300 disabled:opacity-50"
+                >
+                  Archive agent
+                </button>
+              </>
             ) : null}
             <button
               type="button"
-              onClick={() =>
-                void client
-                  .delegatedSession(session.id)
-                  .then(setSession)
-                  .catch((requestError) =>
-                    setError(
-                      userFacingError(
-                        requestError,
-                        "The agent status could not be refreshed",
-                      ),
-                    ),
-                  )
-              }
+              onClick={() => void refreshAgentStatus()}
               disabled={!!busy}
               className="rounded-lg border border-slate-600 px-4 py-2 font-semibold text-slate-200 disabled:opacity-50"
             >
@@ -657,7 +1280,44 @@ export default function Agent() {
         </div>
       ) : null}
 
-      {step === 1 && (
+      {agent && !session && agent.state !== "REVOKED" ? (
+        <div className="rounded-2xl border border-slate-700 bg-slate-900/70 p-6">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <p className="text-sm font-semibold uppercase tracking-[0.18em] text-slate-400">
+                Agent record
+              </p>
+              <h2 className="mt-2 text-xl font-semibold text-white">
+                {agent.state}
+              </h2>
+            </div>
+            <span className="font-mono text-xs text-slate-400">
+              {shortAddress(agent.walletAddress)}
+            </span>
+          </div>
+          <p className="mt-3 text-sm leading-6 text-slate-300">
+            This is your persistent Privy wallet. You can finish the setup
+            wizard, or archive the application record once the wallet has no
+            WETH/USDC left. Archiving revokes its execution signer and keeps the
+            wallet history; it does not delete the remote Privy wallet.
+          </p>
+          <AgentBalanceCard
+            status={walletStatus}
+            busy={!!busy}
+            onRefresh={() => void refreshWalletStatus()}
+          />
+          <button
+            type="button"
+            onClick={() => void archiveAgent()}
+            disabled={!!busy}
+            className="mt-5 rounded-lg border border-slate-600 px-4 py-2 font-semibold text-slate-300 disabled:opacity-50"
+          >
+            Archive agent
+          </button>
+        </div>
+      ) : null}
+
+      {step === 1 && !agent && (
         <div className="rounded-2xl border border-slate-700 bg-slate-900/70 p-6">
           <WalletCards className="h-8 w-8 text-cyan-300" />
           <h2 className="mt-4 text-xl font-semibold text-white">
@@ -683,6 +1343,28 @@ export default function Agent() {
         </div>
       )}
 
+      {step === 1 && agent?.state === "REVOKED" ? (
+        <div className="rounded-2xl border border-slate-700 bg-slate-900/70 p-6">
+          <WalletCards className="h-8 w-8 text-slate-400" />
+          <h2 className="mt-4 text-xl font-semibold text-white">
+            Agent archived
+          </h2>
+          <p className="mt-2 leading-6 text-slate-300">
+            The execution signer is revoked and this agent cannot trade. The
+            Privy wallet and history are retained. Configure a new mandate to
+            restore the signer only after you approve the new limits.
+          </p>
+          <button
+            type="button"
+            onClick={beginMandateEdit}
+            disabled={!!busy}
+            className="mt-6 rounded-lg bg-cyan-400 px-4 py-3 font-semibold text-slate-950 disabled:opacity-50"
+          >
+            Configure a new mandate
+          </button>
+        </div>
+      ) : null}
+
       {step === 2 && agent && (
         <div className="rounded-2xl border border-slate-700 bg-slate-900/70 p-6">
           <Sparkles className="h-8 w-8 text-amber-300" />
@@ -691,7 +1373,8 @@ export default function Agent() {
           </h2>
           <p className="mt-2 leading-6 text-slate-300">
             The faucet sends 0.01 Sepolia ETH for gas, 1 WETH, and 1,000 mock
-            USDC to the Privy wallet below.
+            USDC to the Privy wallet below. Sepolia may take up to two minutes
+            to confirm all three transactions.
           </p>
           <dl className="mt-5 grid gap-3 text-sm sm:grid-cols-2">
             <div>
@@ -707,28 +1390,11 @@ export default function Agent() {
               </dd>
             </div>
           </dl>
-          {walletStatus?.wallet.balances ? (
-            <dl className="mt-5 grid gap-3 text-sm sm:grid-cols-3">
-              <div>
-                <dt className="text-slate-500">Confirmed ETH</dt>
-                <dd className="font-mono text-white">
-                  {walletStatus.wallet.balances.native}
-                </dd>
-              </div>
-              <div>
-                <dt className="text-slate-500">Confirmed WETH</dt>
-                <dd className="font-mono text-white">
-                  {walletStatus.wallet.balances.inputToken}
-                </dd>
-              </div>
-              <div>
-                <dt className="text-slate-500">Confirmed USDC</dt>
-                <dd className="font-mono text-white">
-                  {walletStatus.wallet.balances.outputToken}
-                </dd>
-              </div>
-            </dl>
-          ) : null}
+          <AgentBalanceCard
+            status={walletStatus}
+            busy={!!busy}
+            onRefresh={() => void refreshWalletStatus()}
+          />
           <button
             type="button"
             onClick={() => void fundAgent()}
@@ -750,6 +1416,35 @@ export default function Agent() {
             The instruction guides the proposal engine. The hard limits below
             are enforced independently by AURKA and Privy.
           </p>
+          <label className="mt-5 block text-sm text-slate-300">
+            Space the agent may use
+            <select
+              value={selectedSpaceId}
+              onChange={(event) => {
+                setSelectedSpaceId(event.target.value);
+                setSpaceId(event.target.value || null);
+              }}
+              disabled={!!busy || spacesLoading || eligibleSpaces.length === 0}
+              className="mt-2 w-full rounded-lg border border-slate-700 bg-slate-950 p-3 text-white disabled:opacity-50"
+            >
+              <option value="">
+                {spacesLoading
+                  ? "Loading eligible Spaces…"
+                  : eligibleSpaces.length === 0
+                    ? "No eligible Sepolia Spaces"
+                    : "Choose an active Space"}
+              </option>
+              {eligibleSpaces.map((space) => (
+                <option key={space.identity.id} value={space.identity.id}>
+                  {space.identity.name} · {space.identity.id}
+                </option>
+              ))}
+            </select>
+            <span className="mt-1 block text-xs text-slate-500">
+              The agent is restricted to this Space and its WETH → USDC pair; it
+              cannot choose another Space at runtime.
+            </span>
+          </label>
           <label className="mt-5 block text-sm text-slate-300">
             What should the agent look for?
             <textarea
@@ -814,7 +1509,7 @@ export default function Agent() {
           <button
             type="button"
             onClick={() => setStep(4)}
-            disabled={!!busy}
+            disabled={!!busy || !selectedSpace}
             className="mt-6 rounded-lg bg-cyan-400 px-4 py-3 font-semibold text-slate-950"
           >
             Review mandate
@@ -843,7 +1538,10 @@ export default function Agent() {
             <div className="flex justify-between gap-4 border-b border-slate-800 pb-3">
               <dt className="text-slate-500">Space</dt>
               <dd className="text-white">
-                {spaceId ?? "First active Sepolia Space"}
+                {selectedSpace?.identity.name ??
+                  spaceId ??
+                  selectedSpaceId ??
+                  "Choose an active Sepolia Space"}
               </dd>
             </div>
             <div className="flex justify-between gap-4 border-b border-slate-800 pb-3">
@@ -865,6 +1563,17 @@ export default function Agent() {
           >
             Approve and start agent
           </button>
+          {session &&
+          ["STOPPED", "EXPIRED", "EXHAUSTED"].includes(session.state) ? (
+            <button
+              type="button"
+              onClick={beginMandateEdit}
+              disabled={!!busy}
+              className="mt-3 ml-3 rounded-lg border border-slate-600 px-4 py-3 font-semibold text-slate-200 disabled:opacity-50"
+            >
+              Edit mandate
+            </button>
+          ) : null}
         </div>
       )}
 

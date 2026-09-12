@@ -202,6 +202,10 @@ export class AuthService {
         "AUTH_SIGNATURE_INVALID",
         "Wallet login signature is not from the requested wallet",
         401,
+        {
+          requestedAddress: challenge.address,
+          recoveredAddress: signer,
+        },
       );
     const token = randomBytes(32).toString("base64url");
     const session: AuthSessionRecord = {

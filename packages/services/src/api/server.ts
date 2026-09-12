@@ -360,6 +360,7 @@ export function openApi(): Record<string, unknown> {
       setAgentMandateRequestSchema,
       agentResponseSchema,
     ],
+    ["/v1/agents/{id}/archive", "post", undefined, agentResponseSchema],
     ["/v1/delegated/status", "get", undefined, delegatedStatusSchema],
     [
       "/v1/delegated/sessions",
@@ -530,6 +531,7 @@ async function handle(
   auth: AuthService | undefined,
   agents: TradingAgentService | undefined,
   limit: number,
+  logger: StructuredLogger,
 ): Promise<void> {
   const url = new URL(request.url ?? "/", "http://localhost");
   const method = request.method ?? "GET";
@@ -639,7 +641,7 @@ async function handle(
       sendSuccess(
         response,
         200,
-        delegated.get(sessionId),
+        await delegated.refresh(sessionId),
         request,
         delegatedSessionResponseSchema,
       );
@@ -899,6 +901,32 @@ async function handle(
         async () => ({
           statusCode: 200,
           data: { agent: manager.setMandate(identity.ownerAddress, id, input) },
+        }),
+      );
+      sendSuccess(
+        response,
+        result.statusCode,
+        result.data,
+        request,
+        agentResponseSchema,
+      );
+      return;
+    }
+    const agentArchiveMatch = path.match(/^\/v1\/agents\/([^/]+)\/archive$/);
+    if (method === "POST" && agentArchiveMatch) {
+      const identity = requireAuthenticated();
+      const manager = requireAgents();
+      const id = decodeURIComponent(agentArchiveMatch[1]!);
+      const result = await withIdempotency(
+        service,
+        request,
+        path,
+        { ownerAddress: identity.ownerAddress },
+        async () => ({
+          statusCode: 200,
+          data: {
+            agent: await manager.archive(identity.ownerAddress, id),
+          },
         }),
       );
       sendSuccess(
@@ -1285,6 +1313,15 @@ async function handle(
     throw new ServiceError("NOT_FOUND", "Route was not found", 404);
   } catch (error) {
     if (response.headersSent || response.writableEnded) return;
+    logger.error("api.failure", {
+      requestId: requestId(request),
+      method: request.method ?? "GET",
+      path: request.url ?? "/",
+      errorName: error instanceof Error ? error.name : "UnknownError",
+      errorCode: error instanceof ServiceError ? error.code : "INTERNAL_ERROR",
+      errorMessage:
+        error instanceof Error ? error.message.slice(0, 500) : "Unknown error",
+    });
     if (error instanceof z.ZodError) {
       sendFailure(
         response,
@@ -1347,6 +1384,7 @@ export function createApiServer(
       options.auth,
       options.agents,
       limit,
+      logger,
     ).finally(() => {
       logger.info("api.response", {
         requestId: id,

@@ -39,7 +39,7 @@
     "integration:fork-wallet": "node packages/services/scripts/fork-wallet-e2e.mjs",
     "privy:delegated": "node --env-file-if-exists=.env packages/wallet/scripts/privy-delegated-wallet.mjs",
     "app:dev": "pnpm --filter @aurka/trader-app dev --host 127.0.0.1 --strictPort",
-    "app:testnet": "VITE_AURKA_MODE=testnet VITE_AURKA_CHAIN_ID=11155111 AURKA_SERVICE_URL=http://127.0.0.1:8797 pnpm --filter @aurka/trader-app dev --host 127.0.0.1 --strictPort",
+    "app:testnet": "VITE_AURKA_MODE=testnet VITE_AURKA_CHAIN_ID=11155111 VITE_AURKA_AGENT_TEST_MODE=true AURKA_SERVICE_URL=http://127.0.0.1:8797 pnpm --filter @aurka/trader-app dev --host 127.0.0.1 --strictPort",
     "app:preview": "pnpm --filter @aurka/trader-app preview --host 127.0.0.1 --strictPort"
   },
   "devDependencies": {

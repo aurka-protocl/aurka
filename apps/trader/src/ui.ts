@@ -17,6 +17,18 @@ const errorLabels: Record<string, string> = {
     "The wallet authorization is still pending. Review the wallet request and try again.",
   AUTH_REQUIRED:
     "Connect and sign in with the wallet that owns this agent before continuing.",
+  AUTH_CHALLENGE_INVALID:
+    "The wallet login request expired or was already used. Start the login again.",
+  AUTH_CHALLENGE_MISMATCH:
+    "The wallet account or network changed while signing in. Connect the same Sepolia account and try again.",
+  AUTH_SIGNATURE_INVALID:
+    "The login signature was not created by the connected wallet. Reject any old wallet popup, reconnect the account, and try again.",
+  AUTH_ORIGIN_INVALID:
+    "The login page address is invalid. Reload the app from its normal address and try again.",
+  AUTH_ORIGIN_NOT_ALLOWED:
+    "This app address is not allowed for wallet login. Use the configured application address.",
+  AUTH_UNAVAILABLE:
+    "Wallet login is not configured on this service. Ask an administrator to check the API setup.",
   AUTH_ORIGIN_MISMATCH:
     "The login request came from a different app origin. Start the wallet login again from this page.",
   AGENT_NOT_FOUND:
@@ -30,7 +42,17 @@ const errorLabels: Record<string, string> = {
   AGENT_FUNDING_LIMIT: "The requested test balance is above the faucet limit.",
   AGENT_FUNDING_FAILED:
     "Test funding did not finish. Check the agent status and retry the unfinished amount.",
+  AGENT_FUNDING_RECONCILIATION_REQUIRED:
+    "A previous test-funding operation is still settling. Retry with the same amounts after it completes.",
   AGENT_FUNDING_INVALID: "Enter a non-zero test funding amount.",
+  AGENT_ACTIVE:
+    "Stop and revoke the active agent before changing its mandate or archiving it.",
+  AGENT_FUNDS_REMAINING:
+    "Recover the agent's WETH and USDC before archiving it.",
+  AGENT_BALANCE_UNAVAILABLE:
+    "The agent wallet balance could not be verified. Refresh status and try archiving again.",
+  AGENT_ARCHIVE_FAILED:
+    "The Privy execution signer could not be revoked, so the agent was not archived.",
   AGENT_RECONCILIATION_REQUIRED:
     "The provider result is uncertain. Reconcile the agent before trying to create another wallet.",
   DELEGATED_MINIMUM_RATE:
@@ -47,6 +69,8 @@ const errorLabels: Record<string, string> = {
     "The wallet approval did not match this delegated action. Start the action again and approve the exact request.",
   DELEGATED_EXPIRY_INVALID:
     "The delegated session expiry is invalid. Create a new session with the default short lifetime.",
+  DELEGATED_EXPIRED:
+    "This agent session has expired. Review the mandate and approve a new session before starting it again.",
   DELEGATED_DIRECTION:
     "The agent proposal used a different token direction than this session. Create a new session for the displayed pair.",
   DELEGATED_EXECUTION_FAILED:
@@ -55,12 +79,22 @@ const errorLabels: Record<string, string> = {
     "This delegated session used its complete trade budget. Create a new session to continue.",
   DELEGATED_NOT_ACTIVE:
     "This delegated session is not running. Open the wizard and start it from its current step.",
+  DELEGATED_NOT_STOPPED:
+    "Stop and revoke the agent before recovering its test funds.",
   DELEGATED_POLICY_CHANGED:
     "The Privy policy changed while this session was open. Reconcile it, then create a fresh session.",
   DELEGATED_RECONCILIATION_REQUIRED:
     "A previous delegated transaction is still being checked. Reconcile the session before starting another trade.",
   DELEGATED_REVOKE_PENDING:
     "Privy revocation is still pending. Wait for it to settle, then retry Stop before recovering funds.",
+  DELEGATED_RECOVERY_ASSET:
+    "Choose a non-zero WETH or USDC balance to recover from the agent.",
+  DELEGATED_RECOVERY_DESTINATION:
+    "Recovery can only send funds back to the wallet that owns this agent.",
+  DELEGATED_RECOVERY_RECONCILIATION_REQUIRED:
+    "A recovery transaction is still settling. Refresh the agent status before trying again.",
+  DELEGATED_RECOVERY_REPLAYED:
+    "That recovery request was already used. Refresh the agent status to see the result.",
   DELEGATED_SPACE_INELIGIBLE:
     "The selected Space is not eligible for this delegated session. Choose an active Space with the displayed token pair.",
   DELEGATED_TRADE_CAP:
@@ -152,6 +186,10 @@ export function userFacingError(
   if (!message) return withSupportCode(fallback);
   if (/network|fetch failed|failed to fetch/i.test(message))
     return errorLabels.NETWORK_ERROR;
+  if (
+    /provider account .* differs from the connected app account/i.test(message)
+  )
+    return "The selected browser wallet account changed. Reconnect the wallet and try again.";
   if (/timed out|timeout|aborted/i.test(message)) return errorLabels.TIMEOUT;
   if (/not found|does not exist/i.test(message))
     return "That record could not be found. Choose another option and try again.";

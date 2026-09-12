@@ -42,6 +42,8 @@ export interface OpenRouterAgentOptions {
   readonly timeoutMs?: number;
   readonly maxToolCalls?: number;
   readonly maxConcurrentProposals?: number;
+  /** Local E2E escape hatch; never enable this for a judging/production run. */
+  readonly deterministicTestMode?: boolean;
   readonly fetchImpl?: typeof fetch;
 }
 
@@ -178,6 +180,10 @@ function configuredValue(value: string | undefined, fallback: string): string {
   return trimmed || fallback;
 }
 
+function environmentBoolean(value: string | undefined): boolean {
+  return value?.trim().toLowerCase() === "true";
+}
+
 function unavailable(
   model: string,
   code: AgentUnavailableCode,
@@ -297,6 +303,82 @@ function isBlockedCode(
     code === "SPACE_UNAVAILABLE" ||
     code === "PRICING_RENEWAL_REQUIRED"
   );
+}
+
+function outcomeResponse(
+  model: string,
+  outcome: Extract<ToolOutcome, { ok: false }>,
+  toolTrace: AgentProposalResponse["toolTrace"],
+): AgentProposalResponse {
+  if (outcome.code === "MALFORMED_RESPONSE")
+    return unavailable(model, "MALFORMED_RESPONSE", toolTrace);
+  if (outcome.code === "UNSUPPORTED_CAPABILITY")
+    return unavailable(model, "UNSUPPORTED_CAPABILITY", toolTrace);
+  if (isBlockedCode(outcome.code))
+    return blocked(
+      model,
+      outcome.code,
+      outcome.error,
+      toolTrace,
+      nextActionForBlocked(outcome.code),
+    );
+  return unavailable(model, outcome.code, toolTrace);
+}
+
+function simulationResponse(
+  model: string,
+  toolTrace: AgentProposalResponse["toolTrace"],
+  latestSimulation: SimulationResult,
+): AgentProposalResponse {
+  const { space, requestedAmount, quote, solved } = latestSimulation;
+  const solvedSimulation = simulationShape.parse(solved.simulation);
+  const simulation = {
+    status: solvedSimulation.status,
+    gasEstimate: solvedSimulation.gasEstimate,
+    ...(solvedSimulation.reason === undefined
+      ? {}
+      : { reason: solvedSimulation.reason }),
+  } as const;
+  const inputAsset = quote.currentPortfolio.assets.find(
+    (asset) =>
+      asset.token.toLowerCase() === quote.traderInputToken.toLowerCase(),
+  );
+  const outputAsset = quote.currentPortfolio.assets.find(
+    (asset) =>
+      asset.token.toLowerCase() === quote.traderOutputToken.toLowerCase(),
+  );
+  if (!inputAsset || !outputAsset)
+    return unavailable(model, "MALFORMED_RESPONSE", toolTrace);
+  const filled = BigInt(solved.proposal.traderInputAmount);
+  const partial = filled < requestedAmount;
+  const reviewable =
+    simulation.status === "SUCCEEDED" ||
+    simulation.status === "AUTHORIZATION_PENDING";
+  const explanation = reviewable
+    ? `${space.identity.name} is the discovered Space selected by the deterministic tools. It can simulate ${formatTokenAmount(filled, inputAsset.decimals)} ${inputAsset.symbol} for ${formatTokenAmount(BigInt(solved.proposal.traderOutputAmount), outputAsset.decimals)} ${outputAsset.symbol} after fees. ${partial ? `The requested amount was reduced by ${quote.bindingConstraint.toLowerCase().replace(/_/g, " ")}.` : "The requested amount fits the current rules."} Review the snapshot and approve the exact transaction with your wallet.`
+    : `The deterministic simulation is ${simulation.status.toLowerCase().replace(/_/g, " ")}: ${simulation.reason ?? "the current Space state does not permit execution"}. No transaction was signed or submitted.`;
+
+  return agentProposalResponseSchema.parse({
+    status: reviewable ? "READY" : "BLOCKED",
+    provider: "openrouter",
+    model,
+    ...(reviewable
+      ? {
+          selectedSpace: {
+            id: space.identity.id,
+            name: space.identity.name,
+            owner: space.identity.ownerAddress,
+          },
+          quote,
+          proposal: solved.proposal,
+          proposalHash: solved.proposalHash,
+          simulation,
+          minimumReceivedValue: solved.proposal.traderOutputValue,
+          explanation,
+        }
+      : { reason: simulation.reason ?? explanation }),
+    toolTrace,
+  });
 }
 
 function clarification(
@@ -479,8 +561,12 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
 }
 
 function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
-  if (signal.aborted)
+  if (signal.aborted) {
+    // The promise was created before the abort check. Consume a possible
+    // rejection so a cancelled tool cannot become an unhandled worker error.
+    void promise.catch(() => undefined);
     return Promise.reject(new Error("OpenRouter request was cancelled."));
+  }
   return new Promise<T>((resolve, reject) => {
     let settled = false;
     const cleanup = () => signal.removeEventListener("abort", onAbort);
@@ -579,6 +665,9 @@ export function openRouterAgentOptionsFromEnv(
       environment.OPENROUTER_MAX_CONCURRENT_PROPOSALS ??
         DEFAULT_MAX_CONCURRENT_PROPOSALS,
     ),
+    deterministicTestMode: environmentBoolean(
+      environment.AURKA_AGENT_TEST_MODE,
+    ),
   };
 }
 
@@ -589,6 +678,7 @@ export class OpenRouterAgent {
   private readonly timeoutMs: number;
   private readonly maxToolCalls: number;
   private readonly maxConcurrentProposals: number;
+  private readonly deterministicTestMode: boolean;
   private readonly fetchImpl: typeof fetch;
   private activeProposals = 0;
 
@@ -619,14 +709,17 @@ export class OpenRouterAgent {
       ),
       4,
     );
+    this.deterministicTestMode = options.deterministicTestMode === true;
     this.fetchImpl = options.fetchImpl ?? fetch;
   }
 
   status(): AgentStatus {
     return agentStatusSchema.parse({
       provider: "openrouter",
-      configured: Boolean(this.apiKey),
-      model: this.model,
+      configured: Boolean(this.apiKey) || this.deterministicTestMode,
+      model: this.deterministicTestMode
+        ? "aurka-deterministic-test"
+        : this.model,
       custody: "wallet-approved",
     });
   }
@@ -668,6 +761,8 @@ export class OpenRouterAgent {
         return unavailable(this.model, "NETWORK_ERROR");
       }
     }
+    if (this.deterministicTestMode)
+      return this.proposeDeterministicTest(value, requestSignal);
     if (!this.apiKey) return unavailable(this.model, "MISSING_CONFIGURATION");
     if (this.activeProposals >= this.maxConcurrentProposals)
       return unavailable(this.model, "CONCURRENCY_LIMIT");
@@ -817,55 +912,110 @@ export class OpenRouterAgent {
       return unavailable(this.model, "MALFORMED_RESPONSE", trace);
     }
 
-    const { space, requestedAmount, quote, solved } = latestSimulation;
-    const solvedSimulation = simulationShape.parse(solved.simulation);
-    const simulation = {
-      status: solvedSimulation.status,
-      gasEstimate: solvedSimulation.gasEstimate,
-      ...(solvedSimulation.reason === undefined
-        ? {}
-        : { reason: solvedSimulation.reason }),
-    } as const;
-    const inputAsset = quote.currentPortfolio.assets.find(
-      (asset) =>
-        asset.token.toLowerCase() === quote.traderInputToken.toLowerCase(),
-    );
-    const outputAsset = quote.currentPortfolio.assets.find(
-      (asset) =>
-        asset.token.toLowerCase() === quote.traderOutputToken.toLowerCase(),
-    );
-    if (!inputAsset || !outputAsset)
-      return unavailable(this.model, "MALFORMED_RESPONSE", trace);
-    const filled = BigInt(solved.proposal.traderInputAmount);
-    const partial = filled < requestedAmount;
-    const reviewable =
-      simulation.status === "SUCCEEDED" ||
-      simulation.status === "AUTHORIZATION_PENDING";
-    const explanation = reviewable
-      ? `${space.identity.name} is the discovered Space selected by the deterministic tools. It can simulate ${formatTokenAmount(filled, inputAsset.decimals)} ${inputAsset.symbol} for ${formatTokenAmount(BigInt(solved.proposal.traderOutputAmount), outputAsset.decimals)} ${outputAsset.symbol} after fees. ${partial ? `The requested amount was reduced by ${quote.bindingConstraint.toLowerCase().replace(/_/g, " ")}.` : "The requested amount fits the current rules."} Review the snapshot and approve the exact transaction with your wallet.`
-      : `The deterministic simulation is ${simulation.status.toLowerCase().replace(/_/g, " ")}: ${simulation.reason ?? "the current Space state does not permit execution"}. No transaction was signed or submitted.`;
+    return simulationResponse(this.model, trace, latestSimulation);
+  }
 
-    return agentProposalResponseSchema.parse({
-      status: reviewable ? "READY" : "BLOCKED",
-      provider: "openrouter",
-      model: this.model,
-      ...(reviewable
-        ? {
-            selectedSpace: {
-              id: space.identity.id,
-              name: space.identity.name,
-              owner: space.identity.ownerAddress,
-            },
-            quote,
-            proposal: solved.proposal,
-            proposalHash: solved.proposalHash,
-            simulation,
-            minimumReceivedValue: solved.proposal.traderOutputValue,
-            explanation,
-          }
-        : { reason: simulation.reason ?? explanation }),
-      toolTrace: trace,
-    });
+  /**
+   * Test-only deterministic path for local Sepolia rehearsal. It exercises
+   * the same live Space/quote/simulation code as the model path, but fixes the
+   * natural-language intent to the small demo trade so provider availability
+   * cannot block wallet and settlement E2E testing.
+   */
+  private async proposeDeterministicTest(
+    value: AgentProposalRequest,
+    requestSignal?: AbortSignal,
+  ): Promise<AgentProposalResponse> {
+    const model = "aurka-deterministic-test";
+    const trace: Array<{ tool: string; status: "SUCCEEDED" | "FAILED" }> = [];
+    const deadline = AbortSignal.timeout(this.timeoutMs);
+    const signal = requestSignal
+      ? AbortSignal.any([requestSignal, deadline])
+      : deadline;
+    let latestSimulation: SimulationResult | undefined;
+
+    try {
+      throwIfAborted(signal);
+      const discovery = await abortable(
+        this.runTool("discover_spaces", "{}", value, signal),
+        signal,
+      );
+      trace.push({
+        tool: "discover_spaces",
+        status: discovery.ok ? "SUCCEEDED" : "FAILED",
+      });
+      if (!discovery.ok) return outcomeResponse(model, discovery, trace);
+
+      await this.service.refreshSpaces();
+      const active = this.service
+        .listSpaces(100)
+        .items.filter(
+          (space) => space.identity.state === "ACTIVE" && space.position,
+        );
+      const selectedSpace = value.spaceId
+        ? active.find((space) => space.identity.id === value.spaceId)
+        : active[0];
+      if (!selectedSpace)
+        return blocked(
+          model,
+          "SPACE_UNAVAILABLE",
+          "The configured test Space is not active or is no longer available.",
+          trace,
+          "Activate the Sepolia Space, then try again.",
+        );
+
+      // Resolve the addresses from the live Space policy. The test mode fixes
+      // only the human intent, never a contract address supplied by a caller.
+      const inputAsset = selectedSpace.position!.policy.assets.find(
+        (asset) => asset.symbol.toUpperCase().includes("WETH"),
+      );
+      const outputAsset = selectedSpace.position!.policy.assets.find(
+        (asset) => asset.symbol.toUpperCase().includes("USDC"),
+      );
+      if (!inputAsset || !outputAsset)
+        return blocked(
+          model,
+          "TRADE_RULE_REJECTED",
+          "The active test Space does not expose the WETH/USDC pair.",
+          trace,
+          "Configure the deployed Sepolia Space with its mock WETH and USDC assets.",
+        );
+      const amount =
+        /\b((?:0|[1-9][0-9]*)(?:\.[0-9]+)?)\s*(?:weth|wrapped\s+ether)\b/i.exec(
+          value.message,
+        )?.[1] ?? "0.0025";
+      const tradeArguments = JSON.stringify({
+        spaceId: selectedSpace.identity.id,
+        traderInputToken: inputAsset.token,
+        traderOutputToken: outputAsset.token,
+        amount,
+      });
+      const steps = [
+        [
+          "read_space_conditions",
+          JSON.stringify({ spaceId: selectedSpace.identity.id }),
+        ],
+        ["request_deterministic_quote", tradeArguments],
+        ["simulate_proposal", tradeArguments],
+      ] as const;
+      for (const [tool, rawArguments] of steps) {
+        const outcome = await abortable(
+          this.runTool(tool, rawArguments, value, signal),
+          signal,
+        );
+        trace.push({ tool, status: outcome.ok ? "SUCCEEDED" : "FAILED" });
+        if (outcome.ok && outcome.simulation)
+          latestSimulation = outcome.simulation;
+        if (!outcome.ok) return outcomeResponse(model, outcome, trace);
+      }
+    } catch (error) {
+      if (error instanceof AgentUnavailableError)
+        return unavailable(model, error.code, trace);
+      if (signal.aborted) return unavailable(model, "TIMEOUT", trace);
+      return unavailable(model, "NETWORK_ERROR", trace);
+    }
+    if (!latestSimulation)
+      return unavailable(model, "MALFORMED_RESPONSE", trace);
+    return simulationResponse(model, trace, latestSimulation);
   }
 
   private async runTool(

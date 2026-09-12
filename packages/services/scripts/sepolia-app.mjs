@@ -313,6 +313,43 @@ async function main() {
       const first =
         eventSearchStarts.get(spacePositionIdHash.toLowerCase()) ??
         BigInt(manifest.space.createBlockNumber ?? 0);
+      // Re-activations are normally recent. Search backwards in the bounded
+      // recent window, using the provider's 10-block free-tier limit, so a
+      // refresh finds the newest epoch in one or two requests instead of
+      // replaying thousands of tiny requests from the original deployment.
+      const recentFrom = latest > 1_000n ? latest - 1_000n : 0n;
+      const recentStart = recentFrom < first ? first : recentFrom;
+      for (let to = latest; to >= recentStart; to -= 10n) {
+        const from = to - 9n < recentStart ? recentStart : to - 9n;
+        const logs = await publicClient.getLogs({
+          address: router,
+          event: epochEvent,
+          args: { positionIdHash: spacePositionIdHash },
+          fromBlock: from,
+          toBlock: to,
+        });
+        const recentEvent = logs
+          .filter(
+            (log) =>
+              log.args?.capacityEpochId?.toLowerCase() ===
+              capacityEpochId.toLowerCase(),
+          )
+          .at(-1);
+        if (recentEvent) {
+          if (recentEvent.blockNumber !== undefined)
+            eventSearchStarts.set(
+              spacePositionIdHash.toLowerCase(),
+              recentEvent.blockNumber,
+            );
+          cachedEpochEvents.set(cacheKey, recentEvent);
+          return recentEvent;
+        }
+        if (from === recentStart) break;
+      }
+
+      // Preserve support for an old/stale lifecycle file whose active epoch
+      // is outside the recent window. The pointer is advanced whenever a
+      // matching event is found, so this path is normally used only once.
       for (let from = first; from <= latest; from += 10n) {
         const to = from + 9n < latest ? from + 9n : latest;
         const logs = await publicClient.getLogs({
@@ -330,6 +367,11 @@ async function main() {
           )
           .at(-1);
         if (event) {
+          if (event.blockNumber !== undefined)
+            eventSearchStarts.set(
+              spacePositionIdHash.toLowerCase(),
+              event.blockNumber,
+            );
           cachedEpochEvents.set(cacheKey, event);
           return event;
         }
@@ -397,6 +439,13 @@ async function main() {
         this.cachedSnapshot = snapshot;
         this.cachedAt = Date.now();
         return snapshot;
+      } catch (error) {
+        if (process.env.AURKA_AGENT_TEST_MODE?.trim().toLowerCase() === "true")
+          console.error("[AURKA sepolia test] snapshot.failed", {
+            name: error instanceof Error ? error.name : typeof error,
+            message: error instanceof Error ? error.message : String(error),
+          });
+        throw error;
       } finally {
         if (this.snapshotInFlight === request)
           this.snapshotInFlight = undefined;

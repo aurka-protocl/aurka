@@ -3,9 +3,11 @@ import {
   decodeFunctionData,
   encodeFunctionData,
   hashTypedData,
+  keccak256,
   parseTransaction,
   recoverAddress,
   recoverTransactionAddress,
+  stringToHex,
   type Hex,
 } from "viem";
 import { z } from "zod";
@@ -415,7 +417,7 @@ async function transactionForSigning(
   rpc: DelegatedChainRpc,
   transaction: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
-  const [gas, gasPrice] = await Promise.all([
+  const [gas, gasPrice, priorityFee] = await Promise.all([
     rpc.request("eth_estimateGas", [
       {
         from: transaction.from,
@@ -425,11 +427,23 @@ async function transactionForSigning(
       },
     ]),
     rpc.request("eth_gasPrice", []),
+    rpc.request("eth_maxPriorityFeePerGas", []),
   ]);
+  const normalizedGasPrice = asQuantity(gasPrice, "transaction gas price");
+  const normalizedPriorityFee = asQuantity(
+    priorityFee,
+    "transaction priority fee",
+  );
+  const maxFeePerGas = normalizedGasPrice * 2n + normalizedPriorityFee;
   return {
     ...transaction,
     gas_limit: hex(asQuantity(gas, "transaction gas limit")),
-    gas_price: hex(asQuantity(gasPrice, "transaction gas price")),
+    // Keep the legacy field for local/mock Privy transports while also
+    // supplying the EIP-1559 fields used by the live Privy signer. Without
+    // the latter Privy serializes zero fees into a type-2 transaction.
+    gas_price: hex(normalizedGasPrice),
+    max_fee_per_gas: hex(maxFeePerGas),
+    max_priority_fee_per_gas: hex(normalizedPriorityFee),
   };
 }
 
@@ -530,12 +544,11 @@ export class PrivyDelegatedExecutionAdapter implements DelegatedWalletAdapter {
     const request = {
       params: {
         typed_data: {
-          domain: {
-            name: typedData.domain.name,
-            version: typedData.domain.version,
-            chain_id: typedData.domain.chainId,
-            verifying_contract: typedData.domain.verifyingContract,
-          },
+          // Privy's typed-data policy evaluator uses the standard EIP-712
+          // camelCase domain keys. Transaction payloads use snake_case, but
+          // renaming this domain makes an otherwise matching policy deny the
+          // delegated intent signature.
+          domain: typedData.domain,
           types: typedData.types,
           primary_type: typedData.primaryType,
           message: typedData.message,
@@ -661,9 +674,13 @@ export class PrivyDelegatedExecutionAdapter implements DelegatedWalletAdapter {
           authorization_context: authorized,
           idempotency_key: idempotencyKey,
         });
-    } catch {
+    } catch (error) {
       throw new DelegatedBroadcastUnknownError(
-        "Privy transaction-signing status is unknown",
+        `Privy transaction-signing status is unknown${
+          error instanceof Error && error.message
+            ? `: ${error.message.slice(0, 240)}`
+            : ""
+        } (request ${idempotencyKey.slice(-16)})`,
       );
     }
     const value = signed as {
@@ -699,6 +716,17 @@ export class PrivyDelegatedExecutionAdapter implements DelegatedWalletAdapter {
     const requestedChainId = transaction.chain_id;
     const requestedGas = transaction.gas_limit;
     const requestedGasPrice = transaction.gas_price;
+    const requestedMaxFee = transaction.max_fee_per_gas;
+    const requestedPriorityFee = transaction.max_priority_fee_per_gas;
+    const feeMatches =
+      parsed.maxFeePerGas !== undefined ||
+      parsed.maxPriorityFeePerGas !== undefined
+        ? typeof requestedMaxFee === "string" &&
+          typeof requestedPriorityFee === "string" &&
+          parsed.maxFeePerGas === BigInt(requestedMaxFee) &&
+          parsed.maxPriorityFeePerGas === BigInt(requestedPriorityFee)
+        : typeof requestedGasPrice === "string" &&
+          parsed.gasPrice === BigInt(requestedGasPrice);
     if (
       typeof requestedTo !== "string" ||
       typeof requestedData !== "string" ||
@@ -706,14 +734,13 @@ export class PrivyDelegatedExecutionAdapter implements DelegatedWalletAdapter {
       typeof requestedNonce !== "string" ||
       typeof requestedChainId !== "string" ||
       typeof requestedGas !== "string" ||
-      typeof requestedGasPrice !== "string" ||
       parsed.to?.toLowerCase() !== requestedTo.toLowerCase() ||
       (parsed.data ?? "0x").toLowerCase() !== requestedData.toLowerCase() ||
       (parsed.value ?? 0n) !== BigInt(requestedValue) ||
       parsed.nonce !== Number(BigInt(requestedNonce)) ||
       parsed.chainId !== Number(BigInt(requestedChainId)) ||
       parsed.gas !== BigInt(requestedGas) ||
-      parsed.gasPrice !== BigInt(requestedGasPrice)
+      !feeMatches
     )
       throw new Error("Privy changed the reviewed transaction while signing");
     try {
@@ -807,15 +834,22 @@ export class PrivyDelegatedExecutionAdapter implements DelegatedWalletAdapter {
     assertPolicy(latest, this.now());
     if (latest.fingerprint.toLowerCase() !== policy.fingerprint.toLowerCase())
       throw new Error("Delegated policy changed during approval");
-    if (this.options.broadcastMode === "sign-and-broadcast")
+    if (this.options.broadcastMode === "sign-and-broadcast") {
+      const signingTransaction = await transactionForSigning(
+        this.options.rpc,
+        transaction,
+      );
       return {
         transactionHash: await this.signAndBroadcast(
           policy,
-          await transactionForSigning(this.options.rpc, transaction),
+          signingTransaction,
           context,
-          `aurka-d-approval:${policy.walletId}:${input.amount}`,
+          `aurka-d-approval-v4:${policy.walletId}:${keccak256(
+            stringToHex(JSON.stringify(signingTransaction)),
+          ).slice(2)}`,
         ),
       };
+    }
     const authorized = await this.options.authorization("eth_sendTransaction", {
       params: { transaction },
       authorization_context: context,
@@ -829,7 +863,12 @@ export class PrivyDelegatedExecutionAdapter implements DelegatedWalletAdapter {
           caip2: `eip155:${policy.chainId}`,
           params: { transaction },
           authorization_context: authorized,
-          idempotency_key: `aurka-d-approval:${policy.walletId}:${input.amount}`,
+          // Version this key with the transaction encoding. Older deployments
+          // used only `gas_price`, which Privy cached as a zero-fee type-2
+          // transaction when the same idempotency key was retried.
+          idempotency_key: `aurka-d-approval-v4:${policy.walletId}:${keccak256(
+            stringToHex(JSON.stringify(transaction)),
+          ).slice(2)}`,
         });
     } catch {
       throw new DelegatedBroadcastUnknownError(

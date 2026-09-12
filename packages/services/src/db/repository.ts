@@ -139,6 +139,8 @@ export type AgentProvisioningOperationRecord = {
   readonly recoveryPolicyId?: string;
   readonly walletId?: string;
   readonly walletAddress?: string;
+  readonly leaseId?: string;
+  readonly leaseExpiresAt?: number;
   readonly lastError?: string | null;
   readonly createdAt: number;
   readonly updatedAt: number;
@@ -329,6 +331,10 @@ export class ServiceRepository {
       ...(row.walletAddress === null
         ? {}
         : { walletAddress: row.walletAddress }),
+      ...(row.leaseId === null ? {} : { leaseId: row.leaseId }),
+      ...(row.leaseExpiresAt === null
+        ? {}
+        : { leaseExpiresAt: row.leaseExpiresAt }),
       ...(row.lastError === null ? {} : { lastError: row.lastError }),
       createdAt: row.createdAt,
       updatedAt: row.updatedAt,
@@ -385,6 +391,8 @@ export class ServiceRepository {
           recoveryPolicyId: null,
           walletId: null,
           walletAddress: null,
+          leaseId: null,
+          leaseExpiresAt: null,
           lastError: null,
           createdAt: timestamp,
           updatedAt: timestamp,
@@ -445,6 +453,30 @@ export class ServiceRepository {
       .get();
     if (!row) throw new Error("Agent provisioning operation was not found");
     return this.agentProvisioningFromRow(row);
+  }
+
+  claimAgentProvisioning(
+    id: string,
+    leaseId: string,
+    leaseExpiresAt: number,
+    at = now(),
+  ): boolean {
+    const changed = this.db
+      .update(agentProvisioningOperations)
+      .set({ leaseId, leaseExpiresAt, updatedAt: at })
+      .where(
+        and(
+          eq(agentProvisioningOperations.id, id),
+          ne(agentProvisioningOperations.state, "READY"),
+          or(
+            sql`${agentProvisioningOperations.leaseExpiresAt} IS NULL`,
+            lte(agentProvisioningOperations.leaseExpiresAt, at),
+            eq(agentProvisioningOperations.leaseId, leaseId),
+          ),
+        ),
+      )
+      .run();
+    return changed.changes === 1;
   }
 
   saveTradingAgent(value: TradingAgent): void {

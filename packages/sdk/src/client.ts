@@ -324,6 +324,17 @@ export class AurkaClient {
     );
   }
 
+  async archiveTradingAgent(
+    id: string,
+  ): Promise<{ readonly agent: TradingAgent }> {
+    return this.request(
+      "POST",
+      `/v1/agents/${encodeURIComponent(id)}/archive`,
+      undefined,
+      agentResponseSchema,
+    );
+  }
+
   async delegatedStatus(): Promise<DelegatedStatus> {
     return this.request(
       "GET",

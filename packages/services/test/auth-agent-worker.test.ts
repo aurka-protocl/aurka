@@ -46,6 +46,17 @@ describe("per-user agent foundations", () => {
       chainId,
       origin,
     });
+    expect(
+      (challenge.typedData.message as Record<string, unknown>).expiresAt,
+    ).toBeTypeOf("number");
+    expect(
+      (challenge.typedData as { types: Record<string, unknown> }).types
+        .EIP712Domain,
+    ).toEqual([
+      { name: "name", type: "string" },
+      { name: "version", type: "string" },
+      { name: "chainId", type: "uint256" },
+    ]);
     const signature = await owner.signTypedData(challenge.typedData as never);
     const input = {
       challengeId: challenge.challengeId,
@@ -136,6 +147,15 @@ describe("per-user agent foundations", () => {
       idempotencyKey: `agent-${owner.address.toLowerCase()}-${chainId}`,
     });
     expect(first.state).toBe("PROVISIONING");
+    expect(
+      repository.claimAgentProvisioning("provisioning-1", "worker-a", 100, 10),
+    ).toBe(true);
+    expect(
+      repository.claimAgentProvisioning("provisioning-1", "worker-b", 200, 99),
+    ).toBe(false);
+    expect(
+      repository.claimAgentProvisioning("provisioning-1", "worker-b", 300, 100),
+    ).toBe(true);
     expect(
       repository.reserveAgentProvisioning({
         id: "provisioning-2",

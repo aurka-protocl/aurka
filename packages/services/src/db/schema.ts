@@ -554,6 +554,8 @@ export const agentProvisioningOperations = sqliteTable(
     recoveryPolicyId: text("recovery_policy_id"),
     walletId: text("wallet_id"),
     walletAddress: text("wallet_address"),
+    leaseId: text("lease_id"),
+    leaseExpiresAt: integer("lease_expires_at"),
     lastError: text("last_error"),
     createdAt: createdAt(),
     updatedAt: createdAt("updated_at"),

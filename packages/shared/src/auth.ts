@@ -61,6 +61,11 @@ export const authChallengeTypedData = (input: {
   },
   primaryType: "AurkaLogin",
   types: {
+    EIP712Domain: [
+      { name: "name", type: "string" },
+      { name: "version", type: "string" },
+      { name: "chainId", type: "uint256" },
+    ],
     AurkaLogin: [
       { name: "address", type: "address" },
       { name: "nonce", type: "string" },
@@ -71,7 +76,10 @@ export const authChallengeTypedData = (input: {
   message: {
     address: input.address,
     nonce: input.nonce,
-    expiresAt: input.expiresAt.toString(),
+    // Keep uint256 values numeric in the JSON-RPC payload. This is within
+    // JavaScript's safe integer range for Unix timestamps and is accepted
+    // consistently by injected browser wallets such as MetaMask.
+    expiresAt: input.expiresAt,
     origin: input.origin,
   },
 });
