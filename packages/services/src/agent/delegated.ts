@@ -867,6 +867,11 @@ export class DelegatedSessionService {
             details: { nextCheckAt, reasonCode: code },
           },
         );
+        // A deterministic rule rejection is a normal evaluation outcome. The
+        // session is already active, so do not turn a safe no-trade decision
+        // into a failed START request. The scheduled worker will evaluate
+        // again at nextCheckAt.
+        if (deterministic) return current;
       }
       throw error;
     }

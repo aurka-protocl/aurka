@@ -608,7 +608,7 @@ async function main() {
     assert(BigInt(afterTrade.capacity.consumed) > 0n);
 
     const evidence = {
-      scenario: "TASK1009-003 space price recovery",
+      scenario: "Space price recovery",
       integrationMode: manifest.integrationMode,
       oracleKind: manifest.oracleKind,
       aquaKind: manifest.aquaKind,
@@ -673,13 +673,11 @@ async function main() {
     };
     const evidenceFile = path.resolve(
       process.env.AURKA_RECOVERY_EVIDENCE_FILE ??
-        path.join(runDirectory, "task1009-003-space-price-recovery.json"),
+        path.join(runDirectory, "space-price-recovery.json"),
     );
     mkdirSync(path.dirname(evidenceFile), { recursive: true, mode: 0o700 });
     writeFileSync(evidenceFile, `${stringify(evidence)}\n`, { mode: 0o600 });
-    console.log(
-      `TASK1009-003 price recovery passed; evidence: ${evidenceFile}`,
-    );
+    console.log(`Space price recovery passed; evidence: ${evidenceFile}`);
   } finally {
     await stopProcess(fork);
   }

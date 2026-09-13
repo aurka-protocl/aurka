@@ -16,3 +16,7 @@ contracts/broadcast
 contracts/cache
 packages/graph/subgraph/generated
 packages/graph/subgraph/build
+
+# Local task notes and review reports
+TASK*.md
+.tasks/

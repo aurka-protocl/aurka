@@ -161,17 +161,21 @@ export async function readOperatorStatus(refreshMarginSeconds = 60) {
   const routerAbi = artifact(
     "contracts/out/AurkaSepoliaSwapVMRouter.sol/AurkaSepoliaSwapVMRouter.json",
   ).abi;
+  const aquaAbi = artifact("contracts/out-upstream/Aqua.sol/Aqua.json").abi;
   const registry = address(
     manifest.contracts.policyRegistry.address,
     "policy registry",
   );
   const router = address(manifest.contracts.router.address, "router");
+  const aqua = address(manifest.contracts.aqua.address, "Aqua");
+  const swapVM = address(manifest.contracts.swapVM.address, "SwapVM");
   const oracle = address(manifest.oracle.address, "oracle");
   const weth = address(manifest.tokens.weth.address, "WETH");
   const usdc = address(manifest.tokens.usdc.address, "USDC");
+  const vault = address(manifest.space.vault, "Space vault");
   const block = await client.getBlock();
   const blockNumber = block.number;
-  const [policy, prices, capacity] = await Promise.all([
+  const [policy, prices, capacity, balances] = await Promise.all([
     client.readContract({
       address: registry,
       abi: registryAbi,
@@ -197,6 +201,17 @@ export async function readOperatorStatus(refreshMarginSeconds = 60) {
       args: [manifest.space.spaceId, weth, usdc],
       blockNumber,
     }),
+    Promise.all(
+      [usdc, weth].map((token) =>
+        client.readContract({
+          address: aqua,
+          abi: aquaAbi,
+          functionName: "rawBalances",
+          args: [vault, swapVM, manifest.space.strategyHash, token],
+          blockNumber,
+        }),
+      ),
+    ),
   ]);
   const now = Number(block.timestamp);
   const maxAge = Number(field(policy, "priceMaxAgeSeconds", 5));
@@ -209,6 +224,9 @@ export async function readOperatorStatus(refreshMarginSeconds = 60) {
   );
   const baseline = BigInt(field(capacity, "capacityBaselineValue", 1));
   const consumed = BigInt(field(capacity, "consumedValue", 2));
+  const emptyPortfolio = balances.every(
+    (balance) => BigInt(field(balance, "balance", 0)) === 0n,
+  );
   const capacityExhausted = baseline === 0n || consumed >= baseline;
   return {
     manifestPath,
@@ -225,10 +243,15 @@ export async function readOperatorStatus(refreshMarginSeconds = 60) {
       consumed: consumed.toString(),
       exhausted: capacityExhausted,
     },
-    priceRefreshNeeded: stalePrices.length > 0,
+    // Mock oracle timestamps are global. Refreshing an empty seeded Space
+    // would invalidate every funded Space's committed capacity epoch while
+    // providing no tradable liquidity. Keep the demo price deterministic
+    // until the seeded Space is funded again.
+    emptyPortfolio,
+    priceRefreshNeeded: !emptyPortfolio && stalePrices.length > 0,
     refreshMarginSeconds,
-    capacityRenewalNeeded: capacityExhausted,
-    needed: stalePrices.length > 0 || capacityExhausted,
+    capacityRenewalNeeded: !emptyPortfolio && capacityExhausted,
+    needed: !emptyPortfolio && (stalePrices.length > 0 || capacityExhausted),
   };
 }
 

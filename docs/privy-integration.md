@@ -13,13 +13,13 @@ public addresses, mandate state, and transaction records.
 
 The integration uses these Privy resources:
 
-| Resource | Purpose |
-| --- | --- |
-| Owner key quorum | Authorizes wallet administration, policy changes, signer changes, and recovery. |
-| Dedicated EVM wallet | Holds ETH for fees and the Space's WETH/USDC. |
-| Additional signer | Performs only the approved execution operations. |
-| Execution policy | Allows the reviewed typed-data signature, input-token approval, and `executeWithSwapVM` transaction. |
-| Recovery policy | Allows exact WETH and USDC transfers to the authenticated owner address after trading stops. |
+| Resource             | Purpose                                                                                              |
+| -------------------- | ---------------------------------------------------------------------------------------------------- |
+| Owner key quorum     | Authorizes wallet administration, policy changes, signer changes, and recovery.                      |
+| Dedicated EVM wallet | Holds ETH for fees and the Space's WETH/USDC.                                                        |
+| Additional signer    | Performs only the approved execution operations.                                                     |
+| Execution policy     | Allows the reviewed typed-data signature, input-token approval, and `executeWithSwapVM` transaction. |
+| Recovery policy      | Allows exact WETH and USDC transfers to the authenticated owner address after trading stops.         |
 
 The additional signer does not own the wallet. It has an override to the
 execution policy and cannot change the wallet, destination, token pair, limits,
@@ -33,8 +33,7 @@ The `/agent` flow is backed by `TradingAgentService`:
 2. The service creates an owner-specific recovery policy if one is not already
    recorded.
 3. The service creates an owner-specific Privy wallet with the recovery policy
-   attached and the reviewed signer attached with the execution-policy
-   override.
+   attached and the reviewed signer attached with the execution-policy override.
 4. The service reads the wallet and both policies back from Privy.
 5. It rejects the setup if the owner, signer, chain, router, token, method, or
    policy rules do not match the reviewed configuration.
@@ -56,9 +55,9 @@ eth_signTransaction   exact executeWithSwapVM settlement
 
 The worker builds the transaction from the reviewed proposal. Before asking
 Privy to sign, it verifies the account mandate, Space, direction, per-trade
-amount, remaining budget, trade count, expiry, wallet balance, allowance,
-nonce, chain, router, and calldata. The onchain AURKA contracts perform the
-final policy, price, capacity, and accounting checks.
+amount, remaining budget, trade count, expiry, wallet balance, allowance, nonce,
+chain, router, and calldata. The onchain AURKA contracts perform the final
+policy, price, capacity, and accounting checks.
 
 ## Wallet lifecycle
 
@@ -71,8 +70,8 @@ final policy, price, capacity, and accounting checks.
 6. Recover remaining WETH and USDC to the owner address using the recovery
    policy.
 
-The recovery path is owner-authorized and destination-bound. It is blocked
-while a submitted or ambiguous transaction still needs reconciliation.
+The recovery path is owner-authorized and destination-bound. It is blocked while
+a submitted or ambiguous transaction still needs reconciliation.
 
 ## Configuration and checks
 
@@ -108,9 +107,8 @@ contract deployment step.
 ## Contract changes and Privy changes
 
 Privy resources are not redeployed when AURKA contracts are redeployed. A new
-router or token deployment must be reflected in a new reviewed execution
-policy, because the old policy is bound to the previous router and token
-addresses.
+router or token deployment must be reflected in a new reviewed execution policy,
+because the old policy is bound to the previous router and token addresses.
 
 The safe order is:
 
@@ -134,8 +132,8 @@ A valid demonstration shows one complete financial flow:
    limits.
 2. The worker submits a WETH-to-USDC trade within those limits.
 3. The activity view shows `TRADE CONFIRMED` and the input/output amounts.
-4. The Sepolia receipt shows the transaction's `From` address equal to the
-   Privy trading wallet and the `To` address equal to the AURKA router.
+4. The Sepolia receipt shows the transaction's `From` address equal to the Privy
+   trading wallet and the `To` address equal to the AURKA router.
 5. The source repository and this page explain the wallet and policy boundary.
 
 The transaction receipt is the evidence of execution. A policy screenshot or

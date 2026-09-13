@@ -142,6 +142,28 @@ function transactionMethod(): "eth_sendTransaction" | "eth_signTransaction" {
     : "eth_sendTransaction";
 }
 
+function recoveryPolicyIdempotencyKey(input: {
+  readonly ownerAddress: string;
+  readonly chainId: number;
+  readonly inputToken: string;
+  readonly outputToken: string;
+  readonly maximum: string;
+}): string {
+  // The policy body is configuration-dependent. Include its shape in the
+  // provider idempotency key so a changed recovery limit or token pair can
+  // reconcile an old checkpoint instead of being rejected as a new body
+  // under an old key.
+  const shape = [
+    input.ownerAddress.toLowerCase(),
+    input.chainId,
+    input.inputToken.toLowerCase(),
+    input.outputToken.toLowerCase(),
+    input.maximum,
+    transactionMethod(),
+  ].join(":");
+  return `aurka-recovery-${keccak256(stringToHex(shape)).slice(2, 34)}`;
+}
+
 function routerMethod(): "execute" | "executeWithSwapVM" {
   const result = value("PRIVY_DELEGATED_ROUTER_METHOD") ?? "executeWithSwapVM";
   if (result !== "execute" && result !== "executeWithSwapVM")
@@ -818,7 +840,13 @@ export class TradingAgentService {
             ownerAddress: normalizedOwner,
             maximum: this.maximumRecoveryAmount,
           }),
-          "privy-idempotency-key": `aurka-recovery-${normalizedOwner}-${chainId}`,
+          "privy-idempotency-key": recoveryPolicyIdempotencyKey({
+            ownerAddress: normalizedOwner,
+            chainId,
+            inputToken: this.inputToken,
+            outputToken: this.outputToken,
+            maximum: this.maximumRecoveryAmount,
+          }),
         });
         if (typeof recovery.id !== "string" && typeof recovery.id !== "number")
           throw new Error("Privy recovery policy has no ID");

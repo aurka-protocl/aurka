@@ -161,7 +161,7 @@ export function buildUpstreamStrategy(
 }
 
 /**
- * Reproduce the pre-TASK1009-012 USDC-first encoding for diagnosis only. It is
+ * Reproduce the legacy USDC-first encoding for diagnosis only. It is
  * intentionally not accepted by the solver or setup path.
  */
 export function buildLegacyHardcodedOrderStrategy(input: {

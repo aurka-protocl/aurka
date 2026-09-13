@@ -50,7 +50,7 @@ contract UpstreamMathHarness {
     }
 }
 
-/// @notice Exercises the exact deployed vendor path recorded by TASK99-013.
+/// @notice Exercises the pinned upstream settlement path.
 /// @dev The test token is deliberately simple. Aqua and SwapVM are deployed
 ///      from the separately compiled pinned 0.8.30 artifacts rather than
 ///      imported into this 0.8.28 compilation unit.

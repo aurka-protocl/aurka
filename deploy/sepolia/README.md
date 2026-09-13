@@ -105,11 +105,11 @@ authorization keys. The server worker continues bounded evaluations after the
 browser is closed. The owner can later stop/revoke the agent and recover one
 reviewed token at a time to the authenticated wallet.
 
-Run the detailed acceptance procedure in
-`.aurkadev/1009/TASK1009-008-manual-test.md`. Set `AURKA_ALLOWED_ORIGINS` to the
-exact hosted HTTPS origin when deploying outside localhost. The faucet limits in
-the environment example are testnet-only controls, not production deposit or
-withdrawal support.
+Verify wallet creation, funding, mandate authorization, a settled trade, stop,
+and token recovery through the app. Repeat with a second account to check wallet
+isolation. Set `AURKA_ALLOWED_ORIGINS` to the exact hosted HTTPS origin when
+deploying outside localhost. The faucet limits in the environment example are
+testnet-only controls, not production deposit or withdrawal support.
 
 ## Run the active testnet app
 

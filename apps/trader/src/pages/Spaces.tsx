@@ -149,19 +149,45 @@ export default function Spaces() {
 
   return (
     <section className="space-y-6 text-slate-200">
-      <div className="flex flex-wrap items-end justify-between gap-4">
-        <div>
-          <p className="text-sm font-semibold uppercase tracking-[0.18em] text-cyan-300">
-            Spaces
-          </p>
-          <h1 className="mt-2 text-3xl font-semibold tracking-tight text-white sm:text-4xl">
-            {showingOwned ? "Your Spaces" : "All Spaces"}
-          </h1>
-          <p className="mt-3 max-w-2xl leading-7 text-slate-400">
-            {wallet.address
-              ? "Browse available Spaces or view the ones owned by your wallet."
-              : "Browse available Spaces. Connect a wallet to create and manage your own."}
-          </p>
+      <div>
+        <p className="text-sm font-semibold uppercase tracking-[0.18em] text-cyan-300">
+          Spaces
+        </p>
+        <h1 className="mt-2 text-3xl font-semibold tracking-tight text-white sm:text-4xl">
+          {showingOwned ? "Your Spaces" : "All Spaces"}
+        </h1>
+        <p className="mt-3 max-w-2xl leading-7 text-slate-400">
+          {wallet.address
+            ? "Browse available Spaces or view the ones owned by your wallet."
+            : "Browse available Spaces. Connect a wallet to create and manage your own."}
+        </p>
+      </div>
+
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div
+          className="inline-flex rounded-xl border border-slate-700 bg-slate-900 p-1"
+          role="tablist"
+          aria-label="Space list"
+        >
+          <button
+            type="button"
+            role="tab"
+            aria-selected={!showingOwned}
+            onClick={() => setView("all")}
+            className={`rounded-lg px-4 py-2 text-sm font-medium transition ${!showingOwned ? "bg-cyan-700 text-white" : "text-slate-400 hover:text-white"}`}
+          >
+            All spaces
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={showingOwned}
+            disabled={!wallet.address}
+            onClick={() => setView("owned")}
+            className={`rounded-lg px-4 py-2 text-sm font-medium transition ${showingOwned ? "bg-cyan-700 text-white" : "text-slate-400 hover:text-white"} disabled:cursor-not-allowed disabled:opacity-40`}
+          >
+            Your spaces
+          </button>
         </div>
         <div className="flex flex-wrap gap-2">
           <Link
@@ -181,32 +207,6 @@ export default function Spaces() {
             <RefreshCw className="h-4 w-4" aria-hidden="true" /> Refresh
           </button>
         </div>
-      </div>
-
-      <div
-        className="inline-flex rounded-xl border border-slate-700 bg-slate-900 p-1"
-        role="tablist"
-        aria-label="Space list"
-      >
-        <button
-          type="button"
-          role="tab"
-          aria-selected={!showingOwned}
-          onClick={() => setView("all")}
-          className={`rounded-lg px-4 py-2 text-sm font-medium transition ${!showingOwned ? "bg-cyan-700 text-white" : "text-slate-400 hover:text-white"}`}
-        >
-          All spaces
-        </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={showingOwned}
-          disabled={!wallet.address}
-          onClick={() => setView("owned")}
-          className={`rounded-lg px-4 py-2 text-sm font-medium transition ${showingOwned ? "bg-cyan-700 text-white" : "text-slate-400 hover:text-white"} disabled:cursor-not-allowed disabled:opacity-40`}
-        >
-          Your spaces
-        </button>
       </div>
 
       {loading ? (

@@ -1112,12 +1112,6 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
         </p>
       </header>
 
-      {appMode === "testnet" && source?.testnet && (
-        <div className="rounded-xl border border-amber-700 bg-amber-950/40 p-4 text-sm text-amber-100">
-          <strong>Testnet</strong>
-        </div>
-      )}
-
       {appMode === "testnet" && <WalletStateMessage />}
 
       {noLiquidity && (

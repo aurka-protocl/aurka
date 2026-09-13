@@ -617,9 +617,8 @@ const executeAbi = {
   stateMutability: "nonpayable",
 } as const;
 
-/** The final TASK99-013 router keeps the signed AURKA prefix and appends the
- * pinned upstream SwapVM order/taker fields. Keep both entry points explicit;
- * callers must select the one committed by their deployment manifest. */
+/** The upstream router extends the signed AURKA prefix with SwapVM order and
+ * taker fields. The deployment manifest determines the entry point. */
 const executeWithSwapVMAbi = {
   ...executeAbi,
   name: "executeWithSwapVM",

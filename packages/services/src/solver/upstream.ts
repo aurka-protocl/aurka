@@ -7,7 +7,7 @@ import { buildUpstreamStrategy } from "@aurka/shared";
 
 import type { SolverSnapshot } from "./types.js";
 
-/** Pinned identity recorded by TASK99-013; do not silently move this pin. */
+/** Pinned upstream deployment identity. */
 export const SWAPVM_UPSTREAM_COMMIT =
   "afd99c408b4ed610027f4426c6f98650acac9f5f" as const;
 export const SWAPVM_AQUA_COMMIT =

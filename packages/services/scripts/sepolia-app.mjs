@@ -180,10 +180,17 @@ function rpcCorsHeaders(request) {
   } catch {
     return {};
   }
-  if (
-    !["http:", "https:"].includes(parsed.protocol) ||
-    !["localhost", "127.0.0.1", "[::1]"].includes(parsed.hostname)
-  )
+  if (!["http:", "https:"].includes(parsed.protocol)) return {};
+  const configuredOrigins = new Set(
+    (value("AURKA_ALLOWED_ORIGINS") ?? "")
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean),
+  );
+  const localOrigin = ["localhost", "127.0.0.1", "[::1]"].includes(
+    parsed.hostname,
+  );
+  if (!localOrigin && !configuredOrigins.has(origin))
     return {};
   return {
     "access-control-allow-origin": origin,
@@ -1780,6 +1787,13 @@ async function main() {
   const internalPort = api.server.address().port;
   const configuredPublicRpcUrl = value("AURKA_SEPOLIA_PUBLIC_RPC_URL");
   const apiPort = Number(value("AURKA_SEPOLIA_API_PORT") ?? DEFAULT_API_PORT);
+  const browserRpcUrl =
+    configuredPublicRpcUrl ??
+    (gatewayHost === "127.0.0.1" ||
+    gatewayHost === "localhost" ||
+    gatewayHost === "::1"
+      ? `http://127.0.0.1:${apiPort}/rpc`
+      : "/api/rpc");
   let lifecycleQueue = Promise.resolve();
   const gateway = createServer(async (request, response) => {
     try {
@@ -2050,7 +2064,7 @@ async function main() {
         const current = await selected.currentSnapshot();
         json(response, 200, {
           chainId: CHAIN_ID,
-          rpcUrl: configuredPublicRpcUrl ?? `http://127.0.0.1:${apiPort}/rpc`,
+          rpcUrl: browserRpcUrl,
           testnetBlock: Number(current.snapshotBlock),
           integrationMode: "real",
           aquaKind: "REAL_AQUA",

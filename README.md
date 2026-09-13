@@ -62,6 +62,7 @@ forge build
 pnpm contracts:build-upstream
 cp deploy/sepolia/sepolia.env.example .env.sepolia
 ```
+
 ## Try the app
 
 1. Open **Spaces** and inspect a Space's holdings, allocation ranges and
