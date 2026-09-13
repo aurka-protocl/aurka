@@ -74,7 +74,7 @@ const errorLabels: Record<string, string> = {
   DELEGATED_DIRECTION:
     "This trading session uses a different token direction. Start a new session for the pair shown.",
   DELEGATED_EXECUTION_FAILED:
-    "The trading wallet could not submit the swap. Make sure it has ETH for fees and try again.",
+    "The trading wallet could not submit the swap. Check its WETH approval for this Space and try again.",
   DELEGATED_EXHAUSTED:
     "This trading session reached its limit. Create a new session to continue.",
   DELEGATED_NOT_ACTIVE:
@@ -133,6 +133,14 @@ const errorLabels: Record<string, string> = {
     "This session is out of date. Reload the app before trying again.",
   FUNDING_CONFIGURATION_UNAVAILABLE:
     "Space funding is temporarily unavailable. Try again shortly.",
+  SPACE_CHAIN_VERIFICATION_FAILED:
+    "The starting balances do not fit the allocation range at the current reference price. Use the minimum and maximum amounts shown in the form.",
+  SPACE_ALREADY_EXISTS:
+    "This Space was already saved. Refresh the page to continue editing it.",
+  AUTHORIZATION_MISMATCH:
+    "This Space form is out of date. Refresh it and review the changes again.",
+  AUTHORIZATION_EXPIRED:
+    "This Space review expired. Review the details again before saving.",
   INSUFFICIENT_FUNDING:
     "The connected wallet does not have enough USDC or WETH to fund this Space. Add funds and try again.",
   INFEASIBLE_BOUNDS:

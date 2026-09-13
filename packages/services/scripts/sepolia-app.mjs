@@ -2,6 +2,7 @@
 
 import { readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 import {
   createPublicClient,
@@ -51,6 +52,58 @@ const ZERO_HASH = `0x${"00".repeat(32)}`;
 function value(name) {
   const result = process.env[name]?.trim();
   return result || undefined;
+}
+
+function hasOperatorCredentials() {
+  return Boolean(
+    value("AURKA_SEPOLIA_PRIVATE_KEY") ||
+      value("DEPLOYER_PRIVATE_KEY") ||
+      process.env["\nDEPLOYER_PRIVATE_KEY"]?.trim(),
+  );
+}
+
+function startAutomaticMockPriceOperator(manifest) {
+  if (
+    manifest.oracle?.mode !== "mock" ||
+    value("AURKA_SEPOLIA_AUTO_PRICE_OPERATOR") !== "true" ||
+    !hasOperatorCredentials()
+  )
+    return undefined;
+  const operator = spawn(
+    process.execPath,
+    [path.join(ROOT, "packages/services/scripts/sepolia-price-operator.mjs")],
+    {
+      env: {
+        ...process.env,
+        AURKA_SEPOLIA_OPERATOR_RUN_ONCE:
+          value("AURKA_SEPOLIA_OPERATOR_RUN_ONCE") ?? "true",
+        AURKA_SEPOLIA_OPERATOR_MAX_RENEWALS:
+          value("AURKA_SEPOLIA_OPERATOR_MAX_RENEWALS") ?? "10000",
+      },
+      stdio: "inherit",
+    },
+  );
+  operator.once("error", (error) => {
+    console.warn(
+      JSON.stringify({
+        level: "warn",
+        message: "sepolia.price_operator.start_failed",
+        error: error instanceof Error ? error.message : "operator_failed",
+      }),
+    );
+  });
+  operator.once("exit", (code, signal) => {
+    if (code !== 0)
+      console.warn(
+        JSON.stringify({
+          level: "warn",
+          message: "sepolia.price_operator.stopped",
+          code,
+          signal,
+        }),
+      );
+  });
+  return operator;
 }
 
 function address(result, label) {
@@ -1278,10 +1331,42 @@ async function main() {
           error.permanent = true;
           throw error;
         }
-        const snapshot = await selectedProvider(positionId).currentSnapshot();
+        let snapshot;
+        let initializationBlock;
+        try {
+          snapshot = await selectedProvider(positionId).currentSnapshot();
+          initializationBlock = snapshot.snapshotBlock;
+        } catch (error) {
+          if (
+            !/Portfolio NAV must be positive/i.test(
+              error instanceof Error ? error.message : String(error),
+            )
+          )
+            throw error;
+          // An owner may have withdrawn the seeded demo Space completely.
+          // Deployment/RPC readiness must not depend on that Space retaining
+          // liquidity; funded Spaces can still be refreshed independently.
+          const block = await publicClient.getBlock();
+          initializationBlock = block.number;
+          console.warn(
+            JSON.stringify({
+              level: "info",
+              message: "sepolia.seed_space_empty",
+              positionId,
+              block: block.number.toString(),
+            }),
+          );
+        }
+        const aquaApp = await publicClient.readContract({
+          ...contracts.router,
+          functionName: "aquaApp",
+          blockNumber: initializationBlock,
+        });
         if (
-          snapshot.verifyingContract?.toLowerCase() !== router.toLowerCase() ||
-          !snapshot.aquaApp
+          !aquaApp ||
+          aquaApp === "0x0000000000000000000000000000000000000000" ||
+          (snapshot &&
+            snapshot.verifyingContract?.toLowerCase() !== router.toLowerCase())
         ) {
           const error = new Error(
             "The Sepolia router deployment does not match the manifest",
@@ -1290,7 +1375,7 @@ async function main() {
           error.permanent = true;
           throw error;
         }
-        persistFreshSnapshot(snapshot);
+        if (snapshot) persistFreshSnapshot(snapshot);
         // Reconcile already-persisted owner-created Spaces once after the
         // canonical chain is available. This marks immutable strategy
         // mismatches before the first quote, while keeping a single failed
@@ -1304,7 +1389,7 @@ async function main() {
           JSON.stringify({
             level: "info",
             message: "sepolia.chain.ready",
-            block: snapshot.snapshotBlock.toString(),
+            block: initializationBlock.toString(),
           }),
         );
       } catch (error) {
@@ -1699,6 +1784,9 @@ async function main() {
             consumed: current.capacityEpoch.consumedBefore,
             authorized:
               current.capacityEpochId.toLowerCase() !== ZERO_HASH &&
+              current.portfolioSnapshot.assets.some(
+                (asset) => BigInt(asset.balance) > 0n,
+              ) &&
               current.capacityEpoch.capacityBaselineValue >
                 current.capacityEpoch.consumedBefore,
           },
@@ -1757,6 +1845,11 @@ async function main() {
     gateway.once("error", reject);
     gateway.listen(apiPort, gatewayHost, resolve);
   });
+  const automaticMockPriceOperator =
+    startAutomaticMockPriceOperator(manifest);
+  const automaticMockPriceOperatorReady = automaticMockPriceOperator
+    ? new Promise((resolve) => automaticMockPriceOperator.once("exit", resolve))
+    : Promise.resolve();
 
   console.log(
     JSON.stringify(
@@ -1774,12 +1867,16 @@ async function main() {
   );
 
   const shutdown = async () => {
+    automaticMockPriceOperator?.kill("SIGTERM");
     await worker.stop();
     await new Promise((resolve) => gateway.close(resolve));
     await closeApiServer(api);
   };
   process.once("SIGINT", () => void shutdown());
   process.once("SIGTERM", () => void shutdown());
+  // Do not expose a ready trading API while the one-time deterministic mock
+  // price sync is still changing the oracle commitment.
+  await automaticMockPriceOperatorReady;
   void initializeChainStateLoop();
 }
 

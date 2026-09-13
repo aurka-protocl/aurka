@@ -298,6 +298,7 @@ async function main() {
     DEFAULT_CHILD_TIMEOUT_MS,
     900_000,
   );
+  const runOnce = value("AURKA_SEPOLIA_OPERATOR_RUN_ONCE") === "true";
   const manifestPath = path.resolve(
     ROOT,
     value("AURKA_SEPOLIA_MANIFEST_PATH") ??
@@ -321,6 +322,7 @@ async function main() {
       message: "sepolia.price_operator.started",
       intervalMs,
       maxRenewals,
+      runOnce,
       operationsSubmitted: state.operationsSubmitted,
       stateFile: filename,
     }),
@@ -351,6 +353,7 @@ async function main() {
             operationsSubmitted: state.operationsSubmitted,
           }),
         );
+        if (runOnce) return;
       } else if (action === "budget_exhausted") {
         state = {
           ...state,
@@ -408,6 +411,7 @@ async function main() {
               operationsSubmitted: state.operationsSubmitted,
             }),
           );
+          if (runOnce) return;
         } catch (error) {
           state = {
             ...state,

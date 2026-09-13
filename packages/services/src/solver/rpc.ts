@@ -107,15 +107,16 @@ export class Eip1193RouterSimulator implements RouterSimulator {
       intent.signature,
     );
     // The allowance approval, when needed, is a separate transaction that is
-    // mined after the quote snapshot. Simulate against the current chain state
-    // so the exact check sees that approval and mirrors the transaction the
-    // trader is about to send. The signed snapshot/commitments are still
-    // validated by the router itself.
+    // mined after the quote snapshot. The service obtains a fresh snapshot
+    // after that approval, so pin the simulation to the exact block used for
+    // the commitments. Using `latest` here creates a race with mock-oracle
+    // updates and can reject a valid signed trade before the wallet sends it.
     const call = toEthCall(request, intent.trader);
+    const blockTag = `0x${snapshot.snapshotBlock.toString(16)}`;
     try {
       const result = await this.transport.request({
         method: "eth_call",
-        params: [call, "latest"],
+        params: [call, blockTag],
       });
       if (typeof result !== "string" || !/^0x[0-9a-fA-F]*$/.test(result)) {
         return {

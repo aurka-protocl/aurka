@@ -2,7 +2,6 @@ import { useEffect, useState } from "react";
 import {
   Menu,
   X,
-  Activity,
   ArrowLeftRight,
   Boxes,
   Info,
@@ -11,7 +10,12 @@ import {
 import { NavLink, useLocation } from "react-router-dom";
 import { clsx } from "clsx";
 import { environmentLabel, appMode } from "../config";
-import { useWallet, WalletStateMessage, WalletStatusControl } from "../wallet";
+import {
+  useWallet,
+  WalletConfirmationOverlay,
+  WalletStateMessage,
+  WalletStatusControl,
+} from "../wallet";
 import LiveAssistant from "./LiveAssistant";
 
 interface LayoutProps {
@@ -22,7 +26,6 @@ const navigation = [
   { name: "Spaces", href: "/spaces", icon: Boxes },
   { name: "Trade", href: "/trade", icon: ArrowLeftRight },
   { name: "Automated trading", href: "/agent", icon: Bot },
-  { name: "Activity", href: "/activity", icon: Activity },
   { name: "About", href: "/about", icon: Info },
 ];
 
@@ -59,13 +62,22 @@ export default function Layout({ children }: LayoutProps) {
         <div className="mx-auto flex max-w-7xl items-center gap-3 px-4 py-3 sm:px-6 lg:px-8">
           <NavLink
             to="/spaces"
-            className="group shrink-0"
+            className="group flex shrink-0 items-center gap-2"
             aria-label="AURKA Spaces"
           >
-            <span className="block text-lg font-bold tracking-[0.2em] text-white">
-              AURKA
+            <img
+              src="/logo.png"
+              alt=""
+              className="h-10 w-10 rounded-full object-contain"
+            />
+            <span>
+              <span className="block text-lg font-bold tracking-[0.2em] text-white">
+                AURKA
+              </span>
+              <span className="block text-xs text-slate-500">
+                Simple swaps
+              </span>
             </span>
-            <span className="block text-xs text-slate-500">Simple swaps</span>
           </NavLink>
 
           <nav
@@ -150,6 +162,9 @@ export default function Layout({ children }: LayoutProps) {
         {children}
       </main>
       <LiveAssistant />
+      {wallet.pendingWalletRequest ? (
+        <WalletConfirmationOverlay kind={wallet.pendingWalletRequest} />
+      ) : null}
     </div>
   );
 }

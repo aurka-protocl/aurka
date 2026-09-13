@@ -1,7 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
-import { Link, NavLink, useParams } from "react-router-dom";
-import { ArrowLeft, ArrowRight, RefreshCw } from "lucide-react";
-import { AurkaClient } from "@aurka/sdk";
+import { useEffect, useState } from "react";
+import { Link, NavLink, useNavigate, useParams } from "react-router-dom";
+import { ArrowLeft, RefreshCw } from "lucide-react";
 import {
   formatBasisPoints,
   formatGroupedDecimalUnits,
@@ -9,23 +8,23 @@ import {
   snapshotFreshness,
   type AssetBound,
   type AssetSnapshot,
-  type DirectionalCapacity,
   type PortfolioSnapshot,
   type Position,
 } from "@aurka/shared";
-import { ActivityFeed, ActivityLink } from "../components/ActivityFeed";
+import { ActivityFeed } from "../components/ActivityFeed";
 import { apiBaseUrl, appMode } from "../config";
 import {
   invalidateSpaceCache,
   spaceAdapter,
   spaceUrl,
-  tradeUrl,
   type SpaceRecord,
 } from "../domain/spaces";
-import SpaceForm, { SpaceOwnerControls } from "./SpaceForm";
+import SpaceForm, {
+  SpaceOwnerControls,
+  SpaceRecoveryControls,
+} from "./SpaceForm";
 import { displayAssetSymbol, userFacingError } from "../ui";
-
-const client = new AurkaClient({ baseUrl: apiBaseUrl });
+import { useWallet } from "../wallet";
 
 function decodeSpaceId(value: string | undefined): string | undefined {
   if (!value) return undefined;
@@ -33,6 +32,23 @@ function decodeSpaceId(value: string | undefined): string | undefined {
     return decodeURIComponent(value);
   } catch {
     return value;
+  }
+}
+
+async function loadSpaceRecord(spaceId: string): Promise<SpaceRecord> {
+  const durable = await spaceAdapter.getSpace(spaceId);
+  if (appMode !== "testnet" || !durable.position) return durable;
+  try {
+    const response = await fetch(
+      `${apiBaseUrl}/testnet?spaceId=${encodeURIComponent(spaceId)}`,
+      { cache: "no-store" },
+    );
+    if (!response.ok) return durable;
+    const body = (await response.json()) as { readonly position?: Position };
+    return body.position ? { ...durable, position: body.position } : durable;
+  } catch {
+    // Keep the durable record visible during a temporary RPC outage.
+    return durable;
   }
 }
 
@@ -47,6 +63,12 @@ function currentFreshness(
         position.policy.priceMaxAgeSeconds,
       )
     : "unknown";
+}
+
+function hasSpaceLiquidity(position: Position | undefined): boolean {
+  const assets = position?.currentPortfolio?.assets;
+  if (!assets) return true;
+  return assets.some((asset) => BigInt(asset.balance) > 0n);
 }
 
 function stateLabel(space: SpaceRecord): string {
@@ -90,7 +112,7 @@ function SpaceTabs({ space }: { readonly space: SpaceRecord }) {
   const tabs = [
     { label: "Overview", section: "overview" as const },
     { label: "Holdings & rules", section: "holdings" as const },
-    { label: "Settings", section: "settings" as const },
+    { label: "Activity", section: "activity" as const },
   ];
   return (
     <nav
@@ -143,8 +165,7 @@ function SpacePage({
         active = false;
       };
     }
-    spaceAdapter
-      .getSpace(spaceId)
+    loadSpaceRecord(spaceId)
       .then((next) => {
         if (active) setSpace(next);
       })
@@ -208,7 +229,8 @@ function SpacePage({
   const canTrade =
     space.identity.state === "ACTIVE" &&
     !!space.position &&
-    currentFreshness(space.position) === "fresh";
+    hasSpaceLiquidity(space.position) &&
+    (appMode === "testnet" || currentFreshness(space.position) === "fresh");
 
   return (
     <section className="space-y-6 text-slate-200">
@@ -228,16 +250,12 @@ function SpacePage({
             {space.identity.name}
           </h1>
         </div>
-        {canTrade ? (
-          <Link
-            to={tradeUrl(space.identity.id)}
-            title="Open swaps for this Space"
-            className="inline-flex min-h-10 items-center gap-2 rounded-lg bg-cyan-700 px-4 py-2.5 text-sm font-medium text-white hover:bg-cyan-600"
-          >
-            Trade this Space{" "}
-            <ArrowRight className="h-4 w-4" aria-hidden="true" />
-          </Link>
-        ) : space.identity.state === "ACTIVE" ? (
+        {space.identity.state === "ACTIVE" &&
+          !hasSpaceLiquidity(space.position) ? (
+          <span className="inline-flex min-h-10 items-center rounded-lg border border-amber-800/70 bg-amber-950/30 px-4 py-2.5 text-sm text-amber-200">
+            Fund this Space to trade
+          </span>
+        ) : space.identity.state === "ACTIVE" && !canTrade ? (
           <span className="inline-flex min-h-10 items-center rounded-lg border border-amber-800/70 bg-amber-950/30 px-4 py-2.5 text-sm text-amber-200">
             Trading unavailable until balances are current
           </span>
@@ -258,6 +276,12 @@ function SpacePage({
 }
 
 function Freshness({ position }: { readonly position: Position }) {
+  if (appMode === "testnet")
+    return (
+      <p className="text-sm text-slate-400">
+        Live balances are checked automatically when you trade
+      </p>
+    );
   const snapshot = position.currentPortfolio;
   if (!snapshot)
     return (
@@ -309,30 +333,6 @@ function allocationRows(snapshot: PortfolioSnapshot) {
   ));
 }
 
-function RecentActivity({ spaceId }: { readonly spaceId: string }) {
-  return (
-    <section className="rounded-2xl border border-slate-700 bg-slate-900 p-5">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h2 className="text-lg font-semibold text-white">Recent activity</h2>
-          <p className="mt-1 text-sm text-slate-400">
-            Recent swaps and updates from this Space.
-          </p>
-        </div>
-        <ActivityLink spaceId={spaceId} />
-      </div>
-      <div className="mt-4">
-        <ActivityFeed
-          query={{ spaceId, limit: 3 }}
-          compact
-          showPagination={false}
-          emptyMessage="No activity has been recorded for this Space yet."
-        />
-      </div>
-    </section>
-  );
-}
-
 function RuleSummary({ position }: { readonly position: Position }) {
   return (
     <section className="rounded-2xl border border-slate-700 bg-slate-900 p-5">
@@ -349,12 +349,12 @@ function RuleSummary({ position }: { readonly position: Position }) {
         >
           View holdings →
         </Link>
-        <Link
-          to={spaceUrl(position.id, "settings")}
+        <a
+          href="#space-settings"
           className="text-sm text-cyan-300 hover:text-cyan-200"
         >
           Edit Space →
-        </Link>
+        </a>
       </div>
       <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-2">
         <div>
@@ -372,10 +372,16 @@ function RuleSummary({ position }: { readonly position: Position }) {
             className={
               position.policy.paused
                 ? "mt-1 font-semibold text-amber-300"
-                : "mt-1 font-semibold text-emerald-300"
+                : hasSpaceLiquidity(position)
+                  ? "mt-1 font-semibold text-emerald-300"
+                  : "mt-1 font-semibold text-amber-300"
             }
           >
-            {position.policy.paused ? "Paused" : "Trading available"}
+            {position.policy.paused
+              ? "Paused"
+              : hasSpaceLiquidity(position)
+                ? "Trading available"
+                : "Needs funding"}
           </dd>
         </div>
       </dl>
@@ -395,9 +401,10 @@ function RuleSummary({ position }: { readonly position: Position }) {
 }
 
 export function SpaceOverview() {
+  const wallet = useWallet();
   return (
     <SpacePage>
-      {(space) => {
+      {(space, refresh) => {
         if (!space.position)
           return (
             <div className="space-y-5">
@@ -412,14 +419,11 @@ export function SpaceOverview() {
                   Your settings are saved, but balances and trading remain
                   unavailable until setup is confirmed.
                 </p>
-                <Link
-                  to={spaceUrl(space.identity.id, "settings")}
-                  className="inline-flex min-h-10 items-center gap-2 rounded-lg bg-cyan-700 px-4 py-2.5 text-sm font-medium text-white"
-                >
-                  Continue setup{" "}
-                  <ArrowRight className="h-4 w-4" aria-hidden="true" />
-                </Link>
+                <p className="text-sm text-cyan-200">
+                  Continue setup in the Space settings below.
+                </p>
               </section>
+              <SpaceSettingsContent space={space} onChanged={refresh} />
             </div>
           );
         const position = space.position;
@@ -471,6 +475,35 @@ export function SpaceOverview() {
                 </p>
               </div>
             </div>
+            <section className="rounded-2xl border border-slate-700 bg-slate-900 p-5">
+              <h2 className="text-lg font-semibold text-white">
+                Space ownership
+              </h2>
+              <dl className="mt-4 grid gap-4 text-sm sm:grid-cols-2">
+                <div>
+                  <dt className="text-slate-500">Owner wallet</dt>
+                  <dd className="mt-1 break-all font-mono text-slate-200">
+                    {space.identity.ownerAddress}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-slate-500">Connected wallet</dt>
+                  <dd className="mt-1 break-all font-mono text-slate-200">
+                    {wallet.address ?? "Not connected"}
+                  </dd>
+                  {wallet.address && (
+                    <p
+                      className={`mt-2 ${wallet.address.toLowerCase() === space.identity.ownerAddress.toLowerCase() ? "text-emerald-300" : "text-amber-300"}`}
+                    >
+                      {wallet.address.toLowerCase() ===
+                      space.identity.ownerAddress.toLowerCase()
+                        ? "Owner wallet connected"
+                        : "Different wallet connected"}
+                    </p>
+                  )}
+                </div>
+              </dl>
+            </section>
             {snapshot ? (
               <section className="rounded-2xl border border-slate-700 bg-slate-900 p-5">
                 <h2 className="text-lg font-semibold text-white">
@@ -489,7 +522,7 @@ export function SpaceOverview() {
               </p>
             )}
             <RuleSummary position={position} />
-            <RecentActivity spaceId={space.identity.id} />
+            <SpaceSettingsContent space={space} onChanged={refresh} />
           </div>
         );
       }}
@@ -497,21 +530,29 @@ export function SpaceOverview() {
   );
 }
 
-function findTradingPair(
-  position: Position,
-): { input: AssetBound; output: AssetBound } | undefined {
-  const find = (symbol: string) =>
-    position.policy.assets.find((asset) =>
-      asset.symbol
-        .toUpperCase()
-        .split(/[^A-Z0-9]+/)
-        .includes(symbol),
-    );
-  const input = find("WETH") ?? position.policy.assets[0];
-  const output =
-    find("USDC") ??
-    position.policy.assets.find((asset) => asset.token !== input?.token);
-  return input && output ? { input, output } : undefined;
+export function SpaceActivity() {
+  return (
+    <SpacePage>
+      {(space) => (
+        <section className="rounded-2xl border border-slate-700 bg-slate-900 p-5">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h2 className="text-lg font-semibold text-white">Activity</h2>
+              <p className="mt-1 text-sm text-slate-400">
+                Swaps and updates recorded for this Space.
+              </p>
+            </div>
+          </div>
+          <div className="mt-5">
+            <ActivityFeed
+              query={{ spaceId: space.identity.id, limit: 20 }}
+              emptyMessage="No activity has been recorded for this Space yet."
+            />
+          </div>
+        </section>
+      )}
+    </SpacePage>
+  );
 }
 
 function HoldingsTable({
@@ -621,111 +662,6 @@ function HoldingsTable({
   );
 }
 
-function CapacityPanel({
-  position,
-  snapshot,
-}: {
-  readonly position: Position;
-  readonly snapshot?: PortfolioSnapshot;
-}) {
-  const pair = useMemo(() => findTradingPair(position), [position]);
-  const [capacity, setCapacity] = useState<DirectionalCapacity | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [retry, setRetry] = useState(0);
-  const freshness = currentFreshness(position);
-  useEffect(() => {
-    let active = true;
-    setCapacity(null);
-    setError(null);
-    if (!pair || !snapshot || freshness !== "fresh") {
-      setLoading(false);
-      return () => {
-        active = false;
-      };
-    }
-    setLoading(true);
-    client
-      .getCapacity(position.id, pair.input.token, pair.output.token)
-      .then((next) => {
-        if (active) setCapacity(next);
-      })
-      .catch((requestError: unknown) => {
-        if (active)
-          setError(
-            requestError instanceof Error
-              ? userFacingError(
-                  requestError,
-                  "Swap availability is temporarily unavailable",
-                )
-              : "Swap availability is temporarily unavailable",
-          );
-      })
-      .finally(() => {
-        if (active) setLoading(false);
-      });
-    return () => {
-      active = false;
-    };
-  }, [freshness, pair, position.id, position.updatedAt, retry, snapshot]);
-
-  return (
-    <section className="rounded-2xl border border-slate-700 bg-slate-900 p-5">
-      <h2 className="text-lg font-semibold text-white">Swap availability</h2>
-      <p className="mt-1 text-sm leading-6 text-slate-400">
-        See how much is currently available for the most common swap in this
-        Space.
-      </p>
-      {!snapshot || freshness !== "fresh" ? (
-        <p className="mt-4 rounded-lg border border-amber-900/70 bg-amber-950/30 p-3 text-sm text-amber-200">
-          Swap availability is unavailable while balances are not current.
-          Trading is paused until they are available.
-        </p>
-      ) : loading ? (
-        <p aria-live="polite" className="mt-4 text-sm text-slate-400">
-          Checking swap availability…
-        </p>
-      ) : error ? (
-        <div className="mt-4 flex flex-wrap items-center gap-3 rounded-lg border border-red-900/70 bg-red-950/30 p-3 text-sm text-red-200">
-          <span>Swap availability is temporarily unavailable. {error}</span>
-          <button
-            type="button"
-            onClick={() => setRetry((value) => value + 1)}
-            className="rounded border border-red-800 px-2 py-1 hover:border-red-500"
-          >
-            Retry
-          </button>
-        </div>
-      ) : capacity ? (
-        <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-2">
-          <div>
-            <dt className="text-slate-500">Swap</dt>
-            <dd className="mt-1 font-semibold text-white">
-              {pair ? displayAssetSymbol(pair.input.symbol) : "Token"} →{" "}
-              {pair ? displayAssetSymbol(pair.output.symbol) : "Token"}
-            </dd>
-          </div>
-          <div>
-            <dt className="text-slate-500">Available now</dt>
-            <dd className="mt-1 font-semibold text-cyan-200">
-              {formatGroupedDecimalUnits(
-                capacity.remainingValue,
-                snapshot.valueDecimals,
-              )}
-            </dd>
-          </div>
-          <div className="sm:col-span-2">
-            <dt className="text-slate-500">Available until</dt>
-            <dd className="mt-1 text-slate-300">
-              {new Date(capacity.expiresAt * 1000).toLocaleString()}
-            </dd>
-          </div>
-        </dl>
-      ) : null}
-    </section>
-  );
-}
-
 export function SpaceHoldings() {
   return (
     <SpacePage>
@@ -779,33 +715,29 @@ export function SpaceHoldings() {
                   className={
                     position.policy.paused
                       ? "mt-2 text-lg font-semibold text-amber-300"
-                      : "mt-2 text-lg font-semibold text-emerald-300"
+                      : hasSpaceLiquidity(position)
+                        ? "mt-2 text-lg font-semibold text-emerald-300"
+                        : "mt-2 text-lg font-semibold text-amber-300"
                   }
                 >
-                  {position.policy.paused ? "Paused" : "Trading available"}
+                  {position.policy.paused
+                    ? "Paused"
+                    : hasSpaceLiquidity(position)
+                      ? "Trading available"
+                      : "Needs funding"}
                 </p>
                 <div className="mt-2">
                   <Freshness position={position} />
                 </div>
               </div>
             </div>
-            <CapacityPanel position={position} snapshot={snapshot} />
             {space.identity.state === "ACTIVE" &&
-            currentFreshness(position) === "fresh" ? (
-              <Link
-                to={tradeUrl(space.identity.id)}
-                title="Trade against this Space"
-                className="inline-flex min-h-10 items-center gap-2 rounded-lg bg-cyan-700 px-4 py-2.5 text-sm font-medium text-white hover:bg-cyan-600"
-              >
-                Trade this Space{" "}
-                <ArrowRight className="h-4 w-4" aria-hidden="true" />
-              </Link>
-            ) : (
+            !hasSpaceLiquidity(position) ? (
               <p className="rounded-lg border border-amber-900/70 bg-amber-950/30 p-3 text-sm text-amber-200">
-                Trading is unavailable until this Space is active and its
-                balances are current.
+                The latest Space balances are zero. Fund this Space before
+                trading.
               </p>
-            )}
+            ) : null}
           </div>
         );
       }}
@@ -813,14 +745,23 @@ export function SpaceHoldings() {
   );
 }
 
-export function SpaceSettings() {
+function SpaceSettingsContent({
+  space,
+  onChanged,
+}: {
+  readonly space: SpaceRecord;
+  readonly onChanged: () => void;
+}) {
   const [editing, setEditing] = useState(false);
+  const navigate = useNavigate();
   return (
-    <SpacePage>
-      {(space, refresh) => (
-        <div className="space-y-5">
+    <section
+      id="space-settings"
+      className="rounded-2xl border border-slate-700 bg-slate-900 p-5"
+    >
+      <div className="space-y-5">
           <div>
-            <h2 className="text-2xl font-semibold text-white">Settings</h2>
+            <h2 className="text-lg font-semibold text-white">Space settings</h2>
             <p className="mt-2 max-w-3xl leading-7 text-slate-400">
               Manage the Space name, trading status, and rules.
             </p>
@@ -866,7 +807,17 @@ export function SpaceSettings() {
           )}
           {editing && <SpaceForm existing={space} embedded />}
           {!editing && space.identity.state !== "DRAFT" ? (
-            <SpaceOwnerControls space={space} onChanged={refresh} />
+            <SpaceOwnerControls space={space} onChanged={onChanged} />
+          ) : null}
+          {!editing && appMode === "testnet" ? (
+            <SpaceRecoveryControls
+              space={space}
+              onChanged={onChanged}
+              onDeleted={() => {
+                invalidateSpaceCache();
+                navigate("/spaces", { replace: true });
+              }}
+            />
           ) : null}
           {!editing &&
             appMode !== "testnet" &&
@@ -876,8 +827,7 @@ export function SpaceSettings() {
                 that created the Space.
               </p>
             )}
-        </div>
-      )}
-    </SpacePage>
+      </div>
+    </section>
   );
 }

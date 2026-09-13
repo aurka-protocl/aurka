@@ -134,7 +134,7 @@ function retryDelaySeconds(consecutiveFailures: number): number {
   );
 }
 
-function activityFailureSummary(code: string): string {
+function activityFailureSummary(code: string, message = ""): string {
   switch (code) {
     case "RATE_LIMITED":
       return "The assistant is rate-limited; the next check is scheduled automatically.";
@@ -151,6 +151,10 @@ function activityFailureSummary(code: string): string {
     case "MISSING_CONFIGURATION":
     case "AUTHENTICATION_REJECTED":
       return "The assistant provider is not configured for automated checks.";
+    case "DELEGATED_EXECUTION_FAILED":
+      if (/allowance/i.test(message))
+        return "Waiting: the session allowance is being confirmed; the next check will retry automatically.";
+      return "The trading wallet could not submit the reviewed swap; the next check will retry automatically.";
     default:
       return "The assistant check could not complete; the next check is scheduled automatically.";
   }
@@ -579,7 +583,7 @@ function mandateActivitySummary(
     BigInt(plan.perTradeInputAmount),
     asset?.decimals ?? 0,
   );
-  return `Started: spend up to ${amount} ${asset?.symbol ?? "input tokens"} before ${new Date(plan.expiresAt * 1_000).toISOString()}.`;
+  return `Rules approved: spend up to ${amount} ${asset?.symbol ?? "input tokens"} before ${new Date(plan.expiresAt * 1_000).toISOString()}. Start authorization is still required.`;
 }
 
 function sessionWithWallet(
@@ -854,7 +858,10 @@ export class DelegatedSessionService {
           code,
           deterministic
             ? "The deterministic checks rejected this opportunity; no transaction was signed or submitted."
-            : activityFailureSummary(code),
+            : activityFailureSummary(
+                code,
+                error instanceof Error ? error.message : String(error),
+              ),
           {
             dedupeKey: `${id}:evaluation-failure:${startedAt}`,
             details: { nextCheckAt, reasonCode: code },
@@ -1644,7 +1651,9 @@ export class DelegatedSessionService {
     return this.get(id);
   }
 
-  /** Approve only the reviewed input amount from the delegated wallet itself.
+  /** Approve the remaining reviewed input budget from the delegated wallet
+   * itself. The router's ERC-20 transferFrom consumes allowance as trades run,
+   * so approving only one trade would force another approval after every swap.
    * Bob's browser wallet is never the sender of this transaction. */
   async approve(
     id: string,
@@ -1674,9 +1683,10 @@ export class DelegatedSessionService {
         409,
       );
     const allowance = wallet.balances?.inputAllowance;
+    const remainingBudget = BigInt(session.remainingInputBudget);
     if (
       allowance !== undefined &&
-      BigInt(allowance) >= BigInt(session.plan.perTradeInputAmount)
+      BigInt(allowance) >= remainingBudget
     ) {
       const current = this.get(id);
       if (
@@ -1715,12 +1725,12 @@ export class DelegatedSessionService {
             "Delegated session was stopped before allowance approval",
             409,
           );
-        return delegatedWallet.approveToken!(
-          {
+      return delegatedWallet.approveToken!(
+        {
             chainId: current.plan.chainId,
             token: current.plan.traderInputToken,
             spender: this.service.runtime.settlementContract!,
-            amount: current.plan.perTradeInputAmount,
+            amount: current.remainingInputBudget,
             expiresAt: current.plan.expiresAt,
             policyFingerprint: current.wallet.policyFingerprint!,
           },

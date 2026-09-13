@@ -1524,7 +1524,7 @@ export class AurkaService {
       utilization: capacity.utilization.toString(),
       bindingConstraint: capacity.bindingConstraint,
       calculatedAtBlock: snapshot.snapshotBlock.toString(),
-      expiresAt: snapshot.priceProtection.nowSeconds + 60,
+      expiresAt: snapshot.priceProtection.nowSeconds + 300,
     };
   }
 

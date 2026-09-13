@@ -172,6 +172,7 @@ function friendlyError(error: unknown): string {
     return "Your swap is still processing. Check Activity before trying again.";
   if (/transaction reverted/i.test(raw))
     return "The network rejected this swap. No completed swap is shown.";
+  if (/no liquidity/i.test(raw)) return raw;
   if (/below the minimum executable amount/i.test(raw)) return raw;
   if (/amount|precision|decimal/i.test(raw))
     return "Enter a valid token amount using the supported decimals.";
@@ -220,6 +221,14 @@ function pairFor(
 ): SwapPair | undefined {
   const pairs = pairsFor(position);
   return pairs.find((pair) => pair.key === key) ?? pairs[0];
+}
+
+function hasSpaceLiquidity(position: Position | undefined): boolean {
+  const assets = position?.currentPortfolio?.assets;
+  // Unknown balances should not create a client-side blocker. The server is
+  // still authoritative when a quote is requested.
+  if (!assets) return true;
+  return assets.some((asset) => BigInt(asset.balance) > 0n);
 }
 
 function sourceClock(source: TradeSource | undefined): number {
@@ -511,6 +520,9 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
     quoteResult !== undefined && quoteResult.quote.expiresAt <= clock;
   const quoteStale =
     quoteResult !== undefined && quoteIsStale(quoteResult, source, clock);
+  const noLiquidity =
+    source?.position.currentPortfolio !== undefined &&
+    !hasSpaceLiquidity(source.position);
   function updateAmount(value: string) {
     invalidateQuote();
     setAmountAdjustment(undefined);
@@ -559,6 +571,10 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
           if (!latestPair)
             throw new Error(
               "No supported trading pair is available right now.",
+            );
+          if (!hasSpaceLiquidity(latest.position))
+            throw new Error(
+              "This Space has no liquidity. Fund the Space before requesting a swap.",
             );
           const requestedInputAmount =
             acceptedAmount ??
@@ -960,7 +976,7 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
         </p>
         <h1 className="text-3xl font-semibold text-white">Swap unavailable</h1>
         <p className="rounded-xl border border-amber-800/70 bg-amber-950/30 p-4 text-amber-200">
-          We couldn&apos;t load the latest rate right now. Please try again.
+          {sourceError}
         </p>
         <button
           type="button"
@@ -994,6 +1010,16 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
       )}
 
       {appMode === "testnet" && <WalletStateMessage />}
+
+      {noLiquidity && (
+        <section className="rounded-2xl border border-amber-800/70 bg-amber-950/30 p-5">
+          <h2 className="font-semibold text-white">Fund this Space before trading</h2>
+          <p className="mt-2 text-sm leading-6 text-amber-200">
+            The latest Sepolia balances are zero. Add USDC or WETH to this
+            Space, then request a new rate.
+          </p>
+        </section>
+      )}
 
       {!source || !pair ? (
         <section className="rounded-2xl border border-amber-800/70 bg-amber-950/30 p-5 text-amber-200">
@@ -1088,6 +1114,7 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
               disabled={
                 busy ||
                 !amount.trim() ||
+                noLiquidity ||
                 (appMode === "testnet" && wallet.status !== "connected")
               }
               className="min-h-11 rounded-lg bg-cyan-600 px-5 py-3 font-medium text-white transition hover:bg-cyan-500 disabled:cursor-not-allowed disabled:opacity-50"

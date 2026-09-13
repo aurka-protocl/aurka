@@ -130,8 +130,8 @@ trade count, slippage limit, and short expiry. His EIP-712 signature authorizes
 that exact session. The address is not Bob's browser wallet and is not Alice's
 Space owner; it must be funded independently with only the displayed demo
 budget. Bob then reviews and signs the one-time control authorization for the
-agent wallet to approve exactly the missing input-token allowance to the
-settlement router. The funding and approval transactions are visible and are
+agent wallet to approve the remaining input-token budget to the settlement
+router. The funding and approval transactions are visible and are
 never delegated to Bob's browser wallet.
 
 After authorization, “Start one bounded worker tick” uses the same OpenRouter

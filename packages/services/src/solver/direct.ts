@@ -30,6 +30,7 @@ import {
 } from "./types.js";
 
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+const TRADE_VALIDITY_SECONDS = 300;
 
 function snapshotFromValuation(snapshot: SolverSnapshot): PortfolioSnapshot {
   const result = {
@@ -122,7 +123,7 @@ export class DirectSolver {
       riskMode: snapshot.riskMode,
       expiresAt: Math.min(
         intent.deadline,
-        snapshot.priceProtection.nowSeconds + 60,
+        snapshot.priceProtection.nowSeconds + TRADE_VALIDITY_SECONDS,
       ),
       // A quote has no trader authorization and therefore cannot claim that
       // the deployed router accepted the eventual transaction.
@@ -220,7 +221,7 @@ export class DirectSolver {
       swapVMCalldataHash: directProgramHash,
       deadline: Math.min(
         intent.deadline,
-        snapshot.priceProtection.nowSeconds + 60,
+        snapshot.priceProtection.nowSeconds + TRADE_VALIDITY_SECONDS,
       ),
     });
     const upstream = snapshot.swapVMGuard

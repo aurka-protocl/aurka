@@ -4,10 +4,15 @@ import {
   Route,
   Routes,
   useNavigate,
+  useParams,
 } from "react-router-dom";
 import Layout from "./components/Layout";
 import Spaces from "./pages/Spaces";
-import { SpaceHoldings, SpaceOverview, SpaceSettings } from "./pages/Space";
+import {
+  SpaceActivity,
+  SpaceHoldings,
+  SpaceOverview,
+} from "./pages/Space";
 import Trade from "./pages/Trade";
 import History from "./pages/History";
 import Status from "./pages/Status";
@@ -66,6 +71,16 @@ function LegacySpaceRedirect({
   );
 }
 
+function SpaceSettingsRedirect() {
+  const { spaceId } = useParams<{ spaceId: string }>();
+  return (
+    <Navigate
+      to={spaceId ? spaceUrl(spaceId) : "/spaces"}
+      replace
+    />
+  );
+}
+
 function AppRoutes() {
   return (
     <Router>
@@ -83,7 +98,11 @@ function AppRoutes() {
           <Route path="/spaces/:spaceId" element={<SpaceOverview />} />
           <Route path="/spaces/:spaceId/overview" element={<SpaceOverview />} />
           <Route path="/spaces/:spaceId/holdings" element={<SpaceHoldings />} />
-          <Route path="/spaces/:spaceId/settings" element={<SpaceSettings />} />
+          <Route path="/spaces/:spaceId/activity" element={<SpaceActivity />} />
+          <Route
+            path="/spaces/:spaceId/settings"
+            element={<SpaceSettingsRedirect />}
+          />
 
           <Route path="/trade" element={<Trade />} />
           <Route path="/trade/:spaceId" element={<Trade />} />

@@ -11,6 +11,7 @@ export class DelegatedAgentWorker {
   private readonly intervalMs: number;
   private readonly leaseSeconds: number;
   private readonly ready: (() => boolean) | undefined;
+  private readonly readyRetryMs = 10_000;
 
   constructor(
     private readonly delegated: DelegatedSessionService,
@@ -36,9 +37,7 @@ export class DelegatedAgentWorker {
   start(): void {
     if (this.timer) return;
     this.stopping = false;
-    void this.tick();
-    this.timer = setInterval(() => void this.tick(), this.intervalMs);
-    this.timer.unref();
+    void this.runAndSchedule();
   }
 
   async stop(): Promise<void> {
@@ -87,5 +86,40 @@ export class DelegatedAgentWorker {
     } finally {
       this.running = false;
     }
+  }
+
+  private async runAndSchedule(): Promise<void> {
+    try {
+      await this.tick();
+    } catch {
+      // Keep the worker alive if repository or readiness checks fail once.
+    } finally {
+      this.scheduleNext();
+    }
+  }
+
+  private scheduleNext(): void {
+    if (this.stopping || this.timer) return;
+    const now = Math.floor(Date.now() / 1000);
+    const ready = !this.ready || this.ready();
+    let delayMs = ready ? this.intervalMs : this.readyRetryMs;
+    if (ready) {
+      const nextCheckAt = this.repository
+        .listDelegatedSessions()
+        .filter((session) => session.state === "ACTIVE")
+        .map((session) => session.nextCheckAt)
+        .filter((value): value is number => value !== undefined && value !== null)
+        .sort((left, right) => left - right)[0];
+      if (nextCheckAt !== undefined)
+        delayMs = Math.min(
+          delayMs,
+          Math.max(1_000, (nextCheckAt - now) * 1_000),
+        );
+    }
+    this.timer = setTimeout(() => {
+      this.timer = undefined;
+      void this.runAndSchedule();
+    }, delayMs);
+    this.timer.unref();
   }
 }

@@ -66,6 +66,25 @@ function valueToRaw(value, asset) {
   );
 }
 
+function emptyPortfolioValuation(assets) {
+  return {
+    valueDecimals: 0,
+    nav: 0n,
+    assets: assets.map((asset) => ({
+      token: asset.token,
+      ...(asset.symbol === undefined ? {} : { symbol: asset.symbol }),
+      balance: asset.balance,
+      decimals: asset.decimals,
+      price: asset.price,
+      priceDecimals: asset.priceDecimals,
+      value: 0n,
+      weightBps: 0n,
+      minimumWeightBps: BigInt(asset.minimumWeightBps),
+      maximumWeightBps: BigInt(asset.maximumWeightBps),
+    })),
+  };
+}
+
 export function policyFrom(raw) {
   const fee = raw?.fee ?? raw?.[9];
   return {
@@ -307,7 +326,9 @@ export class LocalChainSnapshotProvider {
       prices.push(price);
       balances.push(balance);
     }
-    const portfolio = calculatePortfolioValuation(managedAssets, 0);
+    const portfolio = managedAssets.every((asset) => asset.balance === 0n)
+      ? emptyPortfolioValuation(managedAssets)
+      : calculatePortfolioValuation(managedAssets, 0);
     const inputAsset = managedAssets.find(
       (asset) => asset.token.toLowerCase() === tokenAddresses[1].toLowerCase(),
     );

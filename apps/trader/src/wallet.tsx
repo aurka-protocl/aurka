@@ -4,6 +4,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import { supportedChainId } from "./config";
@@ -36,11 +37,19 @@ export interface WalletState {
   readonly chainId: number | null;
   readonly provider: BrowserWalletProvider | null;
   readonly error: string | null;
+  readonly pendingWalletRequest: WalletRequestKind | null;
   /** Changes whenever account/network context changes and dependent work must be discarded. */
   readonly revision: number;
   readonly connect: () => Promise<void>;
   readonly clearError: () => void;
 }
+
+export type WalletRequestKind = "approval" | "transaction";
+
+type WalletRequestInput = {
+  readonly method: string;
+  readonly params?: unknown[];
+};
 
 interface WindowWithEthereum extends Window {
   ethereum?: BrowserWalletProvider;
@@ -98,6 +107,23 @@ function friendlyWalletError(error: unknown): string {
   return "The wallet request failed. Try again.";
 }
 
+function walletRequestKind(method: string): WalletRequestKind | null {
+  if (
+    method === "eth_signTypedData_v4" ||
+    method === "eth_signTypedData" ||
+    method === "personal_sign" ||
+    method === "eth_sign"
+  )
+    return "approval";
+  if (
+    method === "eth_sendTransaction" ||
+    method === "wallet_switchEthereumChain" ||
+    method === "wallet_addEthereumChain"
+  )
+    return "transaction";
+  return null;
+}
+
 export function WalletProvider({
   children,
 }: {
@@ -108,7 +134,45 @@ export function WalletProvider({
   const [address, setAddress] = useState<string | null>(null);
   const [chainId, setChainId] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [pendingWalletRequest, setPendingWalletRequest] =
+    useState<WalletRequestKind | null>(null);
+  const pendingRequestCount = useRef(0);
   const [revision, setRevision] = useState(0);
+
+  const requestWithTracking = useCallback(
+    async (
+      targetProvider: BrowserWalletProvider,
+      input: WalletRequestInput,
+    ): Promise<unknown> => {
+      const kind = walletRequestKind(input.method);
+      if (kind) {
+        pendingRequestCount.current += 1;
+        setPendingWalletRequest(kind);
+      }
+      try {
+        return await targetProvider.request(input);
+      } finally {
+        if (kind) {
+          pendingRequestCount.current -= 1;
+          if (pendingRequestCount.current === 0)
+            setPendingWalletRequest(null);
+        }
+      }
+    },
+    [],
+  );
+
+  const trackedProvider = useMemo<BrowserWalletProvider | null>(() => {
+    if (!provider) return null;
+    return new Proxy(provider, {
+      get(target, property, receiver) {
+        if (property === "request")
+          return (input: WalletRequestInput) =>
+            requestWithTracking(provider, input);
+        return Reflect.get(target, property, receiver);
+      },
+    });
+  }, [provider, requestWithTracking]);
 
   const applyContext = useCallback(
     (nextAddress: string | null, nextChainId: number | null) => {
@@ -174,10 +238,12 @@ export function WalletProvider({
     setStatus("connecting");
     setError(null);
     try {
-      const rawAccounts = await nextProvider.request({
+      const rawAccounts = await requestWithTracking(nextProvider, {
         method: "eth_requestAccounts",
       });
-      const rawChainId = await nextProvider.request({ method: "eth_chainId" });
+      const rawChainId = await requestWithTracking(nextProvider, {
+        method: "eth_chainId",
+      });
       const accounts = Array.isArray(rawAccounts) ? rawAccounts : [];
       const nextAddress = typeof accounts[0] === "string" ? accounts[0] : null;
       const nextChainId = parseChainId(rawChainId);
@@ -190,20 +256,30 @@ export function WalletProvider({
       setStatus("error");
       setError(friendlyWalletError(requestError));
     }
-  }, [applyContext, provider]);
+  }, [applyContext, provider, requestWithTracking]);
 
   const value = useMemo<WalletState>(
     () => ({
       status,
       address,
       chainId,
-      provider,
+      provider: trackedProvider,
       error,
+      pendingWalletRequest,
       revision,
       connect,
       clearError: () => setError(null),
     }),
-    [address, chainId, connect, error, provider, revision, status],
+    [
+      address,
+      chainId,
+      connect,
+      error,
+      pendingWalletRequest,
+      revision,
+      status,
+      trackedProvider,
+    ],
   );
 
   return (
@@ -281,5 +357,42 @@ export function WalletStateMessage() {
     <p className="rounded-lg border border-slate-800 bg-slate-950/60 p-3 text-sm leading-6 text-slate-400">
       {text}
     </p>
+  );
+}
+
+export function WalletConfirmationOverlay({
+  kind,
+}: {
+  readonly kind: WalletRequestKind;
+}) {
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="wallet-confirmation-title"
+      className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/95 px-6 py-8 backdrop-blur-sm"
+    >
+      <div className="w-full max-w-sm rounded-2xl border border-cyan-800 bg-slate-900 p-8 text-center shadow-2xl shadow-cyan-950/40">
+        <img
+          src="/logo.png"
+          alt="AURKA"
+          className="mx-auto h-20 w-20 rounded-full object-contain"
+        />
+        <h2
+          id="wallet-confirmation-title"
+          className="mt-5 text-xl font-semibold text-white"
+        >
+          Confirm in your wallet
+        </h2>
+        <p className="mt-2 text-sm leading-6 text-slate-300">
+          {kind === "transaction"
+            ? "Review and confirm the transaction in your wallet to continue."
+            : "Review and approve this request in your wallet to continue."}
+        </p>
+        <p className="mt-5 text-xs uppercase tracking-[0.16em] text-cyan-300">
+          Waiting for wallet confirmation…
+        </p>
+      </div>
+    </div>
   );
 }

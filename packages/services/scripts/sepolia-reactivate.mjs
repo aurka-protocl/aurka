@@ -175,7 +175,24 @@ async function main() {
   if (manifest.chain?.id !== CHAIN_ID) {
     throw new Error("Sepolia manifest has the wrong chain ID");
   }
-  if (!manifest.space?.createTransactionHash) {
+  const requestedSpace =
+    value("AURKA_SEPOLIA_SPACE_ID") ??
+    value("AURKA_SEPOLIA_SPACE_POSITION_ID");
+  let space = manifest.space;
+  if (requestedSpace && requestedSpace !== manifest.space?.spaceId) {
+    const spacesPath = path.resolve(
+      ROOT,
+      value("AURKA_SEPOLIA_SPACES_PATH") ?? ".aurka/sepolia-spaces.json",
+    );
+    const savedSpaces = JSON.parse(readFileSync(spacesPath, "utf8"));
+    space = (savedSpaces.spaces ?? []).find(
+      (candidate) =>
+        candidate?.positionId === requestedSpace ||
+        candidate?.positionIdHash?.toLowerCase() === requestedSpace.toLowerCase(),
+    );
+    if (!space) throw new Error(`Sepolia Space ${requestedSpace} was not found`);
+  }
+  if (!space?.spaceId && !space?.positionIdHash) {
     throw new Error("create the Sepolia Space before reactivating capacity");
   }
 
@@ -207,10 +224,13 @@ async function main() {
   const aqua = address(manifest.contracts.aqua.address, "Aqua");
   const tradeMath = address(manifest.contracts.tradeMath.address, "trade math");
   const swapVM = address(manifest.contracts.swapVM.address, "SwapVM");
-  const vault = address(manifest.space.vault, "Space vault");
-  const policyId = manifest.space.policyId;
-  const positionId = manifest.space.spaceId;
-  const strategyHash = manifest.space.strategyHash;
+  const vaultFactory = address(
+    manifest.contracts.vaultFactory.address,
+    "vault factory",
+  );
+  const policyId = space.policyId;
+  const positionId = space.positionIdHash ?? space.spaceId;
+  const strategyHash = space.strategyHash;
 
   const routerArtifact = artifact(
     "contracts/out/AurkaSepoliaSwapVMRouter.sol/AurkaSepoliaSwapVMRouter.json",
@@ -228,12 +248,25 @@ async function main() {
   const tradeMathArtifact = artifact(
     "contracts/out/AurkaSepoliaTradeMath.sol/AurkaSepoliaTradeMath.json",
   );
+  const vaultFactoryArtifact = artifact(
+    "contracts/out/AurkaSpaceVaultFactory.sol/AurkaSpaceVaultFactory.json",
+  );
 
   const routerContract = { address: router, abi: routerArtifact.abi };
   const registryContract = { address: registry, abi: registryArtifact.abi };
   const riskContract = { address: riskRegistry, abi: riskArtifact.abi };
   const oracleContract = { address: oracle, abi: oracleArtifact.abi };
   const aquaContract = { address: aqua, abi: aquaArtifact.abi };
+  const vault = address(
+    space.vault ??
+      (await publicClient.readContract({
+        address: vaultFactory,
+        abi: vaultFactoryArtifact.abi,
+        functionName: "vaultAddress",
+        args: [account.address, positionId],
+      })),
+    "Space vault",
+  );
 
   // The operator may refresh timestamps, but it must never use its authority
   // to make an incompatible immutable strategy appear tradable.
@@ -247,7 +280,7 @@ async function main() {
     ),
   );
   const canonicalCurrent = buildUpstreamStrategy({
-    maker: manifest.space.vault,
+    maker: vault,
     guard: manifest.oneInch.executionHelpers.swapVMGuard,
     traderInput: {
       token: manifest.tokens.weth.address,

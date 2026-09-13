@@ -146,7 +146,7 @@ export function invalidateSpaceCache(spaceId?: string): void {
 
 export function spaceUrl(
   spaceId: string,
-  section?: "overview" | "holdings" | "settings",
+  section?: "overview" | "holdings" | "activity" | "settings",
 ): string {
   const base = `/spaces/${encodeURIComponent(spaceId)}`;
   return section && section !== "overview" ? `${base}/${section}` : base;

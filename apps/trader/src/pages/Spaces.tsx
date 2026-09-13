@@ -8,6 +8,7 @@ import {
   spaceUrl,
   type SpaceRecord,
 } from "../domain/spaces";
+import { appMode } from "../config";
 import { displayAssetSymbol, lifecycleLabel, userFacingError } from "../ui";
 import { useWallet } from "../wallet";
 
@@ -86,9 +87,11 @@ function SpaceCard({ space }: { readonly space: SpaceRecord }) {
               Updated
             </dt>
             <dd
-              className={`mt-1 font-semibold ${freshness === "stale" ? "text-amber-300" : "text-emerald-300"}`}
+              className={`mt-1 font-semibold ${appMode === "testnet" ? "text-slate-300" : freshness === "stale" ? "text-amber-300" : "text-emerald-300"}`}
             >
-              {snapshot
+              {appMode === "testnet"
+                ? "Live data checked automatically"
+                : snapshot
                 ? `${freshness === "stale" ? "Needs refresh" : "Updated"} · ${formatSnapshotAge(snapshot.observedAt, now)}`
                 : space.identity.state === "DRAFT"
                   ? "Activation pending"
@@ -110,6 +113,14 @@ function SpaceCard({ space }: { readonly space: SpaceRecord }) {
       </article>
     </Link>
   );
+}
+
+function hasSpaceAmounts(space: SpaceRecord): boolean {
+  const assets = space.position?.currentPortfolio?.assets;
+  // If balances are unavailable, keep the Space visible rather than hiding
+  // funds that have not finished syncing yet.
+  if (!assets) return true;
+  return assets.some((asset) => BigInt(asset.balance) > 0n);
 }
 
 export default function Spaces() {
@@ -143,6 +154,12 @@ export default function Spaces() {
       active = false;
     };
   }, [refreshKey, wallet.address]);
+
+  const visibleSpaces = spaces.filter((space) => {
+    const isOwner =
+      wallet.address?.toLowerCase() === space.identity.ownerAddress.toLowerCase();
+    return !isOwner || hasSpaceAmounts(space);
+  });
 
   return (
     <section className="space-y-6 text-slate-200">
@@ -209,18 +226,20 @@ export default function Spaces() {
             Try again
           </button>
         </div>
-      ) : spaces.length === 0 ? (
+      ) : visibleSpaces.length === 0 ? (
         <div className="rounded-2xl border border-slate-700 bg-slate-900 p-6">
-          <h2 className="text-lg font-semibold text-white">No Spaces yet</h2>
+          <h2 className="text-lg font-semibold text-white">
+            No funded Spaces yet
+          </h2>
           <p className="mt-2 max-w-xl leading-6 text-slate-400">
             {wallet.address
-              ? "Create a Space to choose its assets, allocation ranges, and trade limit."
+              ? "Create or fund a Space to choose its assets, allocation ranges, and trade limit."
               : "Connect a wallet to create a Space."}
           </p>
         </div>
       ) : (
         <div className="grid gap-5 lg:grid-cols-2">
-          {spaces.map((space) => (
+          {visibleSpaces.map((space) => (
             <SpaceCard key={space.identity.id} space={space} />
           ))}
         </div>

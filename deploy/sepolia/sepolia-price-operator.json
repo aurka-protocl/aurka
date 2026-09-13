@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "operationsSubmitted": 23,
+  "failures": 0,
+  "unknownOutcomes": 2,
+  "lastRunAt": 1789248412,
+  "lastSuccessAt": 1789248435,
+  "lastAttemptAt": 1789248412,
+  "nextAttemptAt": null,
+  "lastError": null,
+  "pendingAction": null,
+  "budgetExhausted": false
+}

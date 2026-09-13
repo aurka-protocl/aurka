@@ -8,12 +8,12 @@ adapter and available actions.
 ## Canonical routes
 
 - `/spaces` lists the available managed portfolios.
-- `/spaces/:spaceId` is the Space overview.
+- `/spaces/:spaceId` is the Space overview, including ownership, rules, and
+  settings controls.
 - `/spaces/:spaceId/holdings` shows holdings and hard rules.
-- `/spaces/:spaceId/settings` shows identity, authority, and environment
-  controls when the fork adapter supports them.
+- `/spaces/:spaceId/activity` shows activity for that Space.
 - `/trade/:spaceId` is the Space-scoped trade flow.
-- `/activity` is the global activity feed.
+- `/activity` remains the global/protocol activity feed.
 
 The root route redirects to `/spaces`. Older `/swap`, `/history`, `/executions`,
 `/portfolio`, `/liquidity`, `/holdings`, `/positions`, `/protections`, `/risk`,

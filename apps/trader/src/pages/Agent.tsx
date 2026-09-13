@@ -7,7 +7,6 @@ import {
   delegatedControlTypedData,
   delegatedRecoveryTypedData,
   type AgentActivityEvent,
-  type AgentActivityStatus,
   type AgentMandate,
   type DelegatedControlAction,
   type DelegatedSession,
@@ -175,6 +174,24 @@ function recoverableBalanceState(
     : "empty";
 }
 
+function delegatedAllowanceNeedsApproval(
+  session: DelegatedSession | null,
+  status: DelegatedStatus | null,
+): boolean {
+  const allowance = status?.wallet.balances?.inputAllowance;
+  if (
+    !session ||
+    !allowance ||
+    !["AUTHORIZED", "ACTIVE"].includes(session.state)
+  )
+    return false;
+  try {
+    return BigInt(allowance) < BigInt(session.remainingInputBudget);
+  } catch {
+    return false;
+  }
+}
+
 function displayTokenBalance(raw: string, decimals: number): string {
   try {
     return formatTokenAmount(raw, decimals);
@@ -201,97 +218,253 @@ function activityTime(value: number): string {
   });
 }
 
+function agentActivitySummary(event: AgentActivityEvent): string {
+  if (event.code === "DELEGATED_EXECUTION_FAILED")
+    return "Waiting: the session allowance is being confirmed; the next check will retry automatically.";
+  if (event.eventType !== "MANDATE_ACTIVATED") return event.summary;
+  if (!/^Started:/.test(event.summary)) return event.summary;
+  return `${event.summary.replace(/^Started:/, "Rules approved:")} Start authorization is still required.`;
+}
+
+function activityEventLabel(eventType: AgentActivityEvent["eventType"]): string {
+  return (
+    {
+      MANDATE_ACTIVATED: "Rules approved",
+      EVALUATION_STARTED: "Evaluation started",
+      EVALUATION_WAITING: "Evaluation waiting",
+      PROVIDER_UNAVAILABLE: "Assistant unavailable",
+      DETERMINISTIC_REJECTED: "No trade",
+      APPROVAL_PENDING: "Approval pending",
+      TRADE_SUBMITTED: "Trade submitted",
+      TRADE_CONFIRMED: "Trade confirmed",
+      TRADE_REVERTED: "Trade reverted",
+      STOP_REQUESTED: "Stop requested",
+      STOP_CONFIRMED: "Trading stopped",
+      RECOVERY_PENDING: "Recovery pending",
+      RECOVERY_SUBMITTED: "Recovery submitted",
+      RECOVERY_CONFIRMED: "Recovery confirmed",
+      RECOVERY_REVERTED: "Recovery reverted",
+    }[eventType] ?? eventType.replace(/_/g, " ")
+  );
+}
+
+function activityToken(token: string | undefined) {
+  if (!token) return null;
+  const normalized = token.toLowerCase();
+  if (normalized === SEPOLIA_WETH) return { symbol: "WETH", decimals: 18 };
+  if (normalized === SEPOLIA_USDC) return { symbol: "USDC", decimals: 6 };
+  return { symbol: shortAddress(token), decimals: 18 };
+}
+
+function AgentTradeMovement({
+  event,
+  source,
+}: {
+  readonly event: AgentActivityEvent;
+  readonly source?: AgentActivityEvent;
+}) {
+  const details = source?.details;
+  const input = activityToken(details?.inputToken);
+  const output = activityToken(details?.outputToken);
+  if (!input || !output || !details?.inputAmount || !details.outputAmount)
+    return null;
+  if (event.eventType === "TRADE_REVERTED") return null;
+
+  return (
+    <p className="mt-1 font-mono text-sm text-emerald-200">
+      −{displayTokenBalance(details.inputAmount, input.decimals)} {input.symbol}{" "}
+      → +{displayTokenBalance(details.outputAmount, output.decimals)} {output.symbol}
+    </p>
+  );
+}
+
+function AgentEvaluationChecks({
+  session,
+  walletStatus,
+}: {
+  readonly session: DelegatedSession | null;
+  readonly walletStatus: DelegatedStatus | null;
+}) {
+  if (!session) return null;
+  const input = activityToken(session.plan.traderInputToken);
+  const output = activityToken(session.plan.traderOutputToken);
+  const balances = walletStatus?.wallet.balances;
+  const walletState = walletStatus
+    ? walletStatus.wallet.revoked
+      ? "Permission revoked"
+      : walletStatus.wallet.enabled
+        ? "Enabled"
+        : "Not enabled"
+    : "Checking current wallet status";
+  const balanceState = balances
+    ? `${displayTokenBalance(balances.inputToken, input?.decimals ?? 18)} ${input?.symbol ?? "input token"} available`
+    : "Checking current token balance";
+  const allowanceState = balances
+    ? `${displayTokenBalance(balances.inputAllowance, input?.decimals ?? 18)} ${input?.symbol ?? "input token"} allowance available`
+    : "Checking router allowance";
+  const checks = [
+    [
+      "Approved scope",
+      `Only ${session.plan.allowedSpaceIds[0] ?? "the selected Space"} and ${input?.symbol ?? "input token"} → ${output?.symbol ?? "output token"}`,
+    ],
+    ["Trading wallet", `${walletState}; checking chain and wallet identity`],
+    ["Gas and balance", `${balanceState}; checking ETH for transaction fees`],
+    ["Router allowance", allowanceState],
+    [
+      "Space market state",
+      "Refreshing the Space, balances, allocation rules, price and swap capacity",
+    ],
+    [
+      "Trade rules",
+      `At most ${displayTokenBalance(session.plan.perTradeInputAmount, input?.decimals ?? 18)} ${input?.symbol ?? "input token"} per trade; ${displayTokenBalance(session.remainingInputBudget, input?.decimals ?? 18)} remains in the approved budget`,
+    ],
+    [
+      "Deterministic execution",
+      "Discover Space → read conditions → request quote → simulate proposal",
+    ],
+  ] as const;
+
+  return (
+    <details className="mt-1 rounded-md border border-slate-800 bg-slate-950/40 px-2 py-1.5">
+      <summary className="cursor-pointer text-[10px] font-semibold uppercase tracking-[0.08em] text-cyan-200">
+        Agent logs
+      </summary>
+      <ol className="mt-2 space-y-1.5 text-[11px] text-slate-300">
+        {checks.map(([label, detail], index) => (
+          <li key={label} className="flex gap-2">
+            <span className="mt-0.5 flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full bg-slate-800 text-[9px] text-cyan-200">
+              {index + 1}
+            </span>
+            <span>
+              <span className="font-semibold text-white">{label}:</span>{" "}
+              {detail}
+            </span>
+          </li>
+        ))}
+      </ol>
+      <p className="mt-2 text-[11px] text-slate-500">
+        The assistant can propose a trade, but it cannot sign or submit one
+        outside these approved checks and limits.
+      </p>
+    </details>
+  );
+}
+
+function agentActivityStateMessage(
+  state: DelegatedSession["state"] | null,
+): string | null {
+  switch (state) {
+    case "AUTHORIZED":
+      return "The rules are approved, but automated trading has not started yet. Approve and start trading below.";
+    case "ACTIVE":
+      return "The agent is active. Each check below records whether it found a trade, waited, or was rejected by the approved rules.";
+    case "STOPPED":
+      return "Automated trading is stopped. Approve a new set of trading rules to resume.";
+    case "EXHAUSTED":
+      return "Trading stopped because the approved trade count or WETH budget was reached.";
+    case "EXPIRED":
+      return "Trading stopped because the approved trading rules expired.";
+    case "REVOKE_PENDING":
+      return "Trading is stopping while the trading-wallet permission is revoked.";
+    case "RECONCILIATION_REQUIRED":
+      return "Trading is paused until the pending transaction is reconciled.";
+    default:
+      return null;
+  }
+}
+
 function AgentActivityCard({
   events,
-  status,
+  sessionState,
+  session,
+  walletStatus,
 }: {
   readonly events: readonly AgentActivityEvent[];
-  readonly status: AgentActivityStatus | null;
+  readonly sessionState: DelegatedSession["state"] | null;
+  readonly session: DelegatedSession | null;
+  readonly walletStatus: DelegatedStatus | null;
 }) {
-  if (events.length === 0 && !status) return null;
+  const stateMessage = agentActivityStateMessage(sessionState);
   return (
-    <div className="rounded-2xl border border-slate-700 bg-slate-900/70 p-6">
-      <div className="flex flex-wrap items-start justify-between gap-3">
+    <div className="rounded-xl border border-slate-700 bg-slate-900/70 p-4">
+      <div className="flex flex-wrap items-start justify-between gap-2">
         <div>
-          <p className="text-sm font-semibold uppercase tracking-[0.18em] text-cyan-300">
-            Agent activity
+          <p className="text-xs font-semibold uppercase tracking-[0.15em] text-cyan-300">
+            Agent logs
           </p>
-          <p className="mt-2 text-sm text-slate-400">
-            Safe status updates for this account&apos;s automated trading
-            wallet.
+          <p className="mt-1 text-xs text-slate-400">
+            Each entry explains what the agent checked and why it traded, waited,
+            or stopped.
           </p>
         </div>
-        {status ? (
-          <span className="rounded-full border border-cyan-800 px-3 py-1 text-xs text-cyan-200">
-            {status.provider} · {status.model}
-          </span>
-        ) : null}
       </div>
-      {status ? (
-        <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-5">
-          <div>
-            <dt className="text-slate-500">Last check</dt>
-            <dd className="text-white">
-              {status.lastEvaluatedAt
-                ? activityTime(status.lastEvaluatedAt)
-                : "Not checked yet"}
-            </dd>
-          </div>
-          <div>
-            <dt className="text-slate-500">Next check</dt>
-            <dd className="text-white">
-              {status.nextCheckAt ? activityTime(status.nextCheckAt) : "Paused"}
-            </dd>
-          </div>
-          <div>
-            <dt className="text-slate-500">Confirmed trades</dt>
-            <dd className="text-white">
-              {status.confirmedTrades} / {status.maxTradeCount}
-            </dd>
-          </div>
-          <div>
-            <dt className="text-slate-500">Remaining budget</dt>
-            <dd className="text-white">
-              {status.remainingInputBudget
-                ? `${displayTokenBalance(status.remainingInputBudget, 18)} WETH`
-                : "Not set"}
-            </dd>
-          </div>
-          <div>
-            <dt className="text-slate-500">Rules expire</dt>
-            <dd className="text-white">
-              {status.expiresAt ? activityTime(status.expiresAt) : "Not set"}
-            </dd>
-          </div>
-        </dl>
+      {stateMessage ? (
+        <p className="mt-3 rounded-lg border border-cyan-900/70 bg-cyan-950/20 p-2 text-xs text-cyan-100">
+          {stateMessage}
+        </p>
       ) : null}
       {events.length > 0 ? (
-        <ol className="mt-5 space-y-3">
+        <ol className="mt-3 space-y-2">
           {events.slice(0, 8).map((event) => (
-            <li
-              key={event.id}
-              className="border-l-2 border-slate-700 pl-3 text-sm"
-            >
-              <p className="text-white">{event.summary}</p>
-              <p className="mt-1 text-xs text-slate-500">
-                {activityTime(event.occurredAt)} ·{" "}
-                {event.eventType.replace(/_/g, " ")}
-                {event.transactionHash ? (
-                  <a
-                    className="ml-2 text-cyan-300 underline"
-                    href={`https://sepolia.etherscan.io/tx/${event.transactionHash}`}
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    View transaction
-                  </a>
-                ) : null}
-              </p>
-            </li>
+            (() => {
+              const submittedTrade = events.find(
+                (candidate) =>
+                  candidate.eventType === "TRADE_SUBMITTED" &&
+                  ((event.correlationId &&
+                    candidate.correlationId === event.correlationId) ||
+                    (event.transactionHash &&
+                      candidate.transactionHash === event.transactionHash)),
+              );
+              const hasConfirmedTrade =
+                event.eventType === "TRADE_SUBMITTED" &&
+                events.some(
+                  (candidate) =>
+                    candidate.eventType === "TRADE_CONFIRMED" &&
+                    ((event.correlationId &&
+                      candidate.correlationId === event.correlationId) ||
+                      (event.transactionHash &&
+                        candidate.transactionHash === event.transactionHash)),
+                );
+              const movementSource =
+                event.eventType === "TRADE_CONFIRMED"
+                  ? submittedTrade ?? event
+                  : hasConfirmedTrade
+                    ? undefined
+                    : event;
+              return (
+                <li
+                  key={event.id}
+                  className="border-l-2 border-slate-700 pl-2 text-xs"
+                >
+                  <p className="text-white">{agentActivitySummary(event)}</p>
+                  <AgentTradeMovement event={event} source={movementSource} />
+                  {event.eventType === "EVALUATION_STARTED" ? (
+                    <AgentEvaluationChecks
+                      session={session}
+                      walletStatus={walletStatus}
+                    />
+                  ) : null}
+                  <p className="mt-1 text-[11px] text-slate-500">
+                    {activityTime(event.occurredAt)} ·{" "}
+                    {activityEventLabel(event.eventType)}
+                    {event.transactionHash ? (
+                      <a
+                        className="ml-2 text-cyan-300 underline"
+                        href={`https://sepolia.etherscan.io/tx/${event.transactionHash}`}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        View transaction
+                      </a>
+                    ) : null}
+                  </p>
+                </li>
+              );
+            })()
           ))}
         </ol>
       ) : (
-        <p className="mt-5 text-sm text-slate-400">No activity recorded yet.</p>
+        <p className="mt-3 text-xs text-slate-400">No logs recorded yet.</p>
       )}
     </div>
   );
@@ -307,6 +480,39 @@ function cleanAgentMessage(value: string): string {
     .replace(/\bbackground service\b/gi, "automated trading")
     .replace(/\bexecution signer\b/gi, "automated access")
     .replace(/\btest[- ]token balance\b/gi, "balance");
+}
+
+function AgentLatestUpdate({
+  session,
+}: {
+  readonly session: DelegatedSession;
+}) {
+  const message = cleanAgentMessage(session.lastResult ?? "No update yet");
+  const messageHash = message.match(/0x[a-fA-F0-9]{64}/)?.[0];
+  const transactionHash =
+    messageHash ?? session.lastTransactionHash ?? session.lastRecoveryTransactionHash;
+
+  if (!transactionHash) return <>{message}</>;
+
+  const hashIndex = message.indexOf(transactionHash);
+  const shortenedHash = shortAddress(transactionHash);
+  return (
+    <>
+      {hashIndex >= 0 ? message.slice(0, hashIndex) : `${message} · `}
+      <a
+        className="text-cyan-300 underline underline-offset-2"
+        href={`https://sepolia.etherscan.io/tx/${transactionHash}`}
+        target="_blank"
+        rel="noreferrer"
+        title={`View transaction ${transactionHash}`}
+      >
+        {shortenedHash}
+      </a>
+      {hashIndex >= 0
+        ? message.slice(hashIndex + transactionHash.length)
+        : null}
+    </>
+  );
 }
 
 function AgentBalanceCard({
@@ -400,8 +606,6 @@ export default function Agent() {
     null,
   );
   const [activity, setActivity] = useState<readonly AgentActivityEvent[]>([]);
-  const [activityStatus, setActivityStatus] =
-    useState<AgentActivityStatus | null>(null);
   const [eligibleSpaces, setEligibleSpaces] = useState<readonly SpaceRecord[]>(
     [],
   );
@@ -552,7 +756,6 @@ export default function Agent() {
       setSession(null);
       setWalletStatus(null);
       setActivity([]);
-      setActivityStatus(null);
       setStep(1);
       return;
     }
@@ -560,7 +763,6 @@ export default function Agent() {
     setSession(null);
     setWalletStatus(null);
     setActivity([]);
-    setActivityStatus(null);
     setStep(1);
     const connectedAddress = wallet.address;
     const connectedChainId = wallet.chainId;
@@ -637,18 +839,15 @@ export default function Agent() {
       wallet.chainId !== supportedChainId
     ) {
       setActivity([]);
-      setActivityStatus(null);
       return;
     }
     let active = true;
     const load = async () => {
       if (document.visibilityState === "hidden") return;
-      const [nextStatus, nextActivity] = await Promise.all([
-        client.agentActivityStatus(agent.id),
-        client.listAgentActivity(agent.id, { limit: 20 }),
-      ]);
+      const nextActivity = await client.listAgentActivity(agent.id, {
+        limit: 20,
+      });
       if (!active) return;
-      setActivityStatus(nextStatus);
       setActivity(nextActivity.items);
     };
     void load().catch(() => undefined);
@@ -836,6 +1035,12 @@ export default function Agent() {
 
   async function saveMandateAndStart(): Promise<void> {
     if (!agent || !wallet.address || !wallet.provider) return;
+    if (session?.state === "ACTIVE") {
+      setError(
+        "Automated trading is already active. Stop it before changing its instructions.",
+      );
+      return;
+    }
     setBusy("Saving your trading rules and starting automated trading…");
     setError(null);
     setNotice(null);
@@ -845,7 +1050,11 @@ export default function Agent() {
       agentWallet: shortAddress(agent.walletAddress),
       chainId: supportedChainId,
     });
+    let sessionToStart: DelegatedSession;
     try {
+      if (session?.state === "AUTHORIZED") {
+        sessionToStart = session;
+      } else {
       const spaces = await spaceAdapter.listSpaces(50);
       const availableSpaces = spaces.filter(supportsAgentSpace);
       const space =
@@ -932,16 +1141,64 @@ export default function Agent() {
         sessionExpiresAt: plan.expiresAt,
         spaceId: space.identity.id,
       });
-      const session = await client.authorizeDelegatedSession({
+      const authorizedSession = await client.authorizeDelegatedSession({
         plan,
         agentWallet: agent.walletAddress,
         signature: authorizationSignature,
       });
       agentLog("delegated.authorize.succeeded", {
-        sessionId: shortAddress(session.id),
-        state: session.state,
+        sessionId: shortAddress(authorizedSession.id),
+        state: authorizedSession.state,
       });
-      setSession(session);
+      setSession(authorizedSession);
+      sessionToStart = authorizedSession;
+      }
+      if (
+        !walletStatus?.wallet.balances ||
+        delegatedAllowanceNeedsApproval(sessionToStart, walletStatus)
+      ) {
+        const approvalMessage = "";
+        const approvalExpiresAt = Math.min(
+          sessionToStart.plan.expiresAt,
+          Math.floor(Date.now() / 1000) + 300,
+        );
+        const approvalNonce = bytes32();
+        const approvalRequestHash = delegatedControlRequestHash(approvalMessage);
+        const approvalSignature = await signTypedData(
+          wallet.provider,
+          wallet.address,
+          delegatedControlTypedData(
+            sessionToStart.plan,
+            sessionToStart.id,
+            agent.walletAddress,
+            "APPROVE",
+            approvalRequestHash,
+            approvalNonce,
+            approvalExpiresAt,
+          ),
+          "trading wallet approval",
+        );
+        stage = "approving-trading-wallet";
+        const approved = await client.approveDelegatedSession(
+          sessionToStart.id,
+          {
+            authorization: {
+              sessionId: sessionToStart.id,
+              ownerAddress: wallet.address,
+              agentWallet: agent.walletAddress,
+              chainId: supportedChainId,
+              action: "APPROVE",
+              requestHash: approvalRequestHash,
+              nonce: approvalNonce,
+              expiresAt: approvalExpiresAt,
+              signature: approvalSignature,
+            },
+          },
+        );
+        setSession(approved);
+        sessionToStart = approved;
+        setWalletStatus(await client.delegatedStatus().catch(() => walletStatus));
+      }
       const controlMessage =
         message.trim() || "Look for conservative WETH to USDC swaps";
       const controlExpiresAt = Math.floor(Date.now() / 1000) + 300;
@@ -951,8 +1208,8 @@ export default function Agent() {
         wallet.provider,
         wallet.address,
         delegatedControlTypedData(
-          session.plan,
-          session.id,
+          sessionToStart.plan,
+          sessionToStart.id,
           agent.walletAddress,
           "START",
           requestHash,
@@ -963,13 +1220,13 @@ export default function Agent() {
       );
       stage = "starting-session";
       agentLog("delegated.start.request", {
-        sessionId: shortAddress(session.id),
+        sessionId: shortAddress(sessionToStart.id),
         messageLength: controlMessage.length,
       });
-      const started = await client.startDelegatedSession(session.id, {
+      const started = await client.startDelegatedSession(sessionToStart.id, {
         message: controlMessage,
         authorization: {
-          sessionId: session.id,
+          sessionId: sessionToStart.id,
           ownerAddress: wallet.address,
           agentWallet: agent.walletAddress,
           chainId: supportedChainId,
@@ -1005,7 +1262,7 @@ export default function Agent() {
         requestError.code === "DELEGATED_EXECUTION_FAILED"
       ) {
         setError(
-          "Your trading rules were saved, but the first swap was not submitted. Check Activity and try again.",
+          "Your trading rules were saved, but the trading wallet approval is still being confirmed. The next check will retry automatically.",
         );
       } else {
         showAgentError(requestError, "Automated trading could not be started");
@@ -1020,7 +1277,9 @@ export default function Agent() {
     setBusy(
       action === "STOP"
         ? "Stopping automated trading…"
-        : "Refreshing trading status…",
+        : action === "APPROVE"
+          ? "Approving the trading wallet for this Space…"
+          : "Refreshing trading status…",
     );
     setError(null);
     setNotice(null);
@@ -1060,8 +1319,19 @@ export default function Agent() {
       const next =
         action === "STOP"
           ? await client.stopDelegatedSession(session.id, { authorization })
-          : session;
+          : action === "APPROVE"
+            ? await client.approveDelegatedSession(session.id, { authorization })
+            : await client.reconcileDelegatedSession(session.id, {
+                authorization,
+              });
       setSession(next);
+      if (action === "APPROVE") {
+        const status = await client.delegatedStatus().catch(() => null);
+        if (status) setWalletStatus(status);
+        setNotice(
+          "WETH approval submitted from the trading wallet. Once it confirms, the next automated check will retry the swap.",
+        );
+      }
     } catch (requestError) {
       showAgentError(requestError, "The agent control request failed");
     } finally {
@@ -1269,6 +1539,10 @@ export default function Agent() {
     (space) => space.identity.id === selectedSpaceId,
   );
   const recoveryBalanceState = recoverableBalanceState(walletStatus);
+  const approvalRequired = delegatedAllowanceNeedsApproval(
+    session,
+    walletStatus,
+  );
 
   return (
     <section className="mx-auto max-w-4xl space-y-6">
@@ -1285,25 +1559,27 @@ export default function Agent() {
         </p>
       </div>
 
-      <div
-        className="grid gap-2 sm:grid-cols-4"
-        aria-label="Automated trading setup steps"
-      >
-        {stepLabels.map((label, index) => {
-          const number = (index + 1) as Step;
-          return (
-            <div
-              key={label}
-              className={`rounded-xl border p-3 text-sm ${step === number ? "border-cyan-500 bg-cyan-950/40 text-white" : step > number ? "border-emerald-800 bg-emerald-950/20 text-emerald-200" : "border-slate-800 bg-slate-900/60 text-slate-500"}`}
-            >
-              <span className="mr-2">
-                {step > number ? <Check className="inline h-4 w-4" /> : number}
-              </span>
-              {label}
-            </div>
-          );
-        })}
-      </div>
+      {!session ? (
+        <div
+          className="grid gap-2 sm:grid-cols-4"
+          aria-label="Automated trading setup steps"
+        >
+          {stepLabels.map((label, index) => {
+            const number = (index + 1) as Step;
+            return (
+              <div
+                key={label}
+                className={`rounded-xl border p-3 text-sm ${step === number ? "border-cyan-500 bg-cyan-950/40 text-white" : step > number ? "border-emerald-800 bg-emerald-950/20 text-emerald-200" : "border-slate-800 bg-slate-900/60 text-slate-500"}`}
+              >
+                <span className="mr-2">
+                  {step > number ? <Check className="inline h-4 w-4" /> : number}
+                </span>
+                {label}
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
 
       {wallet.status !== "connected" || wallet.chainId !== supportedChainId ? (
         <WalletStateMessage />
@@ -1360,32 +1636,53 @@ export default function Agent() {
             busy={!!busy}
             onRefresh={() => void refreshAgentStatus()}
           />
-          <dl className="mt-5 grid gap-3 text-sm sm:grid-cols-4">
-            <div>
+          {approvalRequired ? (
+            <div className="mt-4 rounded-xl border border-amber-700/70 bg-amber-950/20 p-4">
+              <p className="text-sm font-semibold text-amber-200">
+                One approval covers the agent&apos;s remaining WETH budget
+              </p>
+              <p className="mt-1 text-sm leading-6 text-amber-100/80">
+                The trading wallet has WETH, but this Space&apos;s router is not
+                allowed to use the remaining approved budget yet. Approve it
+                once from your connected wallet; the approval transaction is
+                sent by the trading wallet.
+              </p>
+              <button
+                type="button"
+                onClick={() => void controlAgent("APPROVE")}
+                disabled={!!busy}
+                className="mt-3 rounded-lg bg-amber-300 px-4 py-2 font-semibold text-slate-950 disabled:opacity-50"
+              >
+                Approve WETH for this Space
+              </button>
+            </div>
+          ) : null}
+          <dl className="mt-5 grid min-w-0 gap-3 text-sm sm:grid-cols-4">
+            <div className="min-w-0">
               <dt className="text-slate-500">Remaining WETH budget</dt>
               <dd className="text-white">
                 {displayTokenBalance(session.remainingInputBudget, 18)} WETH
               </dd>
             </div>
-            <div>
+            <div className="min-w-0">
               <dt className="text-slate-500">Confirmed trades</dt>
               <dd className="text-white">
                 {session.tradeCount} / {session.plan.maxTradeCount}
               </dd>
             </div>
-            <div>
+            <div className="min-w-0">
               <dt className="text-slate-500">Latest update</dt>
-              <dd className="text-white">
-                {cleanAgentMessage(session.lastResult ?? "No update yet")}
+              <dd className="break-words text-white">
+                <AgentLatestUpdate session={session} />
               </dd>
             </div>
-            <div>
+            <div className="min-w-0">
               <dt className="text-slate-500">Space</dt>
               <dd className="text-white">Selected Space</dd>
             </div>
           </dl>
           <div className="mt-5 flex flex-wrap gap-3">
-            {["AUTHORIZED", "ACTIVE"].includes(session.state) ? (
+            {session.state === "ACTIVE" ? (
               <button
                 type="button"
                 onClick={() => void controlAgent("STOP")}
@@ -1487,7 +1784,12 @@ export default function Agent() {
       ) : null}
 
       {agent ? (
-        <AgentActivityCard events={activity} status={activityStatus} />
+        <AgentActivityCard
+          events={activity}
+          sessionState={session?.state ?? null}
+          session={session}
+          walletStatus={walletStatus}
+        />
       ) : null}
 
       {step === 1 && !agent && (
@@ -1685,7 +1987,12 @@ export default function Agent() {
         </div>
       )}
 
-      {step === 4 && agent && (
+      {step === 4 &&
+      agent &&
+      (!session ||
+        ["AUTHORIZED", "STOPPED", "EXPIRED", "EXHAUSTED"].includes(
+          session.state,
+        )) && (
         <div className="rounded-2xl border border-cyan-800/70 bg-cyan-950/20 p-6">
           <ShieldCheck className="h-8 w-8 text-emerald-300" />
           <h2 className="mt-4 text-xl font-semibold text-white">
