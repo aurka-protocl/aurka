@@ -1853,7 +1853,14 @@ export class DelegatedSessionService {
       );
     const pendingRecovery = this.service.repository
       .listDelegatedRecoveries(id)
-      .find((recovery) => ["SUBMITTED", "UNKNOWN"].includes(recovery.status));
+      // A recovery without a transaction hash never reached the chain. It is
+      // safe to retry it, and in particular avoids permanently locking the
+      // wallet after Privy rejects the reviewed transfer before signing.
+      .find(
+        (recovery) =>
+          ["SUBMITTED", "UNKNOWN"].includes(recovery.status) &&
+          recovery.transactionHash !== undefined,
+      );
     if (pendingRecovery)
       throw new ServiceError(
         "DELEGATED_RECOVERY_RECONCILIATION_REQUIRED",

@@ -543,7 +543,7 @@ it("rejects unapproved runtime metadata before composing adapters", () => {
 it("accepts the checked-in non-secret runtime fixture", () => {
   const path = fileURLToPath(
     new URL(
-      "../../../docs/examples/risk-runtime.fixture.json",
+      "./fixtures/risk-runtime.fixture.json",
       import.meta.url,
     ),
   );

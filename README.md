@@ -1,123 +1,69 @@
 # AURKA
 
-AURKA is an agentic, portfolio-constrained liquidity protocol. Treasuries define
-the portfolio states they are willing to accept; solvers discover transactions
-that remain inside those rules, and contracts independently verify settlement.
+AURKA lets portfolio owners offer tokens for swaps within allocation ranges and
+per-trade limits. A **Space** is a portfolio held in a dedicated on-chain vault.
+The solver calculates an executable swap amount and fee; contracts validate
+settlement against the Space's constraints.
 
-## Implementation status
+For example, a Space can require USDC to remain at least 55% of its value. A
+swap that would cross that boundary is reduced for review or rejected. Market
+movements can still change allocations; Spaces do not automatically rebalance.
 
-Phases 1–3 establish the pnpm monorepo, shared runtime schemas and financial
-core, and the Foundry policy/risk contract suite. Phase 3.5 resolves capacity,
-bounded fees, complete fee accounting, direct pairwise settlement previews, and
-deterministic price protection. AURKA-005 adds an atomic, local direct
-Aqua-compatible settlement adapter with signed commitments. AURKA-006 adds the
-local deterministic solver/API/persistence/indexer service package. MVP-002 adds
-persistent multiple Spaces, owner-signed lifecycle mutations, isolated local
-demo allocations, and wallet-created fork Spaces with separate treasury vaults
-and receipt-verified policy, funding, and capacity setup.
+[App](https://aurka-six.vercel.app)
 
-## Requirements
+## Features
 
-- Node.js 23.3.0 (see `.node-version`)
-- pnpm 10.13.1
+- Create and fund separate Spaces with owner-authorized configuration.
+- Quote and execute swaps through Aqua and SwapVM with allocation, capacity and
+  price checks.
+- Create a per-user Privy trading wallet, fund it with test assets and authorize
+  a bounded trading mandate.
+- Use Gemini through Vertex AI for chat and trade proposals. The solver
+  validates proposals before delegated signing.
+- Inspect agent decisions and transaction activity, stop trading permissions and
+  recover tokens to the owner wallet.
 
-## Development
+The current deployment uses Ethereum Sepolia, mock USDC/WETH and demo oracle
+prices. Agent wallets are operator-managed through Privy. This is a hackathon
+prototype; live flows depend on RPC availability, current prices, capacity and
+configured providers. It is not audited for production funds.
+
+## Architecture
+
+| Component         | Implementation                                                       |
+| ----------------- | -------------------------------------------------------------------- |
+| Frontend          | React, Vite, TypeScript; hosted on Vercel                            |
+| API and worker    | Node.js, SQLite, persistent Google Cloud Compute Engine service      |
+| Settlement        | Solidity, Aqua liquidity, SwapVM execution and AURKA policy checks   |
+| Delegated wallets | Privy wallet provisioning, signing policies, revocation and recovery |
+| Model access      | Vertex AI, `gemini-3.1-flash-lite`, server-side credentials          |
+
+The API reads chain state for quotes and checks commitments before execution.
+Agent evaluations run on the server independently of the browser. Chat does not
+authorize transactions.
+
+## Run locally against Sepolia
+
+Requirements: **Node.js 24**, **pnpm 10.13.1**, Foundry with Solidity **0.8.28**
+and **0.8.30**, and a Sepolia RPC endpoint.
 
 ```bash
+corepack enable
 pnpm install --frozen-lockfile
-pnpm format:check
-pnpm lint
-pnpm typecheck
-pnpm test
 pnpm build
-```
-
-Workspace packages live in `apps/*`, `packages/*`, and `packages/agents/*`.
-`@aurka/shared` is the canonical source for cross-layer data contracts. Monetary
-amounts are represented at JSON boundaries as unsigned base-10 integer strings,
-which avoids precision loss and forces callers to make token decimals explicit.
-
-The local contracts compile with Solidity 0.8.28. The pinned upstream Aqua and
-SwapVM wrapper compile separately with Solidity 0.8.30 into the ignored
-`contracts/out-upstream/` directory; the real upstream contract test deploys
-those creation artifacts through compatible local interfaces. Build and verify
-that boundary before running the contract suite:
-
-```bash
+forge build
 pnpm contracts:build-upstream
-pnpm contracts:check-upstream
-pnpm contracts:test
+cp deploy/sepolia/sepolia.env.example .env.sepolia
 ```
+## Try the app
 
-The generated manifest records the compiler settings, vendored source pins,
-source fingerprint, and artifact hashes. A missing or stale manifest/artifact
-fails the check with the rebuild command.
-
-## Current package
-
-- `@aurka/shared`: addresses, amounts, policies, risk certificates, trade
-  intents, solver proposals, quotes, positions, executions, events, and API
-  response schemas.
-- `@aurka/services`: direct solver, closed optimized-solver boundary, `/v1` API,
-  Drizzle/SQLite repository, persistent Space management, deterministic event
-  indexer, local fixture, Docker Compose, and simulation CI.
-- `contracts`: governance-owned hard policies, signed tightening-only risk
-  certificates, maximum-safe-fill verification, bounded OptionSpace fees, and
-  the atomic direct settlement router.
-
-Contract design and commands are documented in
-[`docs/contracts.md`](docs/contracts.md). GitHub Actions run TypeScript and
-Foundry checks independently; CI never receives the local `.env` file.
-
-## Safety
-
-This repository is under active development. It is not audited and must not be
-used with production funds.
-
-# aurka
-
-## SDK and local applications
-
-Run `pnpm install --frozen-lockfile` and `pnpm build` at the repository root.
-Start the API with `pnpm --filter @aurka/services start` (port 8787), then the
-canonical app with `pnpm --filter @aurka/trader-app dev` (port 3002). The app's
-development proxy forwards `/api` to the API with that prefix removed. It
-exposes Spaces, Trade, and Activity from one frontend origin; the former
-treasury package is retained as historical source while its product surfaces are
-served by the canonical app.
-
-The trader can prepare an intent, quote, solve, and request unsigned execution
-calldata after supplying an external trader signature. It does not broadcast.
-Unavailable balances, P&L, history feeds and effective risk are labeled as such.
-See [SDK usage](packages/sdk/README.md), [API semantics](docs/api.md), and
-[watchtower runtime requirements](docs/risk-watchtower.md). For the complete
-local product journey, measured demo values, manual acceptance checklist, and
-issue template, see the [product walkthrough](docs/product-walkthrough.md). The
-hosted deployment packet and ETHOnline submission copy are in the
-[hosted demo runbook](docs/hosted-demo.md) and
-[submission packet](docs/ethonline-submission.md); neither claims a public
-deployment until its external checks are recorded.
-
-## Fork Space creation validation
-
-With an Ethereum archive `MAINNET_RPC_URL` in `.env`, build with
-`pnpm build && forge build`. Start an isolated validation environment without
-resetting the default fork:
-
-```bash
-AURKA_FORK_DIR="$PWD/.fork-space/mvp002-validation" node --env-file=.env packages/services/scripts/fork-space.mjs
-```
-
-In another terminal, run the two-Space browser flow against a fresh validation
-fork (it uses that fork's public test wallets and real local transactions):
-
-```bash
-AURKA_FORK_DIR="$PWD/.fork-space/mvp002-validation" node packages/services/scripts/fork-spaces-e2e.mjs
-```
-
-The flow creates drafts in the UI, activates independent funded treasuries,
-quotes/trades against both, and checks receipt-backed policy changes. Evidence
-is written under the selected fork directory's `evidence/`.
-`AURKA_SPACE_IDS=id1,id2` resumes checks for existing Spaces after a
-service/fork restart. The injected EIP-1193 test wallet does not establish
-compatibility with every browser extension.
+1. Open **Spaces** and inspect a Space's holdings, allocation ranges and
+   available capacity.
+2. In **Trade**, connect a Sepolia wallet with the deployment's mock tokens.
+   Request a quote, review the amounts and fee, then approve and submit through
+   the wallet.
+3. In **Automated trading**, create a trading wallet, add test funds and select
+   a Space. Set the input amount, total budget, minimum rate and expiry, then
+   sign the instructions.
+4. Follow the agent activity and receipt links. Stop the agent before recovering
+   its tokens to your owner wallet.

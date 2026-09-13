@@ -158,6 +158,8 @@ const errorLabels: Record<string, string> = {
   NOT_FOUND: "That page or record is no longer available.",
   PRICING_NEEDS_RENEWAL:
     "This Space needs an updated price before trading can resume.",
+  CAPACITY_PRICE_SYNC_REQUIRED:
+    "This Space's trading capacity needs to sync with its updated price. Request a new quote after renewal; no additional token approval is needed for this error.",
   PRICING_RENEWAL_REQUIRED:
     "This Space needs an updated price before trading can resume.",
   STRATEGY_MISMATCH:

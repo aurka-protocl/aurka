@@ -236,6 +236,31 @@ function sourceClock(source: TradeSource | undefined): number {
   return Math.floor(Date.now() / 1000);
 }
 
+function statePart(value: unknown): string {
+  return value === undefined || value === null ? "" : String(value);
+}
+
+function portfolioStateKey(
+  portfolio: Position["currentPortfolio"] | undefined,
+): string {
+  if (!portfolio) return "";
+  return [
+    statePart(portfolio.nav),
+    statePart(portfolio.valueDecimals),
+    ...portfolio.assets.map((asset) =>
+      [
+        statePart(asset.token).toLowerCase(),
+        statePart(asset.balance),
+        statePart(asset.decimals),
+        statePart(asset.price),
+        statePart(asset.priceDecimals),
+        statePart(asset.value),
+        statePart(asset.weightBps),
+      ].join(":"),
+    ),
+  ].join("|");
+}
+
 function quoteIsStale(
   result: QuoteResult,
   source: TradeSource | undefined,
@@ -246,8 +271,8 @@ function quoteIsStale(
   if (source.position.policy.paused) return true;
   if (result.quote.policyNonce !== source.position.policy.nonce) return true;
   if (
-    result.quote.currentPortfolio.snapshotHash.toLowerCase() !==
-    source.position.currentPortfolio.snapshotHash.toLowerCase()
+    portfolioStateKey(result.quote.currentPortfolio) !==
+    portfolioStateKey(source.position.currentPortfolio)
   )
     return true;
   if (
@@ -257,6 +282,30 @@ function quoteIsStale(
   )
     return true;
   return false;
+}
+
+function sourceCommittedByQuote(source: TradeSource, quote: Quote): TradeSource {
+  if (!source.testnet) return source;
+  const currentPortfolio = quote.currentPortfolio;
+  return {
+    ...source,
+    position: {
+      ...source.position,
+      currentPortfolio,
+    },
+    testnet: {
+      ...source.testnet,
+      position: {
+        ...source.testnet.position,
+        currentPortfolio,
+      },
+      capacity: {
+        ...source.testnet.capacity,
+        id: quote.capacityEpochId,
+        consumed: quote.consumedBefore,
+      },
+    },
+  };
 }
 
 function typedIntent(intent: AtomicSettlementIntent, testnet: TestnetState) {
@@ -301,7 +350,7 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
   const [sourceError, setSourceError] = useState<string | null>(null);
   const [pageError, setPageError] = useState<string | null>(null);
   const [pairKey, setPairKey] = useState("");
-  const [amount, setAmount] = useState("");
+  const [amount, setAmount] = useState("0.0025");
   const [quoteResult, setQuoteResult] = useState<QuoteResult>();
   const [confirmed, setConfirmed] = useState<Receipt>();
   const [stage, setStage] = useState<TradeStage>("idle");
@@ -310,16 +359,22 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
   const [busy, setBusy] = useState(false);
   const [clock, setClock] = useState(() => Math.floor(Date.now() / 1000));
   const [walletInputBalance, setWalletInputBalance] = useState<bigint>();
+  const unavailableSpaceIds = useRef(new Set<string>());
   const [amountAdjustment, setAmountAdjustment] = useState<AmountAdjustment>();
   const flowVersion = useRef(0);
   const nonce = useRef(Date.now());
   const sourceRef = useRef<TradeSource>();
+  const quoteResultRef = useRef<QuoteResult>();
   const routedSelection = useRef(false);
 
   function publishSource(next: TradeSource) {
     sourceRef.current = next;
     setSource(next);
   }
+
+  useEffect(() => {
+    quoteResultRef.current = quoteResult;
+  }, [quoteResult]);
 
   function invalidateQuote(clearConfirmation = true) {
     flowVersion.current += 1;
@@ -441,7 +496,10 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
         active = false;
       };
     const timer = window.setInterval(() => {
-      void refresh();
+      // Keep the reviewed offer stable while the user is deciding. If chain
+      // state changes, signAndPrepare performs one authoritative read and
+      // transparently rebuilds the quote before asking for a signature.
+      if (quoteResultRef.current === undefined) void refresh();
     }, 2_000);
     return () => {
       active = false;
@@ -501,9 +559,22 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
   const sourceSnapshotHash = source?.position.currentPortfolio?.snapshotHash;
   useEffect(() => {
     if (amountAdjustment !== undefined) setAmountAdjustment(undefined);
-    if (quoteResult !== undefined) invalidateQuote(false);
+    if (quoteResult !== undefined) {
+      const sameSpace =
+        source?.space.identity.id === quoteResult.source.space.identity.id;
+      const samePortfolio =
+        portfolioStateKey(source?.position.currentPortfolio) ===
+        portfolioStateKey(quoteResult.quote.currentPortfolio);
+      const sameCapacity =
+        !source?.testnet ||
+        source.testnet.capacity.id.toLowerCase() ===
+          quoteResult.quote.capacityEpochId.toLowerCase();
+      if (!(sameSpace && samePortfolio && sameCapacity))
+        invalidateQuote(false);
+    }
     // A new authoritative price/balance snapshot invalidates both a quote and
-    // any earlier adjustment consent.
+    // any earlier adjustment consent. Keep the quote when this is only the
+    // refresh caused by routing to the Space that produced it.
   }, [pairKey, sourceSnapshotHash]);
 
   useEffect(() => {
@@ -530,6 +601,13 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
     setAmount(value);
   }
 
+  function cancelQuoteReview() {
+    invalidateQuote();
+    setAmountAdjustment(undefined);
+    setError(null);
+    setStatus("Enter an amount to see the rate");
+  }
+
   function assertVersion(version: number, walletRevision?: number) {
     if (version !== flowVersion.current)
       throw new Error(
@@ -541,7 +619,10 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
       );
   }
 
-  async function requestQuote(acceptedAmount?: bigint) {
+  async function requestQuote(
+    acceptedAmount?: bigint,
+    preferredSpaceId?: string,
+  ) {
     if (!source || !pair)
       throw new Error("Swaps are temporarily unavailable. Try again shortly.");
     const version = ++flowVersion.current;
@@ -555,12 +636,16 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
           ? wallet.address
           : (wallet.address ?? DEMO_TRADER);
       if (!trader) throw new Error("Connect your wallet before continuing.");
-      const candidateIds = routeSpaceId
-        ? [routeSpaceId]
-        : spaces
-            .filter((candidate) => candidate.identity.state === "ACTIVE")
-            .map((candidate) => candidate.identity.id);
-      const ids = candidateIds.length ? candidateIds : [selectedSpaceId];
+      const candidateIds = preferredSpaceId
+        ? [preferredSpaceId]
+        : routeSpaceId
+          ? [routeSpaceId]
+          : spaces
+              .filter((candidate) => candidate.identity.state === "ACTIVE")
+              .map((candidate) => candidate.identity.id);
+      const ids = (candidateIds.length ? candidateIds : [selectedSpaceId]).filter(
+        (id) => !unavailableSpaceIds.current.has(id),
+      );
       let best: QuoteResult | undefined;
       let firstError: unknown;
       for (const id of ids) {
@@ -642,8 +727,9 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
           });
           const quote = await client.quote(intent);
           const solved = await client.solve(intent);
+          const committedSource = sourceCommittedByQuote(latest, quote);
           const candidate: QuoteResult = {
-            source: latest,
+            source: committedSource,
             intent,
             quote,
             solved,
@@ -656,6 +742,13 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
           )
             best = candidate;
         } catch (candidateError) {
+          if (
+            errorCode(candidateError) === "STRATEGY_MISMATCH" ||
+            /incompatible SwapVM strategy/i.test(
+              candidateError instanceof Error ? candidateError.message : "",
+            )
+          )
+            unavailableSpaceIds.current.add(id);
           firstError ??= candidateError;
         }
       }
@@ -901,6 +994,22 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
         }),
       );
     } catch (requestError: unknown) {
+      const staleExecution =
+        errorCode(requestError) === "INVALID_SNAPSHOT" ||
+        errorCode(requestError) === "COMMITMENT_MISMATCH" ||
+        /rate changed|price snapshot is stale|balance snapshot is stale|snapshot.*stale/i.test(
+          requestError instanceof Error ? requestError.message : "",
+        );
+      if (version === flowVersion.current && staleExecution) {
+        // A capacity/oracle renewal can land after the review was signed.
+        // No swap was submitted, so transparently rebuild the quote instead
+        // of presenting a false failed-trade state to the user.
+        setError(null);
+        setStage("quoting");
+        setStatus("The rate changed — updating the offer…");
+        await requestQuote(undefined, quoteResult.source.space.identity.id);
+        return;
+      }
       if (
         version === flowVersion.current &&
         errorCode(requestError) === "SIMULATION_FAILED"
@@ -1033,95 +1142,98 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
         </section>
       ) : (
         <>
-          <form
-            className="space-y-4 rounded-2xl border border-slate-700 bg-slate-900/70 p-5 sm:p-6"
-            onSubmit={(event) => {
-              event.preventDefault();
-              run(requestQuote);
-            }}
-          >
-            <div>
-              <h2 className="text-xl font-semibold text-white">Swap tokens</h2>
-              <p className="mt-1 text-sm leading-6 text-slate-400">
-                We&apos;ll automatically find the best available rate.
-              </p>
-            </div>
-            <div className="flex items-center justify-between rounded-xl border border-slate-700 bg-slate-800 p-4">
-              <div>
-                <p className="text-xs uppercase tracking-wide text-slate-500">
-                  Sell
-                </p>
-                <p className="mt-1 text-lg font-semibold text-white">
-                  {inputSymbol}
-                </p>
-              </div>
-              <span className="text-xl text-slate-500" aria-hidden="true">
-                →
-              </span>
-              <div className="text-right">
-                <p className="text-xs uppercase tracking-wide text-slate-500">
-                  Receive
-                </p>
-                <p className="mt-1 text-lg font-semibold text-white">
-                  {outputSymbol}
-                </p>
-              </div>
-            </div>
-            <label className="block text-sm">
-              <span className="font-medium text-slate-200">Amount to sell</span>
-              <div className="mt-1 flex items-center rounded-lg border border-slate-700 bg-slate-800 focus-within:border-cyan-500">
-                <input
-                  required
-                  inputMode="decimal"
-                  autoComplete="off"
-                  aria-label={`Amount to sell in ${inputSymbol}`}
-                  value={amount}
-                  onChange={(event) => updateAmount(event.target.value)}
-                  placeholder="0"
-                  min="0"
-                  className="min-w-0 flex-1 bg-transparent p-2.5 text-slate-100 outline-none"
-                />
-                <span className="px-3 text-sm text-slate-400">
-                  {inputSymbol}
-                </span>
-              </div>
-              <div className="mt-1 flex items-center justify-between text-xs text-slate-500">
-                <span>
-                  {walletInputBalance === undefined
-                    ? "Balance unavailable"
-                    : `Balance: ${formatTokenAmount(walletInputBalance, pair.input.decimals)} ${inputSymbol}`}
-                </span>
-                <button
-                  type="button"
-                  disabled={walletInputBalance === undefined}
-                  onClick={() =>
-                    walletInputBalance !== undefined &&
-                    updateAmount(
-                      formatTokenAmount(
-                        walletInputBalance,
-                        pair.input.decimals,
-                      ),
-                    )
-                  }
-                  className="font-medium text-cyan-300 hover:text-cyan-200 disabled:cursor-not-allowed disabled:opacity-40"
-                >
-                  Max
-                </button>
-              </div>
-            </label>
-            <button
-              type="submit"
-              disabled={
-                busy ||
-                !amount.trim() ||
-                noLiquidity ||
-                (appMode === "testnet" && wallet.status !== "connected")
-              }
-              className="min-h-11 rounded-lg bg-cyan-600 px-5 py-3 font-medium text-white transition hover:bg-cyan-500 disabled:cursor-not-allowed disabled:opacity-50"
+          {!quoteResult && (
+            <form
+              className="space-y-4 rounded-2xl border border-slate-700 bg-slate-900/70 p-5 sm:p-6"
+              onSubmit={(event) => {
+                event.preventDefault();
+                run(requestQuote);
+              }}
             >
-              {stage === "quoting" ? "Finding best rate…" : "Review swap"}
-            </button>
-          </form>
+              <div>
+                <h2 className="text-xl font-semibold text-white">Swap tokens</h2>
+                <p className="mt-1 text-sm leading-6 text-slate-400">
+                  We&apos;ll check the available Spaces and find the best rate that
+                  can complete this swap.
+                </p>
+              </div>
+              <div className="flex items-center justify-between rounded-xl border border-slate-700 bg-slate-800 p-4">
+                <div>
+                  <p className="text-xs uppercase tracking-wide text-slate-500">
+                    Sell
+                  </p>
+                  <p className="mt-1 text-lg font-semibold text-white">
+                    {inputSymbol}
+                  </p>
+                </div>
+                <span className="text-xl text-slate-500" aria-hidden="true">
+                  →
+                </span>
+                <div className="text-right">
+                  <p className="text-xs uppercase tracking-wide text-slate-500">
+                    Receive
+                  </p>
+                  <p className="mt-1 text-lg font-semibold text-white">
+                    {outputSymbol}
+                  </p>
+                </div>
+              </div>
+              <label className="block text-sm">
+                <span className="font-medium text-slate-200">Amount to sell</span>
+                <div className="mt-1 flex items-center rounded-lg border border-slate-700 bg-slate-800 focus-within:border-cyan-500">
+                  <input
+                    required
+                    inputMode="decimal"
+                    autoComplete="off"
+                    aria-label={`Amount to sell in ${inputSymbol}`}
+                    value={amount}
+                    onChange={(event) => updateAmount(event.target.value)}
+                    placeholder="0.0025"
+                    min="0"
+                    className="min-w-0 flex-1 bg-transparent p-2.5 text-slate-100 outline-none"
+                  />
+                  <span className="px-3 text-sm text-slate-400">
+                    {inputSymbol}
+                  </span>
+                </div>
+                <div className="mt-1 flex items-center justify-between text-xs text-slate-500">
+                  <span>
+                    {walletInputBalance === undefined
+                      ? "Balance unavailable"
+                      : `Balance: ${formatTokenAmount(walletInputBalance, pair.input.decimals)} ${inputSymbol}`}
+                  </span>
+                  <button
+                    type="button"
+                    disabled={walletInputBalance === undefined}
+                    onClick={() =>
+                      walletInputBalance !== undefined &&
+                      updateAmount(
+                        formatTokenAmount(
+                          walletInputBalance,
+                          pair.input.decimals,
+                        ),
+                      )
+                    }
+                    className="font-medium text-cyan-300 hover:text-cyan-200 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    Max
+                  </button>
+                </div>
+              </label>
+              <button
+                type="submit"
+                disabled={
+                  busy ||
+                  !amount.trim() ||
+                  noLiquidity ||
+                  (appMode === "testnet" && wallet.status !== "connected")
+                }
+                className="min-h-11 rounded-lg bg-cyan-600 px-5 py-3 font-medium text-white transition hover:bg-cyan-500 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {stage === "quoting" ? "Checking available Spaces…" : "Review swap"}
+              </button>
+            </form>
+          )}
 
           {amountAdjustment && pair && (
             <AmountAdjustmentReview
@@ -1177,9 +1289,39 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
               mode={appMode}
               onSign={() => run(signAndPrepare)}
               onRequote={() => run(requestQuote)}
+              onCancel={cancelQuoteReview}
             />
           )}
         </>
+      )}
+
+      {stage === "quoting" && (
+        <div
+          role="status"
+          aria-live="polite"
+          aria-modal="true"
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/95 px-6 py-8 backdrop-blur-sm"
+        >
+          <div className="w-full max-w-sm rounded-2xl border border-cyan-700/70 bg-slate-900 p-8 text-center shadow-2xl">
+            <img
+              src="/logo.png"
+              alt="AURKA"
+              className="mx-auto h-14 w-14 object-contain"
+            />
+            <p className="mt-5 text-xs font-semibold uppercase tracking-[0.2em] text-cyan-300">
+              AURKA
+            </p>
+            <h2 className="mt-3 text-xl font-semibold text-white">
+              Checking available Spaces
+            </h2>
+            <p className="mt-2 text-sm leading-6 text-slate-400">
+              Finding the best Space that can complete this swap.
+            </p>
+            <div className="mx-auto mt-6 h-1.5 w-40 overflow-hidden rounded-full bg-slate-700">
+              <div className="h-full w-1/2 animate-pulse rounded-full bg-cyan-400" />
+            </div>
+          </div>
+        </div>
       )}
 
       {confirmed && (
@@ -1293,6 +1435,7 @@ function QuoteReview({
   mode,
   onSign,
   onRequote,
+  onCancel,
 }: {
   readonly result: QuoteResult;
   readonly inputAsset: AssetSnapshot;
@@ -1305,6 +1448,7 @@ function QuoteReview({
   readonly mode: "demo" | "testnet";
   readonly onSign: () => void;
   readonly onRequote: () => void;
+  readonly onCancel: () => void;
 }) {
   const executable = BigInt(result.solved.proposal.traderInputAmount);
   const requested = BigInt(result.requestedInputAmount);
@@ -1323,19 +1467,29 @@ function QuoteReview({
       aria-live="polite"
       className="space-y-5 rounded-2xl border border-cyan-800/70 bg-slate-900 p-5 sm:p-6"
     >
-      <div>
-        <p className="text-sm font-semibold uppercase tracking-[0.18em] text-cyan-300">
-          {invalidReason ? "Rate needs an update" : "Rate found"}
-        </p>
-        <h2
-          id="swap-review-heading"
-          className="mt-2 text-xl font-semibold text-white"
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <p className="text-sm font-semibold uppercase tracking-[0.18em] text-cyan-300">
+            {invalidReason ? "Rate needs an update" : "Rate found"}
+          </p>
+          <h2
+            id="swap-review-heading"
+            className="mt-2 text-xl font-semibold text-white"
+          >
+            Review your swap
+          </h2>
+          <p className="mt-2 text-sm leading-6 text-slate-400">
+            Check the final amounts before confirming in your wallet.
+          </p>
+        </div>
+        <button
+          type="button"
+          disabled={busy}
+          onClick={onCancel}
+          className="shrink-0 rounded-lg border border-slate-600 px-3 py-2 text-sm font-medium text-slate-300 hover:border-cyan-500 hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
         >
-          Review your swap
-        </h2>
-        <p className="mt-2 text-sm leading-6 text-slate-400">
-          Check the final amounts before confirming in your wallet.
-        </p>
+          Cancel
+        </button>
       </div>
 
       {partial ? (

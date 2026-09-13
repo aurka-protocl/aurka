@@ -1,6 +1,12 @@
 /* global AbortSignal, Buffer, URL, console, fetch, process, setTimeout */
 
-import { readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import {
+  readFileSync,
+  existsSync,
+  mkdirSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
@@ -41,6 +47,7 @@ import {
   positionForSnapshot,
 } from "./chain-snapshot.mjs";
 import { ForkSpaceLifecycle } from "./fork-space-lifecycle.mjs";
+import { computeSettlementPriceSnapshotHash } from "@aurka/shared";
 
 const ROOT = path.resolve(new URL("../../..", import.meta.url).pathname);
 const CHAIN_ID = 11_155_111;
@@ -57,16 +64,24 @@ function value(name) {
 function hasOperatorCredentials() {
   return Boolean(
     value("AURKA_SEPOLIA_PRIVATE_KEY") ||
-      value("DEPLOYER_PRIVATE_KEY") ||
-      process.env["\nDEPLOYER_PRIVATE_KEY"]?.trim(),
+    value("DEPLOYER_PRIVATE_KEY") ||
+    process.env["\nDEPLOYER_PRIVATE_KEY"]?.trim(),
   );
 }
 
-function startAutomaticMockPriceOperator(manifest) {
+function startAutomaticMockPriceOperator(manifest, operatorStateFilename) {
   if (
     manifest.oracle?.mode !== "mock" ||
     value("AURKA_SEPOLIA_AUTO_PRICE_OPERATOR") !== "true" ||
     !hasOperatorCredentials()
+  )
+    return undefined;
+  // Local hackathon mode keeps the labelled mock prices deterministic. The
+  // quote path repairs the exact funded Space on demand; a shared background
+  // price rotation would invalidate every other Space's capacity epoch.
+  if (
+    value("AURKA_SEPOLIA_OPERATOR_RUN_ONCE") !== "true" &&
+    localMockAutoRecoveryEnabled(manifest)
   )
     return undefined;
   const operator = spawn(
@@ -76,9 +91,12 @@ function startAutomaticMockPriceOperator(manifest) {
       env: {
         ...process.env,
         AURKA_SEPOLIA_OPERATOR_RUN_ONCE:
-          value("AURKA_SEPOLIA_OPERATOR_RUN_ONCE") ?? "true",
+          value("AURKA_SEPOLIA_OPERATOR_RUN_ONCE") ?? "false",
         AURKA_SEPOLIA_OPERATOR_MAX_RENEWALS:
           value("AURKA_SEPOLIA_OPERATOR_MAX_RENEWALS") ?? "10000",
+        ...(operatorStateFilename
+          ? { AURKA_SEPOLIA_OPERATOR_STATE_PATH: operatorStateFilename }
+          : {}),
       },
       stdio: "inherit",
     },
@@ -104,6 +122,17 @@ function startAutomaticMockPriceOperator(manifest) {
       );
   });
   return operator;
+}
+
+function localMockAutoRecoveryEnabled(manifest) {
+  const host =
+    value("AURKA_SEPOLIA_GATEWAY_HOST") ?? process.env.HOST ?? "127.0.0.1";
+  return (
+    manifest.oracle?.mode === "mock" &&
+    value("AURKA_SEPOLIA_AUTO_PRICE_OPERATOR") === "true" &&
+    hasOperatorCredentials() &&
+    ["127.0.0.1", "localhost", "::1"].includes(host)
+  );
 }
 
 function address(result, label) {
@@ -353,6 +382,7 @@ async function main() {
     "SwapVM guard",
   );
   const oracle = address(manifest.oracle.address, "oracle");
+  const localMockAutoRecovery = localMockAutoRecoveryEnabled(manifest);
   const positionId =
     value("AURKA_SEPOLIA_SPACE_POSITION_ID") ?? DEFAULT_SPACE_POSITION_ID;
   const positionIdHash = manifest.space.spaceId;
@@ -743,6 +773,247 @@ async function main() {
     inFlight: undefined,
   };
   class SepoliaSnapshotProvider extends LocalChainSnapshotProvider {
+    needsCapacityPriceSync(snapshot) {
+      return (
+        snapshot.capacityEpochId.toLowerCase() !== ZERO_HASH &&
+        snapshot.capacityEpoch.priceSnapshot.toLowerCase() !==
+          computeSettlementPriceSnapshotHash(
+            snapshot.priceProtection,
+          ).toLowerCase()
+      );
+    }
+
+    async startCapacityPriceRepair() {
+      if (this.epochRepair) return this.epochRepair;
+      this.epochRepairAfter = Date.now() + 60_000;
+      this.epochRepair = new Promise((resolve, reject) => {
+        const child = spawn(
+          process.execPath,
+          [
+            path.join(
+              ROOT,
+              "packages/services/scripts/sepolia-reactivate.mjs",
+            ),
+          ],
+          {
+            env: {
+              ...process.env,
+              AURKA_SEPOLIA_SPACE_ID: this.space.positionIdHash,
+              AURKA_SEPOLIA_REFRESH_PRICES: "false",
+              AURKA_SEPOLIA_RENEW_CAPACITY: "true",
+              AURKA_SEPOLIA_PENDING_CAPACITY_PATH:
+                this.pendingCapacityPath,
+              AURKA_SEPOLIA_RETURN_AFTER_SUBMIT: "true",
+            },
+            stdio: ["ignore", "pipe", "pipe"],
+            timeout: 90_000,
+          },
+        );
+        let output = "";
+        for (const stream of [child.stdout, child.stderr])
+          stream?.on("data", (chunk) => {
+            output += chunk.toString();
+            process.stderr.write(chunk);
+          });
+        child.once("error", reject);
+        child.once("exit", (code) =>
+          code === 0
+            ? resolve()
+            : reject(
+                new ServiceError(
+                  /immutable Space strategy does not match/i.test(output)
+                    ? "STRATEGY_MISMATCH"
+                    : "CAPACITY_PRICE_SYNC_REQUIRED",
+                  /immutable Space strategy does not match/i.test(output)
+                    ? "This Space uses an incompatible SwapVM strategy and cannot trade; use an owner-controlled replacement Space"
+                    : "Automatic capacity renewal did not complete",
+                  409,
+                ),
+              ),
+        );
+      }).finally(() => {
+        this.cachedSnapshot = undefined;
+        this.cachedAt = 0;
+        this.epochRepair = undefined;
+      });
+      return this.epochRepair;
+    }
+
+    readPendingCapacityRepair() {
+      if (!existsSync(this.pendingCapacityPath)) return undefined;
+      try {
+        const pending = JSON.parse(
+          readFileSync(this.pendingCapacityPath, "utf8"),
+        );
+        if (
+          pending?.version !== 1 ||
+          pending.positionId !== this.space.positionIdHash ||
+          !/^0x[0-9a-fA-F]{64}$/.test(pending.transactionHash ?? "") ||
+          !/^0x[0-9a-fA-F]{64}$/.test(pending.newCapacityEpochId ?? "") ||
+          !/^0x[0-9a-fA-F]{64}$/.test(pending.balanceSnapshot ?? "") ||
+          !/^0x[0-9a-fA-F]{64}$/.test(pending.priceSnapshot ?? "") ||
+          !/^0x[0-9a-fA-F]{64}$/.test(
+            pending.portfolioPriceSnapshot ?? "",
+          )
+        )
+          return undefined;
+        return pending;
+      } catch {
+        return undefined;
+      }
+    }
+
+    applyPendingCapacityRepair(snapshot) {
+      const pending = this.readPendingCapacityRepair();
+      if (!pending) return snapshot;
+      const activeId = snapshot.capacityEpochId.toLowerCase();
+      if (activeId === pending.newCapacityEpochId.toLowerCase()) {
+        try {
+          unlinkSync(this.pendingCapacityPath);
+        } catch (error) {
+          if (error?.code !== "ENOENT") throw error;
+        }
+        return snapshot;
+      }
+      const currentPriceSnapshot = computeSettlementPriceSnapshotHash(
+        snapshot.priceProtection,
+      );
+      if (
+        currentPriceSnapshot.toLowerCase() !==
+        pending.priceSnapshot.toLowerCase()
+      )
+        return snapshot;
+      snapshot.capacityEpochId = pending.newCapacityEpochId;
+      snapshot.capacityEpoch = {
+        ...snapshot.capacityEpoch,
+        capacityEpochId: pending.newCapacityEpochId,
+        balanceSnapshot: pending.balanceSnapshot,
+        priceSnapshot: pending.priceSnapshot,
+        portfolioPriceSnapshot: pending.portfolioPriceSnapshot,
+        capacityBaselineValue: BigInt(pending.capacityBaseline),
+        consumedBefore: 0n,
+      };
+      snapshot.balancesHash = pending.balanceSnapshot;
+      return snapshot;
+    }
+
+    async reconcilePendingCapacityRepair() {
+      const pending = this.readPendingCapacityRepair();
+      if (!pending) return;
+      const receipt = await publicClient.waitForTransactionReceipt({
+        hash: pending.transactionHash,
+        pollingInterval: 2_000,
+        timeout: 80_000,
+      });
+      if (receipt.status !== "success")
+        throw new ServiceError(
+          "CAPACITY_PRICE_SYNC_REQUIRED",
+          "Automatic capacity renewal reverted on Sepolia",
+          409,
+        );
+      try {
+        unlinkSync(this.pendingCapacityPath);
+      } catch (error) {
+        if (error?.code !== "ENOENT") throw error;
+      }
+      this.invalidateSnapshot();
+    }
+
+    async ensureCapacityPriceSync(input) {
+      // Local demo repair only, before building a new unsigned intent. Never
+      // grant a public quote endpoint authority over arbitrary owners' Spaces.
+      if (
+        input.positionId === this.space.positionId &&
+        localMockAutoRecovery
+      ) {
+        if (this.strategyMismatch)
+          throw new ServiceError(
+            "STRATEGY_MISMATCH",
+            "This Space uses an incompatible SwapVM strategy and cannot trade; use an owner-controlled replacement Space",
+            409,
+          );
+        let lastError;
+        // A submitted transaction can be confirmed just after the child
+        // exits, or another request can win the activation race. Reconcile
+        // the authoritative state before treating the renewal as failed.
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          this.invalidateSnapshot();
+          const snapshot = await this.currentSnapshot();
+          if (!this.needsCapacityPriceSync(snapshot)) return;
+
+          let repairCompleted = false;
+          try {
+            if (!this.epochRepair && Date.now() >= (this.epochRepairAfter ?? 0))
+              await this.startCapacityPriceRepair();
+            else if (this.epochRepair) await this.epochRepair;
+            repairCompleted = true;
+          } catch (error) {
+            lastError = error;
+            if (error?.code === "STRATEGY_MISMATCH") {
+              this.strategyMismatch = true;
+              throw error;
+            }
+            // Do not leave the request behind a stale cooldown after a
+            // timeout or a reverted replacement transaction.
+            this.epochRepairAfter = 0;
+          }
+
+          this.invalidateSnapshot();
+          if (repairCompleted) this.epochRepairAfter = 0;
+          let reconciled;
+          try {
+            reconciled = await this.currentSnapshot();
+          } catch (error) {
+            lastError = error;
+            continue;
+          }
+          if (!this.needsCapacityPriceSync(reconciled)) return;
+        }
+
+        throw (
+          lastError ??
+          new ServiceError(
+            "CAPACITY_PRICE_SYNC_REQUIRED",
+            "Automatic capacity renewal did not complete",
+            409,
+          )
+        );
+      }
+    }
+
+    async prepareIntent(input) {
+      await this.ensureCapacityPriceSync(input);
+      this.pendingSnapshotReadsToSkip = 2;
+      return super.prepareIntent(input);
+    }
+
+    async prepareTokenIntent(input) {
+      // The UI uses the token-amount endpoint. Keep the same automatic repair
+      // on that path instead of only repairing value-based preparations.
+      await this.ensureCapacityPriceSync(input);
+      this.pendingSnapshotReadsToSkip = 2;
+      return super.prepareTokenIntent(input);
+    }
+
+    async getSnapshot(intent) {
+      const pending = this.readPendingCapacityRepair();
+      if (pending && this.pendingSnapshotReadsToSkip > 0)
+        this.pendingSnapshotReadsToSkip -= 1;
+      // Local mock mode deliberately does not block quote/solve requests on
+      // receipt polling. The pending epoch is only a local bridge while the
+      // already-submitted activation is mined; live deployments remain strict
+      // because they never create this local pending state.
+      const snapshot = await super.getSnapshot(intent);
+      if (this.needsCapacityPriceSync(snapshot)) {
+        throw new ServiceError(
+          "CAPACITY_PRICE_SYNC_REQUIRED",
+          "The Space capacity epoch does not match the current oracle observations; renew its epoch before requesting a new quote",
+          409,
+        );
+      }
+      return snapshot;
+    }
+
     constructor(definition) {
       super(publicClient, contracts, solver.address, definition, CHAIN_ID, {
         getBlock: () => publicClient.getBlock(),
@@ -751,6 +1022,13 @@ async function main() {
       this.cachedSnapshot = undefined;
       this.cachedAt = 0;
       this.snapshotInFlight = undefined;
+      this.pendingCapacityPath = path.resolve(
+        ROOT,
+        ".aurka",
+        `sepolia-capacity-${definition.positionIdHash.toLowerCase()}.json`,
+      );
+      this.pendingSnapshotReadsToSkip = 0;
+      this.strategyMismatch = false;
     }
 
     async currentSnapshot() {
@@ -783,7 +1061,7 @@ async function main() {
             verifyingContract: router,
           };
           snapshot.swapVMGuard = swapVMGuard;
-          return snapshot;
+          return this.applyPendingCapacityRepair(snapshot);
         }
         const event = await readEpochEvent(
           this.space.positionIdHash,
@@ -812,7 +1090,7 @@ async function main() {
         // The active epoch commits to the balances at activation, not the
         // mutable current Aqua balances after a previous trade.
         snapshot.balancesHash = args.balanceSnapshot;
-        return snapshot;
+        return this.applyPendingCapacityRepair(snapshot);
       })();
       this.snapshotInFlight = request;
       try {
@@ -1086,7 +1364,10 @@ async function main() {
       requirements: {
         rpc: true,
         indexer: false,
-        sources: true,
+        // Local mock prices are repaired synchronously for the exact Space
+        // being quoted. A failed background operator for another Space must
+        // not make this local demo globally unavailable.
+        sources: !localMockAutoRecovery,
         worker: false,
         signer: false,
         registry: false,
@@ -1575,10 +1856,10 @@ async function main() {
             [state.aqua, state.aquaApp, state.strategyHash, [usdc, weth]],
           );
         } else {
-          const tokenName = requestUrl.searchParams
-            .get("token")
-            ?.toUpperCase();
-          const token = recoveryTokens.find((candidate) => candidate.symbol === tokenName);
+          const tokenName = requestUrl.searchParams.get("token")?.toUpperCase();
+          const token = recoveryTokens.find(
+            (candidate) => candidate.symbol === tokenName,
+          );
           if (!token)
             throw new ServiceError(
               "UNSUPPORTED_ASSET",
@@ -1625,7 +1906,10 @@ async function main() {
         const body = JSON.parse((await requestBody(request)).toString());
         const requestedSpaceId = body?.spaceId;
         const ownerAddress = body?.ownerAddress;
-        if (typeof requestedSpaceId !== "string" || typeof ownerAddress !== "string")
+        if (
+          typeof requestedSpaceId !== "string" ||
+          typeof ownerAddress !== "string"
+        )
           throw new ServiceError(
             "INVALID_REQUEST",
             "Space ID and owner address are required",
@@ -1639,7 +1923,8 @@ async function main() {
           );
         const current = service.getSpace(requestedSpaceId);
         if (
-          current.identity.ownerAddress.toLowerCase() !== ownerAddress.toLowerCase()
+          current.identity.ownerAddress.toLowerCase() !==
+          ownerAddress.toLowerCase()
         )
           throw new ServiceError(
             "SPACE_OWNER_REQUIRED",
@@ -1682,7 +1967,8 @@ async function main() {
             spaceDefinitions.splice(index, 1);
         delete lifecycle.plans[requestedSpaceId];
         for (const key of Object.keys(lifecycle.operations))
-          if (key.startsWith(`${requestedSpaceId}:`)) delete lifecycle.operations[key];
+          if (key.startsWith(`${requestedSpaceId}:`))
+            delete lifecycle.operations[key];
         lifecycle.persist();
         saveRuntimeSpaces();
         json(response, 200, { spaceId: requestedSpaceId, deleted: true });
@@ -1845,9 +2131,13 @@ async function main() {
     gateway.once("error", reject);
     gateway.listen(apiPort, gatewayHost, resolve);
   });
-  const automaticMockPriceOperator =
-    startAutomaticMockPriceOperator(manifest);
-  const automaticMockPriceOperatorReady = automaticMockPriceOperator
+  const automaticMockPriceOperator = startAutomaticMockPriceOperator(
+    manifest,
+    operatorStateFilename,
+  );
+  const operatorRunsOnce = value("AURKA_SEPOLIA_OPERATOR_RUN_ONCE") === "true";
+  const automaticMockPriceOperatorReady =
+    automaticMockPriceOperator && operatorRunsOnce
     ? new Promise((resolve) => automaticMockPriceOperator.once("exit", resolve))
     : Promise.resolve();
 
@@ -1874,8 +2164,9 @@ async function main() {
   };
   process.once("SIGINT", () => void shutdown());
   process.once("SIGTERM", () => void shutdown());
-  // Do not expose a ready trading API while the one-time deterministic mock
-  // price sync is still changing the oracle commitment.
+  // One-shot price setup must finish before snapshots are initialized. A
+  // continuous operator stays alive by design, so waiting for its exit would
+  // leave the API permanently stuck in snapshot_syncing.
   await automaticMockPriceOperatorReady;
   void initializeChainStateLoop();
 }

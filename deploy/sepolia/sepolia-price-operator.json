@@ -1,13 +1,13 @@
 {
   "version": 1,
-  "operationsSubmitted": 23,
+  "operationsSubmitted": 26,
   "failures": 0,
-  "unknownOutcomes": 2,
-  "lastRunAt": 1789248412,
-  "lastSuccessAt": 1789248435,
-  "lastAttemptAt": 1789248412,
+  "unknownOutcomes": 4,
+  "lastRunAt": 1789267127,
+  "lastSuccessAt": 1789267093,
+  "lastAttemptAt": 1789267127,
   "nextAttemptAt": null,
   "lastError": null,
-  "pendingAction": null,
+  "pendingAction": "price-refresh",
   "budgetExhausted": false
 }

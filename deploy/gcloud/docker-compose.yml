@@ -6,6 +6,8 @@ services:
       - ./aurka.env
     environment:
       NODE_ENV: production
+      # The dedicated price-operator container is the sole oracle updater.
+      AURKA_SEPOLIA_AUTO_PRICE_OPERATOR: "false"
       AURKA_SEPOLIA_GATEWAY_HOST: 0.0.0.0
       AURKA_SEPOLIA_API_PORT: 8797
       AURKA_SEPOLIA_DATABASE_URL: /data/sepolia-service.sqlite
@@ -33,14 +35,15 @@ services:
 
   price-operator:
     image: ${AURKA_IMAGE:?set AURKA_IMAGE}
-    restart: "no"
+    restart: on-failure:3
     env_file:
       - ./aurka.env
     environment:
       NODE_ENV: production
+      AURKA_SEPOLIA_OPERATOR_RUN_ONCE: "false"
       AURKA_SEPOLIA_MANIFEST_PATH: /app/deploy/sepolia/sepolia-deployment.json
       AURKA_SEPOLIA_OPERATOR_INTERVAL_MS: 30000
-      AURKA_SEPOLIA_OPERATOR_MAX_RENEWALS: 48
+      AURKA_SEPOLIA_OPERATOR_MAX_RENEWALS: ${AURKA_SEPOLIA_OPERATOR_MAX_RENEWALS:-10000}
       AURKA_SEPOLIA_OPERATOR_STATE_PATH: /data/sepolia-price-operator.json
     volumes:
       - /srv/aurka/data:/data

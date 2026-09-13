@@ -218,6 +218,46 @@ function activityTime(value: number): string {
   });
 }
 
+function evaluationCountdown(seconds: number): string {
+  if (seconds <= 0) return "Due now";
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = seconds % 60;
+  return minutes > 0
+    ? `${minutes}m ${remainingSeconds.toString().padStart(2, "0")}s`
+    : `${remainingSeconds}s`;
+}
+
+function AgentNextEvaluation({
+  session,
+}: {
+  readonly session: DelegatedSession;
+}) {
+  const [now, setNow] = useState(() => Math.floor(Date.now() / 1_000));
+  useEffect(() => {
+    const timer = window.setInterval(
+      () => setNow(Math.floor(Date.now() / 1_000)),
+      1_000,
+    );
+    return () => window.clearInterval(timer);
+  }, []);
+  if (session.state !== "ACTIVE" || session.nextCheckAt === undefined || session.nextCheckAt === null)
+    return <span className="text-slate-500">—</span>;
+  return (
+    <>
+      <span className="text-white">
+        {evaluationCountdown(session.nextCheckAt - now)}
+      </span>
+      <span className="mt-0.5 block text-xs text-slate-500">
+        {new Date(session.nextCheckAt * 1_000).toLocaleTimeString([], {
+          hour: "numeric",
+          minute: "2-digit",
+          second: "2-digit",
+        })}
+      </span>
+    </>
+  );
+}
+
 function agentActivitySummary(event: AgentActivityEvent): string {
   if (event.code === "DELEGATED_EXECUTION_FAILED")
     return "Waiting: the session allowance is being confirmed; the next check will retry automatically.";
@@ -1153,9 +1193,13 @@ export default function Agent() {
       setSession(authorizedSession);
       sessionToStart = authorizedSession;
       }
+      const currentWalletStatus = await client
+        .delegatedStatus()
+        .catch(() => walletStatus);
+      if (currentWalletStatus) setWalletStatus(currentWalletStatus);
       if (
-        !walletStatus?.wallet.balances ||
-        delegatedAllowanceNeedsApproval(sessionToStart, walletStatus)
+        !currentWalletStatus?.wallet.balances ||
+        delegatedAllowanceNeedsApproval(sessionToStart, currentWalletStatus)
       ) {
         const approvalMessage = "";
         const approvalExpiresAt = Math.min(
@@ -1544,6 +1588,24 @@ export default function Agent() {
     walletStatus,
   );
 
+  useEffect(() => {
+    if (!approvalRequired || session?.state !== "ACTIVE") return;
+    let active = true;
+    const refreshAllowance = () => {
+      void client
+        .delegatedStatus()
+        .then((next) => {
+          if (active) setWalletStatus(next);
+        })
+        .catch(() => undefined);
+    };
+    const timer = window.setInterval(refreshAllowance, 5_000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [approvalRequired, session?.state]);
+
   return (
     <section className="mx-auto max-w-4xl space-y-6">
       <div>
@@ -1636,7 +1698,7 @@ export default function Agent() {
             busy={!!busy}
             onRefresh={() => void refreshAgentStatus()}
           />
-          {approvalRequired ? (
+          {approvalRequired && session.state === "AUTHORIZED" ? (
             <div className="mt-4 rounded-xl border border-amber-700/70 bg-amber-950/20 p-4">
               <p className="text-sm font-semibold text-amber-200">
                 One approval covers the agent&apos;s remaining WETH budget
@@ -1657,7 +1719,7 @@ export default function Agent() {
               </button>
             </div>
           ) : null}
-          <dl className="mt-5 grid min-w-0 gap-3 text-sm sm:grid-cols-4">
+          <dl className="mt-5 grid min-w-0 gap-3 text-sm sm:grid-cols-2 lg:grid-cols-5">
             <div className="min-w-0">
               <dt className="text-slate-500">Remaining WETH budget</dt>
               <dd className="text-white">
@@ -1679,6 +1741,12 @@ export default function Agent() {
             <div className="min-w-0">
               <dt className="text-slate-500">Space</dt>
               <dd className="text-white">Selected Space</dd>
+            </div>
+            <div className="min-w-0">
+              <dt className="text-slate-500">Next evaluation</dt>
+              <dd>
+                <AgentNextEvaluation session={session} />
+              </dd>
             </div>
           </dl>
           <div className="mt-5 flex flex-wrap gap-3">

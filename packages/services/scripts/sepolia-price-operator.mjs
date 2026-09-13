@@ -243,8 +243,9 @@ function runAction(action, timeoutMs) {
           ...process.env,
           AURKA_SEPOLIA_REFRESH_PRICES:
             action === "price-refresh" ? "true" : "false",
-          AURKA_SEPOLIA_RENEW_CAPACITY:
-            action === "capacity-renewal" ? "true" : "false",
+          // The deployed router binds the epoch to the oracle observations,
+          // including timestamps. Refreshing them requires a matching epoch.
+          AURKA_SEPOLIA_RENEW_CAPACITY: "true",
         },
       },
     );

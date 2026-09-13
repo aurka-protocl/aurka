@@ -15,6 +15,7 @@ contracts/cache/
 contracts/out/
 contracts/out-upstream/
 .aurkadev/
+.aurka/
 
 packages/graph/subgraph/generated/
 packages/graph/subgraph/build/

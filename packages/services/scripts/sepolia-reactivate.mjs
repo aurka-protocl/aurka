@@ -1,6 +1,6 @@
 /* global URL, console, process */
 
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 
 import path from "node:path";
 import {
@@ -23,6 +23,7 @@ const ROOT = path.resolve(
 );
 const CHAIN_ID = 11_155_111;
 const ZERO_HASH = `0x${"00".repeat(32)}`;
+const RECEIPT_TIMEOUT_MS = 80_000;
 
 function value(name) {
   const result = process.env[name]?.trim();
@@ -33,6 +34,27 @@ function requireValue(name) {
   const result = value(name);
   if (!result) throw new Error(`${name} is required`);
   return result;
+}
+
+function pendingCapacityPath() {
+  return value("AURKA_SEPOLIA_PENDING_CAPACITY_PATH");
+}
+
+function savePendingCapacity(pathname, state) {
+  if (!pathname) return;
+  mkdirSync(path.dirname(pathname), { recursive: true, mode: 0o700 });
+  writeFileSync(pathname, `${JSON.stringify(state, null, 2)}\n`, {
+    mode: 0o600,
+  });
+}
+
+function clearPendingCapacity(pathname) {
+  if (!pathname) return;
+  try {
+    unlinkSync(pathname);
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
 }
 
 function address(value_, label) {
@@ -121,8 +143,16 @@ function portfolioSnapshotHash(tokens, snapshots) {
   );
 }
 
+async function waitForReceipt(publicClient, hash) {
+  return publicClient.waitForTransactionReceipt({
+    hash,
+    pollingInterval: 2_000,
+    timeout: RECEIPT_TIMEOUT_MS,
+  });
+}
+
 async function waitForSuccess(publicClient, hash, label) {
-  const receipt = await publicClient.waitForTransactionReceipt({ hash });
+  const receipt = await waitForReceipt(publicClient, hash);
   if (receipt.status !== "success") throw new Error(`${label} reverted`);
   return {
     transactionHash: receipt.transactionHash,
@@ -176,8 +206,7 @@ async function main() {
     throw new Error("Sepolia manifest has the wrong chain ID");
   }
   const requestedSpace =
-    value("AURKA_SEPOLIA_SPACE_ID") ??
-    value("AURKA_SEPOLIA_SPACE_POSITION_ID");
+    value("AURKA_SEPOLIA_SPACE_ID") ?? value("AURKA_SEPOLIA_SPACE_POSITION_ID");
   let space = manifest.space;
   if (requestedSpace && requestedSpace !== manifest.space?.spaceId) {
     const spacesPath = path.resolve(
@@ -188,9 +217,11 @@ async function main() {
     space = (savedSpaces.spaces ?? []).find(
       (candidate) =>
         candidate?.positionId === requestedSpace ||
-        candidate?.positionIdHash?.toLowerCase() === requestedSpace.toLowerCase(),
+        candidate?.positionIdHash?.toLowerCase() ===
+          requestedSpace.toLowerCase(),
     );
-    if (!space) throw new Error(`Sepolia Space ${requestedSpace} was not found`);
+    if (!space)
+      throw new Error(`Sepolia Space ${requestedSpace} was not found`);
   }
   if (!space?.spaceId && !space?.positionIdHash) {
     throw new Error("create the Sepolia Space before reactivating capacity");
@@ -422,7 +453,10 @@ async function main() {
     );
   }
 
-  if (value("AURKA_SEPOLIA_RENEW_CAPACITY") === "false") {
+  if (
+    value("AURKA_SEPOLIA_RENEW_CAPACITY") === "false" &&
+    Object.keys(priceRefreshTransactions).length === 0
+  ) {
     console.log(
       JSON.stringify(
         {
@@ -621,9 +655,29 @@ async function main() {
 
   console.log(JSON.stringify({ ...summary, simulated: true }, null, 2));
   const hash = await walletClient.writeContract(simulation.request);
-  const receipt = await publicClient.waitForTransactionReceipt({ hash });
+  const pendingPath = pendingCapacityPath();
+  savePendingCapacity(pendingPath, {
+    version: 1,
+    positionId,
+    transactionHash: hash,
+    newCapacityEpochId: epoch.capacityEpochId,
+    capacityBaseline: capacityBaseline.toString(),
+    balanceSnapshot,
+    priceSnapshot,
+    portfolioPriceSnapshot,
+  });
+  console.log(
+    JSON.stringify({
+      level: "info",
+      message: "sepolia.capacity_reactivation.submitted",
+      transactionHash: hash,
+    }),
+  );
+  if (value("AURKA_SEPOLIA_RETURN_AFTER_SUBMIT") === "true") return;
+  const receipt = await waitForReceipt(publicClient, hash);
   if (receipt.status !== "success")
     throw new Error("capacity reactivation reverted");
+  clearPendingCapacity(pendingPath);
   console.log(
     JSON.stringify(
       {
