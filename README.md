@@ -42,6 +42,13 @@ The API reads chain state for quotes and checks commitments before execution.
 Agent evaluations run on the server independently of the browser. Chat does not
 authorize transactions.
 
+## Integrations
+
+- [Aqua and 1inch SwapVM](docs/aqua-integration.md) — how Space liquidity is
+  registered, validated, and settled.
+- [Privy delegated trading wallets](docs/privy-integration.md) — wallet
+  permissions, automated execution, stopping, and recovery.
+
 ## Run locally against Sepolia
 
 Requirements: **Node.js 24**, **pnpm 10.13.1**, Foundry with Solidity **0.8.28**
