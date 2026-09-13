@@ -1,0 +1,90 @@
+services:
+  api:
+    image: ${AURKA_IMAGE:?set AURKA_IMAGE}
+    restart: unless-stopped
+    env_file:
+      - ./aurka.env
+    environment:
+      NODE_ENV: production
+      AURKA_SEPOLIA_GATEWAY_HOST: 0.0.0.0
+      AURKA_SEPOLIA_API_PORT: 8797
+      AURKA_SEPOLIA_DATABASE_URL: /data/sepolia-service.sqlite
+      AURKA_SEPOLIA_SPACES_PATH: /data/sepolia-spaces.json
+      AURKA_SEPOLIA_EPOCHS_PATH: /data/sepolia-space-epochs.json
+      AURKA_SEPOLIA_LIFECYCLE_PATH: /data/sepolia-space-lifecycle.json
+      AURKA_SEPOLIA_OPERATOR_STATE_PATH: /data/sepolia-price-operator.json
+      AURKA_SEPOLIA_MANIFEST_PATH: /app/deploy/sepolia/sepolia-deployment.json
+    volumes:
+      - /srv/aurka/data:/data
+    expose:
+      - "8797"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8797/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 45s
+
+  price-operator:
+    image: ${AURKA_IMAGE:?set AURKA_IMAGE}
+    restart: "no"
+    env_file:
+      - ./aurka.env
+    environment:
+      NODE_ENV: production
+      AURKA_SEPOLIA_MANIFEST_PATH: /app/deploy/sepolia/sepolia-deployment.json
+      AURKA_SEPOLIA_OPERATOR_INTERVAL_MS: 30000
+      AURKA_SEPOLIA_OPERATOR_MAX_RENEWALS: 48
+      AURKA_SEPOLIA_OPERATOR_STATE_PATH: /data/sepolia-price-operator.json
+    volumes:
+      - /srv/aurka/data:/data
+    command: ["node", "packages/services/scripts/sepolia-price-operator.mjs"]
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "const fs=require('fs');try{const
+          s=JSON.parse(fs.readFileSync('/data/sepolia-price-operator.json','utf8'));const
+          age=Date.now()/1000-(s.lastSuccessAt||0);process.exit(s.budgetExhausted||!s.lastSuccessAt||age>300?1:0)}catch(e){process.exit(1)}",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 45s
+    depends_on:
+      api:
+        condition: service_healthy
+
+  edge:
+    image: caddy:2.8-alpine
+    restart: unless-stopped
+    environment:
+      AURKA_API_HOSTNAME: ${AURKA_API_HOSTNAME:-:80}
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  caddy-data:
+  caddy-config:

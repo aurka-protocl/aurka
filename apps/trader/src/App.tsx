@@ -35,12 +35,15 @@ function LegacySpaceRedirect({
         );
         if (active && space)
           navigate(spaceUrl(space.identity.id, section), { replace: true });
-        else if (active) setError("No Space is available in this environment.");
+        else if (active) setError("No active Space is available right now.");
       })
       .catch((requestError: unknown) => {
         if (active)
           setError(
-            userFacingError(requestError, "The Space could not be loaded"),
+            userFacingError(
+              requestError,
+              "We couldn't load a Space right now.",
+            ),
           );
       });
     return () => {
@@ -58,7 +61,7 @@ function LegacySpaceRedirect({
     );
   return (
     <p aria-live="polite" className="text-slate-400">
-      Opening the canonical Space route…
+      Opening Space…
     </p>
   );
 }

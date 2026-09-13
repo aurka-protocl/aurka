@@ -40,6 +40,8 @@ import {
   agentProposalRequestSchema,
   agentProposalResponseSchema,
   agentStatusSchema,
+  agentActivityResponseSchema,
+  agentActivityStatusSchema,
   authChallengeRequestSchema,
   authChallengeResponseSchema,
   authSessionSchema,
@@ -102,6 +104,7 @@ export interface ApiServerOptions {
   readonly delegated?: DelegatedSessionService;
   readonly auth?: AuthService;
   readonly agents?: TradingAgentService;
+  readonly agentReady?: () => boolean;
   readonly requestBodyLimitBytes?: number;
   readonly logger?: StructuredLogger;
 }
@@ -347,6 +350,8 @@ export function openApi(): Record<string, unknown> {
     ["/v1/auth/session", "get", undefined, authSessionSchema],
     ["/v1/auth/logout", "post", undefined, authLogoutResponseSchema],
     ["/v1/agents/me", "get", undefined, agentsResponseSchema],
+    ["/v1/agents/{id}/status", "get", undefined, agentActivityStatusSchema],
+    ["/v1/agents/{id}/activity", "get", undefined, agentActivityResponseSchema],
     ["/v1/agents", "post", createAgentRequestSchema, agentResponseSchema],
     [
       "/v1/agents/{id}/fund",
@@ -477,6 +482,15 @@ export function openApi(): Record<string, unknown> {
         { name: "from", in: "query", schema: { type: "integer", minimum: 0 } },
         { name: "to", in: "query", schema: { type: "integer", minimum: 0 } },
       );
+    if (path === "/v1/agents/{id}/activity")
+      parameters.push(
+        {
+          name: "limit",
+          in: "query",
+          schema: { type: "integer", minimum: 1, maximum: 50 },
+        },
+        { name: "cursor", in: "query", schema: { type: "string" } },
+      );
     if (path === "/v1/positions/{id}/fees")
       parameters.push(
         { name: "from", in: "query", schema: { type: "integer", minimum: 0 } },
@@ -530,6 +544,7 @@ async function handle(
   delegated: DelegatedSessionService,
   auth: AuthService | undefined,
   agents: TradingAgentService | undefined,
+  agentReady: (() => boolean) | undefined,
   limit: number,
   logger: StructuredLogger,
 ): Promise<void> {
@@ -627,6 +642,103 @@ async function handle(
         { agent: manager.get(identity.ownerAddress, identity.chainId) ?? null },
         request,
         agentsResponseSchema,
+      );
+      return;
+    }
+
+    const agentActivityStatusMatch = path.match(
+      /^\/v1\/agents\/([^/]+)\/status$/,
+    );
+    if (method === "GET" && agentActivityStatusMatch) {
+      const identity = requireAuthenticated();
+      requireAgents();
+      const id = decodeURIComponent(agentActivityStatusMatch[1]!);
+      const record = service.repository.getTradingAgentById(id);
+      if (
+        !record ||
+        record.ownerAddress.toLowerCase() !==
+          identity.ownerAddress.toLowerCase()
+      )
+        throw new ServiceError(
+          "AGENT_NOT_FOUND",
+          "Trading agent was not found",
+          404,
+        );
+      const session = service.repository
+        .listDelegatedSessions(identity.ownerAddress)
+        .find(
+          (candidate) =>
+            candidate.wallet.address?.toLowerCase() ===
+            record.walletAddress.toLowerCase(),
+        );
+      const provider = agent.status();
+      const mandate = record.mandateJson;
+      const expiresAt =
+        session?.plan.expiresAt ??
+        (typeof mandate?.expiresAt === "number" ? mandate.expiresAt : null);
+      sendSuccess(
+        response,
+        200,
+        {
+          agentId: record.id,
+          ownerAddress: record.ownerAddress,
+          state: session?.state ?? record.state,
+          provider: provider.provider,
+          model: provider.model,
+          lastEvaluatedAt: session?.lastEvaluatedAt ?? null,
+          nextCheckAt: session?.nextCheckAt ?? null,
+          remainingInputBudget: session?.remainingInputBudget ?? null,
+          confirmedTrades:
+            session?.trades.filter((trade) => trade.status === "CONFIRMED")
+              .length ?? 0,
+          maxTradeCount:
+            session?.plan.maxTradeCount ??
+            (typeof mandate?.maxTradeCount === "number"
+              ? mandate.maxTradeCount
+              : 1),
+          expiresAt,
+          consecutiveFailures: session?.consecutiveFailures ?? 0,
+        },
+        request,
+        agentActivityStatusSchema,
+      );
+      return;
+    }
+
+    const agentActivityMatch = path.match(/^\/v1\/agents\/([^/]+)\/activity$/);
+    if (method === "GET" && agentActivityMatch) {
+      const identity = requireAuthenticated();
+      requireAgents();
+      const id = decodeURIComponent(agentActivityMatch[1]!);
+      const record = service.repository.getTradingAgentById(id);
+      if (
+        !record ||
+        record.ownerAddress.toLowerCase() !==
+          identity.ownerAddress.toLowerCase()
+      )
+        throw new ServiceError(
+          "AGENT_NOT_FOUND",
+          "Trading agent was not found",
+          404,
+        );
+      const input = z
+        .object({
+          limit: z.coerce.number().int().min(1).max(50).default(20),
+          cursor: z.string().min(1).optional(),
+        })
+        .strict()
+        .parse(queryValues(url));
+      sendSuccess(
+        response,
+        200,
+        service.repository.listAgentActivity({
+          ownerAddress: identity.ownerAddress,
+          agentId: id,
+          limit: input.limit,
+          ...(input.cursor ? { cursor: input.cursor } : {}),
+        }),
+        request,
+        agentActivityResponseSchema,
       );
       return;
     }
@@ -939,6 +1051,12 @@ async function handle(
       return;
     }
     if (method === "POST" && path === "/v1/agent/propose") {
+      if (agentReady && !agentReady())
+        throw new ServiceError(
+          "RPC_SYNCING",
+          "Live network data is syncing; trading assistance is temporarily paused",
+          503,
+        );
       const input = agentProposalRequestSchema.parse(payload);
       const controller = new AbortController();
       const abort = () => controller.abort();
@@ -1383,6 +1501,7 @@ export function createApiServer(
       delegated,
       options.auth,
       options.agents,
+      options.agentReady,
       limit,
       logger,
     ).finally(() => {

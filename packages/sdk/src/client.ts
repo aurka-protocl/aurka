@@ -3,6 +3,8 @@ import type { z } from "zod";
 import {
   activityQuerySchema,
   activityResponseSchema,
+  agentActivityResponseSchema,
+  agentActivityStatusSchema,
   type ActivityItem,
   type ActivityStatus,
   type ActivityType,
@@ -100,6 +102,8 @@ import {
   type FundAgentRequest,
   type TradingAgent,
   type AgentMandate,
+  type AgentActivityEvent,
+  type AgentActivityStatus,
 } from "@aurka/shared";
 
 export interface AurkaClientOptions {
@@ -151,6 +155,7 @@ export class AurkaClient {
             failure.data.error.message,
             response.status,
             failure.data.error.details,
+            failure.data.error.requestId,
           );
         throw new AurkaError(
           "HTTP_ERROR",
@@ -171,6 +176,7 @@ export class AurkaClient {
           parsed.data.error.message,
           response.status,
           parsed.data.error.details,
+          parsed.data.error.requestId,
         );
       return parsed.data.data;
     } catch (error) {
@@ -332,6 +338,31 @@ export class AurkaClient {
       `/v1/agents/${encodeURIComponent(id)}/archive`,
       undefined,
       agentResponseSchema,
+    );
+  }
+
+  async agentActivityStatus(id: string): Promise<AgentActivityStatus> {
+    return this.request(
+      "GET",
+      `/v1/agents/${encodeURIComponent(id)}/status`,
+      undefined,
+      agentActivityStatusSchema,
+    );
+  }
+
+  async listAgentActivity(
+    id: string,
+    input: { limit?: number; cursor?: string } = {},
+  ): Promise<{ items: AgentActivityEvent[]; nextCursor: string | null }> {
+    const params = new URLSearchParams();
+    if (input.limit !== undefined) params.set("limit", String(input.limit));
+    if (input.cursor !== undefined) params.set("cursor", input.cursor);
+    const query = params.toString();
+    return this.request(
+      "GET",
+      `/v1/agents/${encodeURIComponent(id)}/activity${query ? `?${query}` : ""}`,
+      undefined,
+      agentActivityResponseSchema,
     );
   }
 
@@ -737,6 +768,7 @@ export class AurkaError extends Error {
     message: string,
     public readonly statusCode: number,
     public readonly details?: Record<string, unknown>,
+    public readonly requestId?: string,
   ) {
     super(message);
     this.name = "AurkaError";

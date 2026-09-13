@@ -153,6 +153,9 @@ export const delegatedSessionSchema = z
     lastTransactionHash: bytes32Schema.optional(),
     lastRecoveryTransactionHash: bytes32Schema.optional(),
     lastResult: z.string().min(1).max(500).optional(),
+    lastEvaluatedAt: unixTimestampSchema.nullable().optional(),
+    nextCheckAt: unixTimestampSchema.nullable().optional(),
+    consecutiveFailures: z.number().int().nonnegative().max(100).optional(),
     updatedAt: unixTimestampSchema,
     trades: z.array(delegatedTradeSchema),
   })

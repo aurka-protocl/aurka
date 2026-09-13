@@ -33,6 +33,7 @@ import {
 import type { AurkaService } from "../service.js";
 import { ServiceError } from "../service.js";
 import type { ServiceRepository } from "../db/repository.js";
+import { delegatedWalletFailure } from "./delegated.js";
 
 const erc20TransferAbi = [
   {
@@ -608,13 +609,12 @@ export class TradingAgentService {
   >();
   private readonly rpc: DelegatedChainRpc;
   private readonly ownerId: string;
-  private readonly signerId: string;
-  private readonly executionPolicyId: string;
+  private readonly signerId: string | undefined;
+  private readonly executionPolicyId: string | undefined;
   private readonly chainId: number;
   private readonly router: string;
   private readonly inputToken: string;
   private readonly outputToken: string;
-  private readonly signerAddress: string;
   private readonly authorizationKey: string;
   private readonly ownerAuthorizationKey: string;
   private readonly maximumInputAmount: string;
@@ -629,8 +629,8 @@ export class TradingAgentService {
     this.clientPromise =
       createPrivyNodeClientFromEnv() as unknown as Promise<PrivyClientLike>;
     this.ownerId = required("PRIVY_DELEGATED_OWNER_ID");
-    this.signerId = required("PRIVY_DELEGATED_SIGNER_ID");
-    this.executionPolicyId = required("PRIVY_DELEGATED_POLICY_ID");
+    this.signerId = value("PRIVY_DELEGATED_SIGNER_ID");
+    this.executionPolicyId = value("PRIVY_DELEGATED_POLICY_ID");
     this.chainId = Number(required("PRIVY_DELEGATED_CHAIN_ID"));
     this.router = address(
       required("PRIVY_DELEGATED_ROUTER"),
@@ -643,10 +643,6 @@ export class TradingAgentService {
     this.outputToken = address(
       required("PRIVY_DELEGATED_OUTPUT_TOKEN"),
       "PRIVY_DELEGATED_OUTPUT_TOKEN",
-    );
-    this.signerAddress = address(
-      required("PRIVY_DELEGATED_SIGNER_ADDRESS"),
-      "PRIVY_DELEGATED_SIGNER_ADDRESS",
     );
     this.authorizationKey = required(
       "PRIVY_DELEGATED_AUTHORIZATION_PRIVATE_KEY",
@@ -701,8 +697,15 @@ export class TradingAgentService {
         ownerAddress,
         activeSessions: 0,
       };
+    let wallet: DelegatedStatus["wallet"];
+    try {
+      wallet = await (await this.adapter(agent)).getStatus();
+    } catch (error) {
+      if (error instanceof ServiceError) throw error;
+      throw delegatedWalletFailure(error, "status");
+    }
     return {
-      wallet: await (await this.adapter(agent)).getStatus(),
+      wallet,
       ownerAddress,
       activeSessions: this.repository
         .listDelegatedSessions(ownerAddress)
@@ -766,6 +769,14 @@ export class TradingAgentService {
   ): Promise<TradingAgent> {
     const existing = this.get(normalizedOwner, chainId);
     if (existing) return existing;
+    const signerId = this.signerId;
+    const executionPolicyId = this.executionPolicyId;
+    if (!signerId || !executionPolicyId)
+      throw new ServiceError(
+        "AGENT_CONFIGURATION_MISSING",
+        "Agent provisioning requires the configured Privy signer and execution policy",
+        503,
+      );
     const idempotencyKey = `aurka-agent-${normalizedOwner}-${chainId}`;
     const operation = this.repository.reserveAgentProvisioning({
       id: randomUUID(),
@@ -827,8 +838,8 @@ export class TradingAgentService {
           policy_ids: [recoveryPolicyId],
           additional_signers: [
             {
-              signer_id: this.signerId,
-              override_policy_ids: [this.executionPolicyId],
+              signer_id: signerId,
+              override_policy_ids: [executionPolicyId],
             },
           ],
           "privy-idempotency-key": idempotencyKey,
@@ -842,16 +853,14 @@ export class TradingAgentService {
       if (typeof readback.address !== "string")
         throw new Error("Privy agent wallet has no address");
       const walletAddress = address(readback.address, "Privy agent address");
-      const executionPolicy = await client
-        .policies()
-        .get(this.executionPolicyId);
+      const executionPolicy = await client.policies().get(executionPolicyId);
       const recoveryPolicy = await client.policies().get(recoveryPolicyId);
       validateExecutionPolicy(
         readback,
         executionPolicy,
         this.ownerId,
-        this.signerId,
-        this.executionPolicyId,
+        signerId,
+        executionPolicyId,
         recoveryPolicyId,
         this.chainId,
         this.router,
@@ -881,8 +890,8 @@ export class TradingAgentService {
         chainId,
         walletId,
         walletAddress,
-        signerId: this.signerId,
-        policyId: this.executionPolicyId,
+        signerId,
+        policyId: executionPolicyId,
         recoveryPolicyId,
         state: "READY",
         fundingJson: { eth: "0", usdc: "0", weth: "0", transactions: [] },
@@ -1455,13 +1464,13 @@ export class TradingAgentService {
           await this.client()
         )
           .policies()
-          .get(this.executionPolicyId);
+          .get(agent.policyId);
         validateExecutionPolicy(
           wallet,
           execution,
           this.ownerId,
-          this.signerId,
-          this.executionPolicyId,
+          agent.signerId,
+          agent.policyId,
           agent.recoveryPolicyId,
           this.chainId,
           this.router,
@@ -1488,11 +1497,18 @@ export class TradingAgentService {
         const signers = Array.isArray(wallet.additional_signers)
           ? wallet.additional_signers
           : [];
+        const walletAddress = address(
+          String(wallet.address),
+          "Privy agent address",
+        );
         return {
           walletId: agent.walletId,
-          walletAddress: address(String(wallet.address), "Privy agent address"),
-          signerAddress: this.signerAddress,
-          policyId: this.executionPolicyId,
+          walletAddress,
+          // The durable user wallet is also the address that signs delegated
+          // intents and transactions. Do not require the old singleton
+          // signer-address environment variable for per-user agents.
+          signerAddress: walletAddress,
+          policyId: agent.policyId,
           chainId: this.chainId,
           router: this.router,
           inputToken: this.inputToken,
@@ -1502,7 +1518,7 @@ export class TradingAgentService {
           paused: execution.paused === true,
           revoked:
             execution.revoked === true ||
-            !signers.some((item: any) => item?.signer_id === this.signerId),
+            !signers.some((item: any) => item?.signer_id === agent.signerId),
           fingerprint: executionFingerprint(execution),
           allowedMethods: [
             "eth_call",
@@ -1520,7 +1536,7 @@ export class TradingAgentService {
         const wallet = await this.readWallet(agent.walletId);
         const signers = Array.isArray(wallet.additional_signers)
           ? wallet.additional_signers.filter(
-              (item: any) => item?.signer_id !== this.signerId,
+              (item: any) => item?.signer_id !== agent.signerId,
             )
           : [];
         await (await this.client()).wallets().update(agent.walletId, {
@@ -1532,7 +1548,7 @@ export class TradingAgentService {
         const confirmed = await this.readWallet(agent.walletId);
         if (
           (confirmed.additional_signers ?? []).some(
-            (item: any) => item?.signer_id === this.signerId,
+            (item: any) => item?.signer_id === agent.signerId,
           )
         )
           throw new Error("Privy signer revoke was not confirmed");
@@ -1543,15 +1559,15 @@ export class TradingAgentService {
           ? wallet.additional_signers
           : [];
         const hasSigner = signers.some(
-          (item: any) => item?.signer_id === this.signerId,
+          (item: any) => item?.signer_id === agent.signerId,
         );
         const nextSigners = hasSigner
           ? signers
           : [
               ...signers,
               {
-                signer_id: this.signerId,
-                override_policy_ids: [this.executionPolicyId],
+                signer_id: agent.signerId,
+                override_policy_ids: [agent.policyId],
               },
             ];
         if (!hasSigner)
@@ -1564,7 +1580,7 @@ export class TradingAgentService {
         const confirmed = await this.readWallet(agent.walletId);
         if (
           !(confirmed.additional_signers ?? []).some(
-            (item: any) => item?.signer_id === this.signerId,
+            (item: any) => item?.signer_id === agent.signerId,
           )
         )
           throw new Error("Privy signer restore was not confirmed");

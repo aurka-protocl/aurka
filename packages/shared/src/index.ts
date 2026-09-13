@@ -1,6 +1,7 @@
 export * from "./api.js";
 export * from "./auth.js";
 export * from "./agent.js";
+export * from "./agent-activity.js";
 export * from "./delegation.js";
 export * from "./activity.js";
 export * from "./events.js";
@@ -18,3 +19,4 @@ export * from "./router.js";
 export * from "./settlement.js";
 export * from "./space.js";
 export * from "./trading.js";
+export * from "./upstream-strategy.js";

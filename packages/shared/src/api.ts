@@ -150,6 +150,7 @@ const blockHeadSchema = diagnosticCheckSchema
     finalizedBlock: uint256StringSchema.nullable(),
     finalizedBlockHash: bytes32Schema.nullable(),
     finalizedAt: unixTimestampSchema.nullable(),
+    nextRetryAt: unixTimestampSchema.optional(),
   })
   .strict();
 
@@ -174,6 +175,10 @@ const sourceDiagnosticSchema = diagnosticCheckSchema
     lastObservedAt: unixTimestampSchema.nullable(),
     indexedBlock: uint256StringSchema.nullable(),
     lagBlocks: z.number().int().nonnegative().safe().nullable(),
+    lastSuccessAt: unixTimestampSchema.nullable().optional(),
+    nextAttemptAt: unixTimestampSchema.nullable().optional(),
+    failures: z.number().int().nonnegative().safe().optional(),
+    budgetExhausted: z.boolean().optional(),
   })
   .strict();
 
@@ -275,9 +280,12 @@ export const agentProposalRequestSchema = z
   })
   .strict();
 
+export const agentProviderSchema = z.enum(["openrouter", "vertex"]);
+export type AgentProvider = z.infer<typeof agentProviderSchema>;
+
 export const agentStatusSchema = z
   .object({
-    provider: z.literal("openrouter"),
+    provider: agentProviderSchema,
     configured: z.boolean(),
     model: z.string().min(1).max(128),
     custody: z.literal("wallet-approved"),
@@ -295,6 +303,7 @@ export const agentUnavailableCodeSchema = z.enum([
   "NETWORK_ERROR",
   "CONCURRENCY_LIMIT",
   "TOOL_BUDGET_EXHAUSTED",
+  "DAILY_CAP_EXCEEDED",
 ]);
 
 export type AgentUnavailableCode = z.infer<typeof agentUnavailableCodeSchema>;
@@ -306,6 +315,7 @@ const agentBlockedCodeSchema = z.enum([
   "SIMULATION_REJECTED",
   "SPACE_UNAVAILABLE",
   "PRICING_RENEWAL_REQUIRED",
+  "STRATEGY_MISMATCH",
 ]);
 
 const agentRuleAssetSchema = z
@@ -357,7 +367,7 @@ export const agentProposalResponseSchema = z.discriminatedUnion("status", [
   z
     .object({
       status: z.literal("READY"),
-      provider: z.literal("openrouter"),
+      provider: agentProviderSchema,
       model: z.string().min(1).max(128),
       selectedSpace: agentSelectedSpaceSchema,
       quote: quoteSchema,
@@ -372,7 +382,7 @@ export const agentProposalResponseSchema = z.discriminatedUnion("status", [
   z
     .object({
       status: z.literal("CLARIFICATION"),
-      provider: z.literal("openrouter"),
+      provider: agentProviderSchema,
       model: z.string().min(1).max(128),
       reason: z.string().min(1).max(500),
       nextAction: z.string().min(1).max(500),
@@ -383,7 +393,7 @@ export const agentProposalResponseSchema = z.discriminatedUnion("status", [
   z
     .object({
       status: z.literal("READ_ONLY_ANSWER"),
-      provider: z.literal("openrouter"),
+      provider: agentProviderSchema,
       model: z.string().min(1).max(128),
       selectedSpace: agentSelectedSpaceSchema,
       rules: agentRulesSchema,
@@ -394,7 +404,7 @@ export const agentProposalResponseSchema = z.discriminatedUnion("status", [
   z
     .object({
       status: z.literal("UNSUPPORTED_ACTION"),
-      provider: z.literal("openrouter"),
+      provider: agentProviderSchema,
       model: z.string().min(1).max(128),
       reason: z.string().min(1).max(500),
       nextAction: z.string().min(1).max(500),
@@ -408,7 +418,7 @@ export const agentProposalResponseSchema = z.discriminatedUnion("status", [
   z
     .object({
       status: z.literal("BLOCKED"),
-      provider: z.literal("openrouter"),
+      provider: agentProviderSchema,
       model: z.string().min(1).max(128),
       code: agentBlockedCodeSchema,
       reason: z.string().min(1).max(500),
@@ -419,7 +429,7 @@ export const agentProposalResponseSchema = z.discriminatedUnion("status", [
   z
     .object({
       status: z.literal("UNAVAILABLE"),
-      provider: z.literal("openrouter"),
+      provider: agentProviderSchema,
       model: z.string().min(1).max(128),
       code: agentUnavailableCodeSchema,
       reason: z.string().min(1).max(500),

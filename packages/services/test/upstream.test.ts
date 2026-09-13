@@ -9,6 +9,7 @@ import {
 import { DirectSolver } from "../src/solver/direct.js";
 import { FixtureProposalSigner } from "../src/solver/signing.js";
 import {
+  buildLegacyHardcodedOrderStrategy,
   buildUpstreamSwapVMData,
   buildUpstreamSwapVMStrategy,
   SWAPVM_AQUA_COMMIT,
@@ -143,6 +144,62 @@ describe("pinned upstream SwapVM settlement template", () => {
       expect(
         service.repository.getIntent(fixture.intent.intentId),
       ).toBeUndefined();
+    } finally {
+      service.close();
+    }
+  });
+
+  it("diagnoses the recorded legacy order encoding as owner repair, not price staleness", async () => {
+    const fixture = createCanonicalFixture();
+    // The fixture's placeholder addresses happen to sort USDC before WETH.
+    // Swap only the labels here so the diagnosis exercises the affected
+    // WETH-before-USDC deployment ordering without changing fixture hashes.
+    const current = {
+      ...fixture.snapshot,
+      swapVMGuard: guard,
+      portfolio: {
+        ...fixture.snapshot.portfolio,
+        assets: fixture.snapshot.portfolio.assets.map((asset) =>
+          asset.symbol === "USDC"
+            ? { ...asset, symbol: "WETH" }
+            : asset.symbol === "WETH"
+              ? { ...asset, symbol: "USDC" }
+              : asset,
+        ),
+      },
+    };
+    const usdc = current.portfolio.assets.find(
+      (asset) => asset.symbol === "USDC",
+    );
+    const weth = current.portfolio.assets.find(
+      (asset) => asset.symbol === "WETH",
+    );
+    if (!usdc || !weth) throw new Error("fixture pair missing");
+    const legacy = buildLegacyHardcodedOrderStrategy({
+      maker: current.feeAccounting.treasuryRecipient,
+      guard,
+      usdc,
+      weth,
+    });
+    const affected = { ...current, aquaStrategyHash: legacy.strategyHash };
+    const provider = {
+      getPositionSnapshot: async () => affected,
+      getSnapshot: async () => affected,
+    };
+    const service = new AurkaService({
+      provider,
+      seedFixture: false,
+      spaceMode: "fork",
+    });
+    try {
+      await expect(service.quote(fixture.intent)).rejects.toMatchObject({
+        code: "STRATEGY_MISMATCH",
+        details: expect.objectContaining({
+          state: "STRATEGY_MISMATCH",
+          legacyStrategyHash: legacy.strategyHash,
+          executable: false,
+        }),
+      });
     } finally {
       service.close();
     }

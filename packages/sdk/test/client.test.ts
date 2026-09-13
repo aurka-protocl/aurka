@@ -65,6 +65,30 @@ it("classifies invalid responses separately from transport failures", async () =
   ).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
   expect(new AurkaError("X", "test", 400)).toBeInstanceOf(Error);
 });
+it("retains the safe API request ID on structured failures", async () => {
+  vi.stubGlobal(
+    "fetch",
+    async () =>
+      new Response(
+        JSON.stringify({
+          ok: false,
+          error: {
+            code: "DELEGATED_TIMEOUT",
+            message: "The wallet service could not respond",
+            requestId: "request-local-1",
+          },
+        }),
+        { status: 503, headers: { "content-type": "application/json" } },
+      ),
+  );
+  await expect(
+    new AurkaClient({ baseUrl: "http://fixture" }).health(),
+  ).rejects.toMatchObject({
+    code: "DELEGATED_TIMEOUT",
+    statusCode: 503,
+    requestId: "request-local-1",
+  });
+});
 it("keeps the timeout active while reading a stalled HTTP body", async () => {
   const server = createServer((_request, response) => {
     response.writeHead(200, { "content-type": "application/json" });

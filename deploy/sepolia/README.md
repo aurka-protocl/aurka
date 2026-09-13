@@ -123,6 +123,11 @@ This selects Ethereum Sepolia (`11155111`) and points the Vite proxy at the
 gateway on port `8797`. The browser uses `/api/testnet` for chain-backed reads;
 the legacy local-fork gateway is not part of this app path.
 
+For the persistent hosted runtime, use `deploy/gcloud/`. Its container runs the
+same Sepolia app with `AURKA_SEPOLIA_GATEWAY_HOST=0.0.0.0`,
+`AURKA_SEPOLIA_API_PORT=8797`, and the database/state paths mounted under
+`/data`; do not copy the local `.env` or `.aurka` database into Vercel.
+
 ## Size result
 
 The original `AurkaSwapVMRouter` remains the full local regression artifact and

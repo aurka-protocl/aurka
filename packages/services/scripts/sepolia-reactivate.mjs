@@ -13,6 +13,7 @@ import {
   stringToHex,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
+import { buildUpstreamStrategy } from "@aurka/shared";
 
 import { hashAquaBalances } from "../dist/solver/hash.js";
 
@@ -165,7 +166,7 @@ function capacityEpochId(epoch) {
 }
 
 async function main() {
-  const manifestPath = path.join(
+  const manifestPath = path.resolve(
     ROOT,
     value("AURKA_SEPOLIA_MANIFEST_PATH") ??
       "deploy/sepolia/sepolia-deployment.json",
@@ -233,6 +234,43 @@ async function main() {
   const riskContract = { address: riskRegistry, abi: riskArtifact.abi };
   const oracleContract = { address: oracle, abi: oracleArtifact.abi };
   const aquaContract = { address: aqua, abi: aquaArtifact.abi };
+
+  // The operator may refresh timestamps, but it must never use its authority
+  // to make an incompatible immutable strategy appear tradable.
+  const currentPriceRows = await Promise.all(
+    [manifest.tokens.usdc.address, manifest.tokens.weth.address].map((token) =>
+      publicClient.readContract({
+        ...oracleContract,
+        functionName: "getPrice",
+        args: [token],
+      }),
+    ),
+  );
+  const canonicalCurrent = buildUpstreamStrategy({
+    maker: manifest.space.vault,
+    guard: manifest.oneInch.executionHelpers.swapVMGuard,
+    traderInput: {
+      token: manifest.tokens.weth.address,
+      decimals: Number(manifest.tokens.weth.decimals),
+      price: currentPriceRows[1][0],
+      priceDecimals: Number(currentPriceRows[1][1]),
+    },
+    traderOutput: {
+      token: manifest.tokens.usdc.address,
+      decimals: Number(manifest.tokens.usdc.decimals),
+      price: currentPriceRows[0][0],
+      priceDecimals: Number(currentPriceRows[0][1]),
+    },
+  });
+  if (
+    canonicalCurrent.strategyHash.toLowerCase() !== strategyHash.toLowerCase()
+  ) {
+    const error = new Error(
+      "The immutable Space strategy does not match the canonical current-price encoding; owner recovery is required",
+    );
+    error.code = "STRATEGY_MISMATCH";
+    throw error;
+  }
 
   const priceRefreshTransactions = {};
   const shouldRefreshMockPrices =
@@ -338,6 +376,41 @@ async function main() {
   );
   if (!inputPrice || !outputPrice) {
     throw new Error("the policy asset list does not contain WETH and USDC");
+  }
+  const priceNow = Number(block.timestamp);
+  const staleConfirmedPrices = prices.filter(
+    ({ observedAt }) =>
+      observedAt > priceNow ||
+      priceNow - observedAt > Number(policy.priceMaxAgeSeconds),
+  );
+  if (staleConfirmedPrices.length > 0) {
+    throw new Error(
+      "confirmed oracle observations are not fresh after the price operation; capacity was not renewed",
+    );
+  }
+
+  if (value("AURKA_SEPOLIA_RENEW_CAPACITY") === "false") {
+    console.log(
+      JSON.stringify(
+        {
+          account: account.address,
+          chainId: CHAIN_ID,
+          positionId,
+          strategyHash,
+          priceRefreshTransactions,
+          prices: prices.map(({ token, price, priceDecimals, observedAt }) => ({
+            token,
+            price: price.toString(),
+            priceDecimals,
+            observedAt,
+          })),
+          capacityRenewed: false,
+        },
+        null,
+        2,
+      ),
+    );
+    return;
   }
 
   const balances = await Promise.all(

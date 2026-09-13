@@ -93,9 +93,9 @@ function friendlyWalletError(error: unknown): string {
   if (/4001|rejected|denied|cancel/i.test(message))
     return "The wallet rejected the request. Try again when you are ready.";
   if (/network|provider|disconnected/i.test(message))
-    return "The wallet connection is unavailable. Unlock it and try again.";
+    return "Your wallet connection is unavailable. Unlock it and try again.";
   if (message) return "The wallet could not complete that request. Try again.";
-  return "The wallet request failed. Try again or inspect the wallet details.";
+  return "The wallet request failed. Try again.";
 }
 
 export function WalletProvider({
@@ -244,7 +244,7 @@ export function WalletStatusControl() {
         {wallet.status === "connected"
           ? `Connected · ${shortAddress(wallet.address ?? "")}`
           : wallet.status === "wrong-network"
-            ? "Switch to AURKA test network"
+            ? "Switch to Ethereum Sepolia"
             : wallet.status === "unsupported-network"
               ? "Unsupported network"
               : wallet.status === "connecting"
@@ -269,12 +269,14 @@ export function WalletStateMessage() {
   if (wallet.status === "connected") return null;
   const text =
     wallet.status === "wrong-network"
-      ? `Your wallet is on chain ${wallet.chainId ?? "unknown"}. Select the AURKA test network (chain ${supportedChainId}); AURKA never switches it automatically.`
+      ? supportedChainId === 11155111
+        ? "Switch your wallet to Ethereum Sepolia to continue."
+        : "Switch your wallet to the supported network to continue."
       : wallet.status === "unsupported-network"
-        ? "Install or unlock an Ethereum wallet, then connect it to the supported AURKA network."
+        ? "Connect an Ethereum wallet on the supported network to continue."
         : wallet.status === "error"
           ? (wallet.error ?? "The wallet could not connect.")
-          : "Connect a wallet when you are ready to sign. Viewing this page does not request a signature.";
+          : "Connect your wallet to continue.";
   return (
     <p className="rounded-lg border border-slate-800 bg-slate-950/60 p-3 text-sm leading-6 text-slate-400">
       {text}

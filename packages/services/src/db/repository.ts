@@ -7,6 +7,7 @@ import {
   gte,
   isNotNull,
   lte,
+  lt,
   ne,
   or,
   sql,
@@ -14,6 +15,10 @@ import {
 
 import {
   activityItemSchema,
+  agentActivityEventSchema,
+  type AgentActivityDetails,
+  type AgentActivityEvent,
+  type AgentActivityEventType,
   atomicSettlementIntentSchema,
   atomicSettlementProposalSchema,
   executionSchema,
@@ -64,6 +69,8 @@ import {
   agentProvisioningOperations,
   agentFundingOperations,
   delegatedWorkerLeases,
+  agentActivityEvents,
+  agentProviderUsage,
   idempotencyKeys,
   indexingCheckpoints,
   indexingHeaders,
@@ -856,6 +863,7 @@ export class ServiceRepository {
       (existingSpace.state === "DRAFT" ||
         existingSpace.state === "PENDING" ||
         existingSpace.state === "PRICING_NEEDS_RENEWAL" ||
+        existingSpace.state === "STRATEGY_MISMATCH" ||
         existingSpace.state === "FAILED")
         ? existingSpace.state
         : value.policy.paused
@@ -990,6 +998,25 @@ export class ServiceRepository {
           ? { failureReason: draftMigrationReason }
           : {}),
     }) as SpaceRecord;
+  }
+
+  /** Remove a locally managed Space after its owner has recovered its funds. */
+  deleteSpace(id: string): boolean {
+    const existing = this.getSpace(id);
+    if (!existing) return false;
+    const policyId = existing.identity.policyId;
+    return this.db.transaction((tx) => {
+      tx.delete(spaceChanges).where(eq(spaceChanges.spaceId, id)).run();
+      tx.delete(capacityEpochs).where(eq(capacityEpochs.positionId, id)).run();
+      tx.delete(managedAssets)
+        .where(eq(managedAssets.policyId, policyId))
+        .run();
+      tx.delete(policies).where(eq(policies.id, policyId)).run();
+      tx.delete(positions).where(eq(positions.id, id)).run();
+      return (
+        tx.delete(spaces).where(eq(spaces.id, id)).run().changes > 0
+      );
+    });
   }
 
   listSpaces(
@@ -1618,6 +1645,9 @@ export class ServiceRepository {
         lastRecoveryTransactionHash:
           session.lastRecoveryTransactionHash ?? null,
         lastResult: session.lastResult ?? null,
+        lastEvaluatedAt: session.lastEvaluatedAt ?? null,
+        nextCheckAt: session.nextCheckAt ?? null,
+        consecutiveFailures: session.consecutiveFailures ?? 0,
         updatedAt: session.updatedAt,
       })
       .onConflictDoUpdate({
@@ -1637,6 +1667,9 @@ export class ServiceRepository {
           lastRecoveryTransactionHash:
             session.lastRecoveryTransactionHash ?? null,
           lastResult: session.lastResult ?? null,
+          lastEvaluatedAt: session.lastEvaluatedAt ?? null,
+          nextCheckAt: session.nextCheckAt ?? null,
+          consecutiveFailures: session.consecutiveFailures ?? 0,
           updatedAt: session.updatedAt,
         },
       })
@@ -1694,6 +1727,9 @@ export class ServiceRepository {
         ? { lastRecoveryTransactionHash: row.lastRecoveryTransactionHash }
         : {}),
       ...(row.lastResult ? { lastResult: row.lastResult } : {}),
+      lastEvaluatedAt: row.lastEvaluatedAt,
+      nextCheckAt: row.nextCheckAt,
+      consecutiveFailures: row.consecutiveFailures,
       updatedAt: row.updatedAt,
       trades,
     });
@@ -1733,6 +1769,9 @@ export class ServiceRepository {
         | "lastTransactionHash"
         | "lastRecoveryTransactionHash"
         | "lastResult"
+        | "lastEvaluatedAt"
+        | "nextCheckAt"
+        | "consecutiveFailures"
       >
     >,
   ): boolean {
@@ -1754,6 +1793,15 @@ export class ServiceRepository {
         ...(update.lastResult === undefined
           ? {}
           : { lastResult: update.lastResult }),
+        ...(update.lastEvaluatedAt === undefined
+          ? {}
+          : { lastEvaluatedAt: update.lastEvaluatedAt }),
+        ...(update.nextCheckAt === undefined
+          ? {}
+          : { nextCheckAt: update.nextCheckAt }),
+        ...(update.consecutiveFailures === undefined
+          ? {}
+          : { consecutiveFailures: update.consecutiveFailures }),
         updatedAt: now(),
       })
       .where(
@@ -2153,6 +2201,9 @@ export class ServiceRepository {
         | "lastTransactionHash"
         | "lastRecoveryTransactionHash"
         | "lastResult"
+        | "lastEvaluatedAt"
+        | "nextCheckAt"
+        | "consecutiveFailures"
       >
     >,
   ): void {
@@ -2174,10 +2225,229 @@ export class ServiceRepository {
         ...(update.lastResult === undefined
           ? {}
           : { lastResult: update.lastResult }),
+        ...(update.lastEvaluatedAt === undefined
+          ? {}
+          : { lastEvaluatedAt: update.lastEvaluatedAt }),
+        ...(update.nextCheckAt === undefined
+          ? {}
+          : { nextCheckAt: update.nextCheckAt }),
+        ...(update.consecutiveFailures === undefined
+          ? {}
+          : { consecutiveFailures: update.consecutiveFailures }),
         updatedAt: now(),
       })
       .where(eq(delegatedSessions.id, id))
       .run();
+  }
+
+  recordAgentActivity(input: {
+    readonly dedupeKey: string;
+    readonly ownerAddress: string;
+    readonly agentId: string;
+    readonly sessionId?: string;
+    readonly occurredAt?: number;
+    readonly eventType: AgentActivityEventType;
+    readonly code: string;
+    readonly summary: string;
+    readonly correlationId?: string;
+    readonly transactionHash?: string;
+    readonly details?: AgentActivityDetails;
+  }): AgentActivityEvent {
+    const event = agentActivityEventSchema.parse({
+      id: hashBytes(`agent-activity:${input.dedupeKey}`),
+      ownerAddress: input.ownerAddress,
+      agentId: input.agentId,
+      ...(input.sessionId === undefined ? {} : { sessionId: input.sessionId }),
+      occurredAt: input.occurredAt ?? now(),
+      eventType: input.eventType,
+      code: input.code.slice(0, 64),
+      summary: input.summary.slice(0, 500),
+      ...(input.correlationId === undefined
+        ? {}
+        : { correlationId: input.correlationId }),
+      ...(input.transactionHash === undefined
+        ? {}
+        : { transactionHash: input.transactionHash }),
+      ...(input.details === undefined ? {} : { details: input.details }),
+    });
+    this.db
+      .insert(agentActivityEvents)
+      .values({
+        id: event.id,
+        dedupeKey: input.dedupeKey,
+        ownerAddress: event.ownerAddress.toLowerCase(),
+        agentId: event.agentId,
+        sessionId: event.sessionId ?? null,
+        eventType: event.eventType,
+        code: event.code,
+        summary: event.summary,
+        correlationId: event.correlationId ?? null,
+        transactionHash: event.transactionHash ?? null,
+        detailsJson: event.details ? json(event.details) : null,
+        createdAt: event.occurredAt,
+      })
+      .onConflictDoNothing()
+      .run();
+    const row = this.db
+      .select()
+      .from(agentActivityEvents)
+      .where(eq(agentActivityEvents.dedupeKey, input.dedupeKey))
+      .get();
+    return row ? this.agentActivityFromRow(row) : event;
+  }
+
+  private agentActivityFromRow(
+    row: typeof agentActivityEvents.$inferSelect,
+  ): AgentActivityEvent {
+    return agentActivityEventSchema.parse({
+      id: row.id,
+      ownerAddress: row.ownerAddress,
+      agentId: row.agentId,
+      ...(row.sessionId ? { sessionId: row.sessionId } : {}),
+      occurredAt: row.createdAt,
+      eventType: row.eventType,
+      code: row.code,
+      summary: row.summary,
+      ...(row.correlationId ? { correlationId: row.correlationId } : {}),
+      ...(row.transactionHash ? { transactionHash: row.transactionHash } : {}),
+      ...(row.detailsJson ? { details: parse(row.detailsJson) } : {}),
+    });
+  }
+
+  listAgentActivity(input: {
+    readonly ownerAddress: string;
+    readonly agentId: string;
+    readonly sessionId?: string;
+    readonly limit: number;
+    readonly cursor?: string;
+  }): Page<AgentActivityEvent> {
+    const cursor = decodeActivityCursor(input.cursor);
+    const rows = this.db
+      .select()
+      .from(agentActivityEvents)
+      .where(
+        and(
+          sql`lower(${agentActivityEvents.ownerAddress}) = ${input.ownerAddress.toLowerCase()}`,
+          eq(agentActivityEvents.agentId, input.agentId),
+          input.sessionId === undefined
+            ? undefined
+            : eq(agentActivityEvents.sessionId, input.sessionId),
+          cursor
+            ? or(
+                lt(agentActivityEvents.createdAt, cursor.timestamp),
+                and(
+                  eq(agentActivityEvents.createdAt, cursor.timestamp),
+                  lt(agentActivityEvents.id, cursor.id),
+                ),
+              )
+            : undefined,
+        ),
+      )
+      .orderBy(
+        desc(agentActivityEvents.createdAt),
+        desc(agentActivityEvents.id),
+      )
+      .limit(input.limit + 1)
+      .all();
+    const hasMore = rows.length > input.limit;
+    const items = rows
+      .slice(0, input.limit)
+      .map((row) => this.agentActivityFromRow(row));
+    const last = rows[input.limit - 1];
+    return {
+      items,
+      nextCursor:
+        hasMore && last
+          ? encodeActivityCursor({ timestamp: last.createdAt, id: last.id })
+          : null,
+    };
+  }
+
+  /** Atomically reserve one model evaluation against both the owner and
+   * global daily budgets. The reservation is deliberately conservative: it
+   * uses the bounded request's maximum token estimate. */
+  consumeAgentProviderBudget(input: {
+    readonly ownerAddress: string;
+    readonly provider: "openrouter" | "vertex";
+    readonly day: string;
+    readonly requestCap: number;
+    readonly tokenCap: number;
+    readonly globalRequestCap: number;
+    readonly globalTokenCap: number;
+    readonly estimatedInputTokens: number;
+    readonly estimatedOutputTokens: number;
+  }): boolean {
+    const scopes = [
+      {
+        scope: "owner",
+        scopeKey: input.ownerAddress.toLowerCase(),
+        requestCap: input.requestCap,
+        tokenCap: input.tokenCap,
+      },
+      {
+        scope: "global",
+        scopeKey: "global",
+        requestCap: input.globalRequestCap,
+        tokenCap: input.globalTokenCap,
+      },
+    ] as const;
+    return this.db.transaction((tx) => {
+      const current = scopes.map((scope) =>
+        tx
+          .select()
+          .from(agentProviderUsage)
+          .where(
+            and(
+              eq(agentProviderUsage.scope, scope.scope),
+              eq(agentProviderUsage.scopeKey, scope.scopeKey),
+              eq(agentProviderUsage.day, input.day),
+              eq(agentProviderUsage.provider, input.provider),
+            ),
+          )
+          .get(),
+      );
+      const estimatedTokens =
+        input.estimatedInputTokens + input.estimatedOutputTokens;
+      if (
+        current.some(
+          (row, index) =>
+            row !== undefined &&
+            (row.requestCount + 1 > scopes[index]!.requestCap ||
+              row.inputTokens + row.outputTokens + estimatedTokens >
+                scopes[index]!.tokenCap),
+        )
+      )
+        return false;
+      const at = now();
+      for (const scope of scopes)
+        tx.insert(agentProviderUsage)
+          .values({
+            scope: scope.scope,
+            scopeKey: scope.scopeKey,
+            day: input.day,
+            provider: input.provider,
+            requestCount: 1,
+            inputTokens: input.estimatedInputTokens,
+            outputTokens: input.estimatedOutputTokens,
+            updatedAt: at,
+          })
+          .onConflictDoUpdate({
+            target: [
+              agentProviderUsage.scope,
+              agentProviderUsage.scopeKey,
+              agentProviderUsage.day,
+              agentProviderUsage.provider,
+            ],
+            set: {
+              requestCount: sql`${agentProviderUsage.requestCount} + 1`,
+              inputTokens: sql`${agentProviderUsage.inputTokens} + ${input.estimatedInputTokens}`,
+              outputTokens: sql`${agentProviderUsage.outputTokens} + ${input.estimatedOutputTokens}`,
+              updatedAt: at,
+            },
+          })
+          .run();
+      return true;
+    });
   }
 
   saveIntent(
@@ -2922,6 +3192,7 @@ export class ServiceRepository {
         "PENDING",
         "ACTIVE",
         "PRICING_NEEDS_RENEWAL",
+        "STRATEGY_MISMATCH",
         "PAUSED",
         "FAILED",
       ].includes(change.payload.state)
@@ -2930,6 +3201,7 @@ export class ServiceRepository {
             | "PENDING"
             | "ACTIVE"
             | "PRICING_NEEDS_RENEWAL"
+            | "STRATEGY_MISMATCH"
             | "PAUSED"
             | "FAILED")
         : undefined;

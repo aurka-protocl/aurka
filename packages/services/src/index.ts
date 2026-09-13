@@ -10,6 +10,8 @@ export * from "./service.js";
 export * from "./risk-service.js";
 export * from "./solver/index.js";
 export * from "./agent/openrouter.js";
+export * from "./agent/provider.js";
+export * from "./agent/vertex.js";
 export * from "./agent/delegated.js";
 export * from "./agent/trading-agents.js";
 export * from "./agent/worker.js";

@@ -7,7 +7,7 @@
   "type": "module",
   "packageManager": "pnpm@10.13.1",
   "engines": {
-    "node": ">=23.3.0 <24"
+    "node": ">=24.0.0 <25"
   },
   "scripts": {
     "build": "pnpm --filter @aurka/trader-app... --filter @aurka/services... --filter @aurka/graph... --filter @aurka/wallet... --filter @aurka/watchtower... build",
@@ -27,6 +27,7 @@
     "sepolia:space": "node --env-file-if-exists=.env.sepolia packages/services/scripts/sepolia-space-setup.mjs",
     "sepolia:trade": "node --env-file-if-exists=.env.sepolia packages/services/scripts/sepolia-trade-acceptance.mjs",
     "sepolia:reactivate": "node --env-file-if-exists=.env.sepolia --env-file-if-exists=.env packages/services/scripts/sepolia-reactivate.mjs",
+    "sepolia:price-operator": "node --env-file-if-exists=.env.sepolia --env-file-if-exists=.env packages/services/scripts/sepolia-price-operator.mjs",
     "sepolia:app": "node --env-file-if-exists=.env.sepolia --env-file-if-exists=.env packages/services/scripts/sepolia-app.mjs",
     "contracts:build-upstream": "node contracts/script/build-upstream.mjs",
     "contracts:check-upstream": "node contracts/script/build-upstream.mjs --check",

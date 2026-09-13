@@ -120,6 +120,20 @@
       "when": 1789166400002,
       "tag": "0016_agent_provisioning_leases",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1789166400003,
+      "tag": "0017_agent_activity",
+      "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1789166400004,
+      "tag": "0018_agent_provider_usage",
+      "breakpoints": true
     }
   ]
 }

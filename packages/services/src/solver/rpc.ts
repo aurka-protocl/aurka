@@ -106,11 +106,16 @@ export class Eip1193RouterSimulator implements RouterSimulator {
       intentHash,
       intent.signature,
     );
-    const call = toEthCall(request);
+    // The allowance approval, when needed, is a separate transaction that is
+    // mined after the quote snapshot. Simulate against the current chain state
+    // so the exact check sees that approval and mirrors the transaction the
+    // trader is about to send. The signed snapshot/commitments are still
+    // validated by the router itself.
+    const call = toEthCall(request, intent.trader);
     try {
       const result = await this.transport.request({
         method: "eth_call",
-        params: [call, `0x${snapshot.snapshotBlock.toString(16)}`],
+        params: [call, "latest"],
       });
       if (typeof result !== "string" || !/^0x[0-9a-fA-F]*$/.test(result)) {
         return {
@@ -131,11 +136,7 @@ export class Eip1193RouterSimulator implements RouterSimulator {
         trace = traceMessage(
           await this.transport.request({
             method: "debug_traceCall",
-            params: [
-              call,
-              `0x${snapshot.snapshotBlock.toString(16)}`,
-              { tracer: "callTracer" },
-            ],
+            params: [call, "latest", { tracer: "callTracer" }],
           }),
         );
       } catch {
@@ -152,8 +153,12 @@ export class Eip1193RouterSimulator implements RouterSimulator {
   }
 }
 
-function toEthCall(request: RouterTransactionRequest): Record<string, string> {
+function toEthCall(
+  request: RouterTransactionRequest,
+  from: string,
+): Record<string, string> {
   return {
+    from,
     to: request.to,
     data: request.data,
     value: `0x${BigInt(request.value).toString(16)}`,

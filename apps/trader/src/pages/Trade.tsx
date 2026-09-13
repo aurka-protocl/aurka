@@ -1,31 +1,20 @@
 import { useEffect, useRef, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useParams } from "react-router-dom";
 import { AurkaClient } from "@aurka/sdk";
 import {
-  bindingConstraintLabel,
-  findPortfolioAsset,
-  formatBasisPoints,
-  formatGroupedDecimalUnits,
-  formatPrice,
-  formatScaledBasisPoints,
-  formatSnapshotAge,
+  adjustAssetAmountDown,
+  formatDecimalUnits,
   formatTokenAmount,
-  formatValueAmount,
   parseTokenAmount,
   type AssetSnapshot,
   type AtomicSettlementIntent,
-  type PortfolioSnapshot,
   type Position,
   type Quote,
   type SpaceRecord,
 } from "@aurka/shared";
-import { ShieldCheck } from "lucide-react";
 import { apiBaseUrl, appMode } from "../config";
 import { spaceAdapter } from "../domain/spaces";
-import {
-  lifecycleLabel,
-  userFacingError,
-} from "../ui";
+import { displayAssetSymbol, userFacingError } from "../ui";
 import { useWallet, WalletStateMessage } from "../wallet";
 
 const client = new AurkaClient({ baseUrl: apiBaseUrl });
@@ -39,7 +28,6 @@ type TradeStage =
   | "quoting"
   | "quote"
   | "signing"
-  | "prepared"
   | "submitting"
   | "confirmed"
   | "failed";
@@ -95,10 +83,18 @@ interface SwapPair {
 }
 
 interface QuoteResult {
+  readonly source: TradeSource;
   readonly intent: AtomicSettlementIntent;
   readonly quote: Quote;
   readonly solved: Awaited<ReturnType<AurkaClient["solve"]>>;
   readonly requestedInputAmount: string;
+}
+
+interface AmountAdjustment {
+  readonly requestedAmount: string;
+  readonly supportedAmount: string;
+  readonly remainder: string;
+  readonly increment: string;
 }
 
 interface TransactionRequest {
@@ -160,20 +156,42 @@ function hex(value: bigint): string {
   return `0x${value.toString(16)}`;
 }
 
+function formatFeePercentage(value: string): string {
+  try {
+    return `${formatDecimalUnits(BigInt(value), 20)}%`;
+  } catch {
+    return "—";
+  }
+}
+
 function friendlyError(error: unknown): string {
-  const raw = error instanceof Error ? error.message : "Trade request failed";
+  const raw = error instanceof Error ? error.message : "Swap request failed";
   if (/4001|rejected|denied|cancel/i.test(raw))
     return "The wallet rejected this request. Review the exact trade and try again when ready.";
   if (/transaction is still pending/i.test(raw))
-    return "The transaction is still pending. Check Activity before trying again.";
+    return "Your swap is still processing. Check Activity before trying again.";
   if (/transaction reverted/i.test(raw))
-    return "The network rejected this trade. No completed trade is shown.";
+    return "The network rejected this swap. No completed swap is shown.";
+  if (/below the minimum executable amount/i.test(raw)) return raw;
+  if (/amount|precision|decimal/i.test(raw))
+    return "Enter a valid token amount using the supported decimals.";
   if (/source state changed|snapshot.*changed|quote expired/i.test(raw))
-    return "The offer changed. Refresh it before trading.";
+    return "The rate changed. Request an updated rate before continuing.";
   return userFacingError(
     error,
-    "Trade request failed. Review the Space and try again.",
+    "We couldn't complete the swap. Review the details and try again.",
   );
+}
+
+function errorCode(error: unknown): string | undefined {
+  if (
+    error &&
+    typeof error === "object" &&
+    "code" in error &&
+    typeof error.code === "string"
+  )
+    return error.code;
+  return undefined;
 }
 
 function pairsFor(position: Position | undefined): SwapPair[] {
@@ -267,7 +285,6 @@ export default function Trade(): JSX.Element {
 
 function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
   const wallet = useWallet();
-  const navigate = useNavigate();
   const [spaces, setSpaces] = useState<SpaceRecord[]>([]);
   const [selectedSpaceId, setSelectedSpaceId] = useState(routeSpaceId ?? "");
   const [source, setSource] = useState<TradeSource>();
@@ -275,19 +292,20 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
   const [sourceError, setSourceError] = useState<string | null>(null);
   const [pageError, setPageError] = useState<string | null>(null);
   const [pairKey, setPairKey] = useState("");
-  const [amount, setAmount] = useState("2");
+  const [amount, setAmount] = useState("");
   const [quoteResult, setQuoteResult] = useState<QuoteResult>();
-  const [prepared, setPrepared] = useState<TransactionRequest>();
   const [confirmed, setConfirmed] = useState<Receipt>();
-  const [transactionHash, setTransactionHash] = useState("");
   const [stage, setStage] = useState<TradeStage>("idle");
-  const [status, setStatus] = useState("Choose a Space and request a quote");
+  const [status, setStatus] = useState("Enter an amount to see the rate");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [clock, setClock] = useState(() => Math.floor(Date.now() / 1000));
+  const [walletInputBalance, setWalletInputBalance] = useState<bigint>();
+  const [amountAdjustment, setAmountAdjustment] = useState<AmountAdjustment>();
   const flowVersion = useRef(0);
   const nonce = useRef(Date.now());
   const sourceRef = useRef<TradeSource>();
+  const routedSelection = useRef(false);
 
   function publishSource(next: TradeSource) {
     sourceRef.current = next;
@@ -297,7 +315,6 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
   function invalidateQuote(clearConfirmation = true) {
     flowVersion.current += 1;
     setQuoteResult(undefined);
-    setPrepared(undefined);
     setStage("idle");
     if (clearConfirmation) setConfirmed(undefined);
   }
@@ -335,7 +352,7 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
             !next.some((candidate) => candidate.identity.id === routeSpaceId)
           ) {
             setPageError(
-              "Space not found. Choose an available Space to trade.",
+              "This Space isn't available. Choose an active Space to continue.",
             );
             setSelectedSpaceId("");
             return;
@@ -370,9 +387,14 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
     }
     let active = true;
     let refreshInFlight = false;
+    const preserveCurrentTrade = routedSelection.current;
+    routedSelection.current = false;
     sourceRef.current = undefined;
-    setSource(undefined);
-    invalidateQuote();
+    if (!preserveCurrentTrade) {
+      setSource(undefined);
+      invalidateQuote();
+      setAmountAdjustment(undefined);
+    }
     setSourceLoading(true);
     setSourceError(null);
     const refresh = async () => {
@@ -419,8 +441,44 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
   }, [selectedSpaceId]);
 
   useEffect(() => {
-    const hadPendingTrade = quoteResult !== undefined || prepared !== undefined;
+    const token = pairFor(source?.position, pairKey)?.input.token;
+    if (
+      appMode !== "testnet" ||
+      !wallet.provider ||
+      !wallet.address ||
+      !token
+    ) {
+      setWalletInputBalance(undefined);
+      return;
+    }
+    let active = true;
+    void wallet.provider
+      .request({
+        method: "eth_call",
+        params: [
+          {
+            to: token,
+            data: `${ERC20_BALANCE_OF}${wordAddress(wallet.address)}`,
+          },
+          "latest",
+        ],
+      })
+      .then((value) => {
+        if (active && typeof value === "string")
+          setWalletInputBalance(BigInt(value));
+      })
+      .catch(() => {
+        if (active) setWalletInputBalance(undefined);
+      });
+    return () => {
+      active = false;
+    };
+  }, [pairKey, source, wallet.address, wallet.provider, wallet.revision]);
+
+  useEffect(() => {
+    const hadPendingTrade = quoteResult !== undefined;
     invalidateQuote();
+    setAmountAdjustment(undefined);
     setError(null);
     setStatus(
       wallet.status === "connected"
@@ -431,6 +489,14 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
     );
   }, [wallet.revision]);
 
+  const sourceSnapshotHash = source?.position.currentPortfolio?.snapshotHash;
+  useEffect(() => {
+    if (amountAdjustment !== undefined) setAmountAdjustment(undefined);
+    if (quoteResult !== undefined) invalidateQuote(false);
+    // A new authoritative price/balance snapshot invalidates both a quote and
+    // any earlier adjustment consent.
+  }, [pairKey, sourceSnapshotHash]);
+
   useEffect(() => {
     const timer = window.setInterval(() => {
       setClock(sourceClock(source));
@@ -439,32 +505,17 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
   }, [source]);
 
   const pair = pairFor(source?.position, pairKey);
-  const availablePairs = pairsFor(source?.position);
+  const inputSymbol = pair ? displayAssetSymbol(pair.input.symbol) : "Token";
+  const outputSymbol = pair ? displayAssetSymbol(pair.output.symbol) : "Token";
   const quoteExpired =
     quoteResult !== undefined && quoteResult.quote.expiresAt <= clock;
   const quoteStale =
     quoteResult !== undefined && quoteIsStale(quoteResult, source, clock);
-  const selectedSpace = spaces.find(
-    (candidate) => candidate.identity.id === selectedSpaceId,
-  );
-
-  function selectSpace(id: string) {
-    invalidateQuote();
-    setError(null);
-    setSelectedSpaceId(id);
-    if (id) navigate(`/trade/${encodeURIComponent(id)}`);
-  }
-
   function updateAmount(value: string) {
     invalidateQuote();
+    setAmountAdjustment(undefined);
     setError(null);
     setAmount(value);
-  }
-
-  function updatePair(value: string) {
-    invalidateQuote();
-    setError(null);
-    setPairKey(value);
   }
 
   function assertVersion(version: number, walletRevision?: number) {
@@ -478,82 +529,138 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
       );
   }
 
-  async function requestQuote() {
-    if (!source || !pair || pair.key !== pairKey)
-      throw new Error("Select an available Space and trading pair first.");
+  async function requestQuote(acceptedAmount?: bigint) {
+    if (!source || !pair)
+      throw new Error("Swaps are temporarily unavailable. Try again shortly.");
     const version = ++flowVersion.current;
     setBusy(true);
     setStage("quoting");
     setError(null);
-    setPrepared(undefined);
     setConfirmed(undefined);
     try {
-      const latest = await loadSource(selectedSpaceId);
-      assertVersion(version);
-      publishSource(latest);
-      const latestPair = pairFor(latest.position, pairKey);
-      if (!latestPair || latestPair.key !== pairKey)
-        throw new Error(
-          "The available trade direction changed. Choose it again.",
-        );
-      const requestedInputAmount = parseTokenAmount(
-        amount.trim(),
-        latestPair.input.decimals,
-      );
-      if (requestedInputAmount === 0n)
-        throw new Error("Enter an amount greater than zero.");
       const trader =
         appMode === "testnet"
           ? wallet.address
           : (wallet.address ?? DEMO_TRADER);
-      if (!trader)
-        throw new Error(
-          "Connect the counterparty wallet before requesting a testnet quote.",
-        );
-      if (appMode === "testnet" && latest.testnet)
-        await validateWallet(latest.testnet, trader);
-      const now = sourceClock(latest);
-      const input = {
-        positionId: latest.position.id,
-        trader,
-        traderInputToken: latestPair.input.token,
-        traderOutputToken: latestPair.output.token,
-        requestedTraderInputAmount: requestedInputAmount.toString(),
-        minimumTraderOutputValue: "0",
-        nonce: String(++nonce.current),
-        deadline: now + 300,
-      };
-      const initialIntent = await client.prepareIntentFromTokenAmount(input);
-      const preview = await client.solve(initialIntent);
+      if (!trader) throw new Error("Connect your wallet before continuing.");
+      const candidateIds = routeSpaceId
+        ? [routeSpaceId]
+        : spaces
+            .filter((candidate) => candidate.identity.state === "ACTIVE")
+            .map((candidate) => candidate.identity.id);
+      const ids = candidateIds.length ? candidateIds : [selectedSpaceId];
+      let best: QuoteResult | undefined;
+      let firstError: unknown;
+      for (const id of ids) {
+        try {
+          const latest = await loadSource(id);
+          assertVersion(version);
+          const latestPair = pairFor(latest.position, pairKey);
+          if (!latestPair)
+            throw new Error(
+              "No supported trading pair is available right now.",
+            );
+          const requestedInputAmount =
+            acceptedAmount ??
+            parseTokenAmount(amount.trim(), latestPair.input.decimals);
+          if (requestedInputAmount === 0n)
+            throw new Error("Enter an amount greater than zero.");
+          const valueDecimals =
+            latest.position.currentPortfolio?.valueDecimals ?? 0;
+          const adjustment = adjustAssetAmountDown(
+            requestedInputAmount,
+            latestPair.input,
+            valueDecimals,
+          );
+          if (adjustment.supportedAmount === 0n) {
+            setQuoteResult(undefined);
+            setAmountAdjustment({
+              requestedAmount: requestedInputAmount.toString(),
+              supportedAmount: "0",
+              remainder: adjustment.remainder.toString(),
+              increment: adjustment.increment.toString(),
+            });
+            setStage("idle");
+            setStatus("Edit the amount to continue");
+            return;
+          }
+          if (adjustment.supportedAmount !== requestedInputAmount) {
+            setQuoteResult(undefined);
+            setAmountAdjustment({
+              requestedAmount: requestedInputAmount.toString(),
+              supportedAmount: adjustment.supportedAmount.toString(),
+              remainder: adjustment.remainder.toString(),
+              increment: adjustment.increment.toString(),
+            });
+            setStage("idle");
+            setStatus("Review the adjusted amount before continuing");
+            return;
+          }
+          if (appMode === "testnet" && latest.testnet)
+            await validateWallet(latest.testnet, trader);
+          const now = sourceClock(latest);
+          const input = {
+            positionId: latest.position.id,
+            trader,
+            traderInputToken: latestPair.input.token,
+            traderOutputToken: latestPair.output.token,
+            requestedTraderInputAmount: adjustment.supportedAmount.toString(),
+            minimumTraderOutputValue: "0",
+            nonce: String(++nonce.current),
+            deadline: now + 300,
+          };
+          const initialIntent =
+            await client.prepareIntentFromTokenAmount(input);
+          const preview = await client.solve(initialIntent);
+          assertVersion(version);
+          // The signed intent commits to the net output that was reviewed.
+          const intent = await client.prepareIntent({
+            positionId: latest.position.id,
+            trader,
+            traderInputToken: latestPair.input.token,
+            traderOutputToken: latestPair.output.token,
+            requestedValue: initialIntent.requestedValue,
+            minimumTraderOutputValue: preview.proposal.traderOutputValue,
+            nonce: initialIntent.nonce,
+            deadline: initialIntent.deadline,
+          });
+          const quote = await client.quote(intent);
+          const solved = await client.solve(intent);
+          const candidate: QuoteResult = {
+            source: latest,
+            intent,
+            quote,
+            solved,
+            requestedInputAmount: requestedInputAmount.toString(),
+          };
+          if (
+            !best ||
+            BigInt(candidate.solved.proposal.traderOutputValue) >
+              BigInt(best.solved.proposal.traderOutputValue)
+          )
+            best = candidate;
+        } catch (candidateError) {
+          firstError ??= candidateError;
+        }
+      }
+      if (!best)
+        throw firstError ?? new Error("No route is available right now.");
       assertVersion(version);
-      // The signed intent commits to the net output that was reviewed. This
-      // protects a partial fill from becoming a different trade at signing.
-      const intent = await client.prepareIntent({
-        positionId: latest.position.id,
-        trader,
-        traderInputToken: latestPair.input.token,
-        traderOutputToken: latestPair.output.token,
-        requestedValue: initialIntent.requestedValue,
-        minimumTraderOutputValue: preview.proposal.traderOutputValue,
-        nonce: initialIntent.nonce,
-        deadline: initialIntent.deadline,
-      });
-      const quote = await client.quote(intent);
-      const solved = await client.solve(intent);
-      assertVersion(version);
-      setQuoteResult({
-        intent,
-        quote,
-        solved,
-        requestedInputAmount: requestedInputAmount.toString(),
-      });
+      publishSource(best.source);
+      if (best.source.space.identity.id !== selectedSpaceId) {
+        routedSelection.current = true;
+        setSelectedSpaceId(best.source.space.identity.id);
+      }
+      setPairKey(pairFor(best.source.position, pairKey)?.key ?? pairKey);
+      setQuoteResult(best);
+      setAmountAdjustment(undefined);
       setStage("quote");
-      setStatus("Offer ready — review the exact amounts before approval");
+      setStatus("Best available rate found");
     } catch (requestError: unknown) {
       if (version === flowVersion.current) {
         setStage("failed");
         setError(friendlyError(requestError));
-        setStatus("Quote failed — no trade was submitted");
+        setStatus("Rate unavailable — no swap was submitted");
       }
     } finally {
       if (version === flowVersion.current) setBusy(false);
@@ -573,9 +680,7 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
       typeof chainId !== "string" ||
       BigInt(chainId) !== BigInt(testnet.chainId)
     )
-      throw new Error(
-        `Select the AURKA testnet network (chain ${testnet.chainId}) in your wallet.`,
-      );
+      throw new Error("Switch your wallet to Ethereum Sepolia to continue.");
     if (
       typeof current !== "string" ||
       current.toLowerCase() !== expected.toLowerCase()
@@ -630,10 +735,9 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
     testnet: TestnetState,
     transaction: TransactionRequest,
     expected: string,
-    label: string,
   ): Promise<Receipt> {
     const provider = await validateWallet(testnet, expected);
-    setStatus(`${label}: awaiting wallet approval`);
+    setStatus("Waiting for wallet approval…");
     const sent = await provider.request({
       method: "eth_sendTransaction",
       params: [
@@ -647,20 +751,13 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
     });
     if (typeof sent !== "string")
       throw new Error("The wallet returned no transaction hash.");
-    setTransactionHash(sent);
     localStorage.setItem("aurka:testnet:lastTransaction", sent);
-    setStatus(`${label}: submitted — waiting for confirmation`);
+    setStatus("Swap submitted — waiting for confirmation…");
     return waitForReceipt(testnet, sent);
   }
 
   async function signAndPrepare() {
-    if (
-      appMode !== "testnet" ||
-      !quoteResult ||
-      !source?.testnet ||
-      quoteExpired ||
-      quoteStale
-    )
+    if (!quoteResult || !source?.testnet || quoteExpired || quoteStale)
       throw new Error("Review a current offer before approval.");
     const version = flowVersion.current;
     const walletRevision = wallet.revision;
@@ -668,14 +765,16 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
     setStage("signing");
     setError(null);
     try {
-      const latest = await loadSource(selectedSpaceId);
+      const latest = await loadSource(quoteResult.source.space.identity.id);
       assertVersion(version, walletRevision);
       publishSource(latest);
       if (!latest.testnet)
-        throw new Error("Testnet wallet state is unavailable.");
+        throw new Error("The current trade details are unavailable.");
       const now = sourceClock(latest);
       if (quoteIsStale(quoteResult, latest, now))
-        throw new Error("The offer changed. Refresh it before trading.");
+        throw new Error(
+          "The rate changed. Request an updated rate before continuing.",
+        );
       const expected = wallet.address;
       if (!expected)
         throw new Error("Connect your wallet before approving the trade.");
@@ -687,7 +786,7 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
           quoteResult.intent.traderInputToken.toLowerCase(),
       );
       if (!inputAsset)
-        throw new Error("The reviewed input token is not in the latest Space.");
+        throw new Error("The latest balance changed. Review the trade again.");
       const balance = await provider.request({
         method: "eth_call",
         params: [
@@ -700,7 +799,7 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
       });
       if (typeof balance !== "string" || BigInt(balance) < input)
         throw new Error(
-          `The wallet does not have enough ${inputAsset.symbol} for this executable fill.`,
+          `Your wallet does not have enough ${displayAssetSymbol(inputAsset.symbol)} for this swap.`,
         );
       const allowance = await provider.request({
         method: "eth_call",
@@ -716,7 +815,7 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
         throw new Error("The wallet allowance could not be read.");
       if (BigInt(allowance) < input) {
         setStatus(
-          `${inputAsset.symbol} allowance required for the reviewed fill`,
+          `Approve ${displayAssetSymbol(inputAsset.symbol)} in your wallet before continuing`,
         );
         await sendTestnetTransaction(
           latest.testnet,
@@ -727,13 +826,12 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
             value: "0",
           },
           expected,
-          `${inputAsset.symbol} allowance`,
         );
         assertVersion(version, walletRevision);
         provider = await validateWallet(latest.testnet, expected);
       }
       assertVersion(version, walletRevision);
-      setStatus("Review the exact trade in your wallet");
+      setStatus("Confirm the swap in your wallet");
       const signature = await provider.request({
         method: "eth_signTypedData_v4",
         params: [
@@ -744,12 +842,12 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
       if (typeof signature !== "string")
         throw new Error("The wallet returned no intent signature.");
       assertVersion(version, walletRevision);
-      const checked = await loadSource(selectedSpaceId);
+      const checked = await loadSource(quoteResult.source.space.identity.id);
       assertVersion(version, walletRevision);
       publishSource(checked);
       if (quoteIsStale(quoteResult, checked, sourceClock(checked)))
         throw new Error(
-          "The offer changed after signing. Refresh it before trading.",
+          "The rate changed after signing. Request an updated rate before continuing.",
         );
       const result = await client.execute(
         quoteResult.quote.intentHash,
@@ -765,67 +863,46 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
         throw new Error(
           "The service returned an unexpected settlement target.",
         );
-      setPrepared(result.transactionRequest);
-      setStage("prepared");
-      setStatus("Offer approved — ready to submit");
-    } catch (requestError: unknown) {
-      if (version === flowVersion.current) {
-        setStage("failed");
-        setError(friendlyError(requestError));
-        setStatus("Approval failed — no trade was submitted");
-      }
-    } finally {
-      if (version === flowVersion.current) setBusy(false);
-    }
-  }
-
-  async function submitTrade() {
-    if (
-      appMode !== "testnet" ||
-      !prepared ||
-      !quoteResult ||
-      !source?.testnet ||
-      quoteExpired ||
-      quoteStale
-    )
-      throw new Error("The prepared trade is stale. Request a new quote.");
-    const version = flowVersion.current;
-    const walletRevision = wallet.revision;
-    setBusy(true);
-    setStage("submitting");
-    setError(null);
-    try {
-      const latest = await loadSource(selectedSpaceId);
-      assertVersion(version, walletRevision);
-      publishSource(latest);
-      if (!latest.testnet || !wallet.address)
-        throw new Error("Testnet wallet state is unavailable.");
-      if (quoteIsStale(quoteResult, latest, sourceClock(latest)))
-        throw new Error("The offer changed. Refresh it before trading.");
+      setStage("submitting");
       const receipt = await sendTestnetTransaction(
         latest.testnet,
-        prepared,
-        wallet.address,
-        "Trade",
+        result.transactionRequest,
+        expected,
       );
       assertVersion(version, walletRevision);
-      const refreshed = await loadSource(selectedSpaceId);
+      const refreshed = await loadSource(quoteResult.source.space.identity.id);
       publishSource(refreshed);
       setConfirmed(receipt);
-      setPrepared(undefined);
       setQuoteResult(undefined);
       setStage("confirmed");
-      setStatus("Trade confirmed — Space data and Activity are refreshed");
+      setStatus("Swap complete — your balances have been updated");
       window.dispatchEvent(
         new CustomEvent("aurka:trade-confirmed", {
-          detail: { spaceId: selectedSpaceId, transactionHash: receipt.hash },
+          detail: {
+            spaceId: refreshed.space.identity.id,
+            transactionHash: receipt.hash,
+          },
         }),
       );
     } catch (requestError: unknown) {
+      if (
+        version === flowVersion.current &&
+        errorCode(requestError) === "SIMULATION_FAILED"
+      ) {
+        // The exact check can race a newly mined allowance or a live
+        // portfolio update. The signed intent was not submitted; refresh the
+        // offer automatically so the user sees a current review instead of an
+        // internal simulation error.
+        setError(null);
+        setStage("quoting");
+        setStatus("Updating the rate…");
+        await requestQuote();
+        return;
+      }
       if (version === flowVersion.current) {
         setStage("failed");
         setError(friendlyError(requestError));
-        setStatus("Trade is pending or failed — no success is claimed");
+        setStatus("Approval failed — no swap was submitted");
       }
     } finally {
       if (version === flowVersion.current) setBusy(false);
@@ -836,7 +913,7 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
     void action().catch((requestError: unknown) => {
       setError(friendlyError(requestError));
       setStage("failed");
-      setStatus("Action failed — no trade was submitted");
+      setStatus("Action failed — no swap was submitted");
     });
   }
 
@@ -847,17 +924,17 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
         role="alert"
       >
         <p className="text-sm font-semibold uppercase tracking-[0.18em] text-cyan-300">
-          Trade
+          Swap
         </p>
-        <h1 className="text-3xl font-semibold text-white">Space not found</h1>
+        <h1 className="text-3xl font-semibold text-white">Swap unavailable</h1>
         <p className="rounded-xl border border-amber-800/70 bg-amber-950/30 p-4 text-amber-200">
           {pageError}
         </p>
         <Link
-          to="/spaces"
+          to="/trade"
           className="inline-flex rounded-lg bg-cyan-700 px-4 py-2.5 text-sm font-medium text-white"
         >
-          Choose a Space
+          Try again
         </Link>
       </section>
     );
@@ -868,7 +945,7 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
         className="flex min-h-64 items-center justify-center text-slate-400"
         aria-live="polite"
       >
-        Loading current Space information…
+        Preparing the latest rate…
       </div>
     );
 
@@ -879,11 +956,11 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
         role="alert"
       >
         <p className="text-sm font-semibold uppercase tracking-[0.18em] text-cyan-300">
-          Trade
+          Swap
         </p>
-        <h1 className="text-3xl font-semibold text-white">Trade unavailable</h1>
+        <h1 className="text-3xl font-semibold text-white">Swap unavailable</h1>
         <p className="rounded-xl border border-amber-800/70 bg-amber-950/30 p-4 text-amber-200">
-          The selected Space could not provide current holdings: {sourceError}
+          We couldn&apos;t load the latest rate right now. Please try again.
         </p>
         <button
           type="button"
@@ -899,105 +976,33 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
     <section className="mx-auto max-w-3xl space-y-5 text-slate-200">
       <header>
         <p className="text-sm font-semibold uppercase tracking-[0.18em] text-cyan-300">
-          {appMode === "testnet" ? "Test-network trade" : "Local demo trade"}
+          Swap
         </p>
         <h1 className="mt-2 text-3xl font-semibold tracking-tight text-white">
-          Trade
+          Swap tokens
         </h1>
         <p className="mt-3 max-w-2xl leading-7 text-slate-400">
-          Choose a Space, enter what you want to pay, and review what you would
-          receive before approving. An offer is not a completed trade.
+          Choose the amount you want to sell and review exactly what you&apos;ll
+          receive before confirming.
         </p>
       </header>
 
       {appMode === "testnet" && source?.testnet && (
         <div className="rounded-xl border border-amber-700 bg-amber-950/40 p-4 text-sm text-amber-100">
-          <strong>Selected network · test funds</strong>
-          <p className="mt-1 text-amber-100/75">
-            Chain {source.testnet.chainId}. No production funds or mainnet trade
-            is claimed.
-          </p>
+          <strong>Testnet</strong>
         </div>
       )}
-
-      <section className="space-y-4 rounded-2xl border border-cyan-900/70 bg-cyan-950/25 p-5 sm:p-6">
-        <div className="flex items-start gap-3">
-          <ShieldCheck
-            className="mt-0.5 h-5 w-5 shrink-0 text-cyan-300"
-            aria-hidden="true"
-          />
-          <div className="min-w-0">
-            <p className="text-sm font-semibold text-cyan-100">
-              Choose the Space
-            </p>
-            <p className="mt-1 text-sm leading-6 text-cyan-100/75">
-              This organization-owned Space sets the limits for the trade. Your
-              wallet pays and receives the assets.
-            </p>
-          </div>
-        </div>
-        <label className="block text-sm">
-          <span className="font-medium text-slate-200">Space</span>
-          <select
-            aria-label="Space"
-            value={selectedSpaceId}
-            onChange={(event) => selectSpace(event.target.value)}
-            className="mt-1 block w-full rounded-lg border border-cyan-800 bg-slate-900 p-2.5 text-slate-100"
-          >
-            <option value="">Select a Space</option>
-            {spaces.map((candidate) => (
-              <option
-                key={candidate.identity.id}
-                value={candidate.identity.id}
-                disabled={candidate.identity.state !== "ACTIVE"}
-              >
-                {candidate.identity.name} ·{" "}
-                {lifecycleLabel(candidate.identity.state)}
-              </option>
-            ))}
-          </select>
-        </label>
-        {selectedSpace && (
-          <p className="text-xs text-cyan-100/70">
-            Selected: {selectedSpace.identity.name} ·{" "}
-            {lifecycleLabel(selectedSpace.identity.state)}
-          </p>
-        )}
-      </section>
 
       {appMode === "testnet" && <WalletStateMessage />}
-
-      {appMode === "testnet" && (
-        <section className="flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-cyan-900/70 bg-cyan-950/25 p-5 sm:p-6">
-          <div>
-            <p className="text-sm font-semibold uppercase tracking-[0.18em] text-cyan-300">
-              Autonomous trading agent
-            </p>
-            <h2 className="mt-1 text-xl font-semibold text-white">
-              Let your dedicated agent trade within your rules
-            </h2>
-            <p className="mt-1 max-w-2xl text-sm leading-6 text-cyan-100/75">
-              Manual trades stay on this page. Create and control your own
-              Privy-powered Sepolia agent from the dedicated setup wizard.
-            </p>
-          </div>
-          <Link
-            to="/agent"
-            className="inline-flex min-h-11 items-center rounded-lg bg-cyan-400 px-4 py-2.5 text-sm font-semibold text-slate-950 hover:bg-cyan-300"
-          >
-            Open trading agent
-          </Link>
-        </section>
-      )}
 
       {!source || !pair ? (
         <section className="rounded-2xl border border-amber-800/70 bg-amber-950/30 p-5 text-amber-200">
           <h2 className="font-semibold text-white">
-            No supported pair is available
+            Swaps are temporarily unavailable
           </h2>
           <p className="mt-2 text-sm leading-6">
-            This Space needs the configured USDC and WETH assets and current
-            holdings before it can be traded.
+            We couldn&apos;t find a current rate for this swap. Please try again
+            shortly.
           </p>
         </section>
       ) : (
@@ -1010,54 +1015,73 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
             }}
           >
             <div>
-              <h2 className="text-xl font-semibold text-white">
-                Request a quote
-              </h2>
+              <h2 className="text-xl font-semibold text-white">Swap tokens</h2>
               <p className="mt-1 text-sm leading-6 text-slate-400">
-                Enter the token amount you want to pay. AURKA checks the Space
-                limits and token precision before asking for approval.
+                We&apos;ll automatically find the best available rate.
               </p>
             </div>
-            <label className="block text-sm">
-              <span className="font-medium text-slate-200">Trading pair</span>
-              <select
-                aria-label="Trading pair"
-                value={pairKey}
-                onChange={(event) => updatePair(event.target.value)}
-                className="mt-1 block w-full rounded-lg border border-slate-700 bg-slate-800 p-2.5 text-slate-100"
-              >
-                {availablePairs.map((candidate) => (
-                  <option key={candidate.key} value={candidate.key}>
-                    {candidate.input.symbol} → {candidate.output.symbol}
-                  </option>
-                ))}
-              </select>
-              <span className="mt-1 block text-xs leading-5 text-slate-500">
-                Available directions are set by this Space. The selected
-                direction is never changed for you.
+            <div className="flex items-center justify-between rounded-xl border border-slate-700 bg-slate-800 p-4">
+              <div>
+                <p className="text-xs uppercase tracking-wide text-slate-500">
+                  Sell
+                </p>
+                <p className="mt-1 text-lg font-semibold text-white">
+                  {inputSymbol}
+                </p>
+              </div>
+              <span className="text-xl text-slate-500" aria-hidden="true">
+                →
               </span>
-            </label>
+              <div className="text-right">
+                <p className="text-xs uppercase tracking-wide text-slate-500">
+                  Receive
+                </p>
+                <p className="mt-1 text-lg font-semibold text-white">
+                  {outputSymbol}
+                </p>
+              </div>
+            </div>
             <label className="block text-sm">
-              <span className="font-medium text-slate-200">Amount to pay</span>
+              <span className="font-medium text-slate-200">Amount to sell</span>
               <div className="mt-1 flex items-center rounded-lg border border-slate-700 bg-slate-800 focus-within:border-cyan-500">
                 <input
                   required
                   inputMode="decimal"
                   autoComplete="off"
-                  aria-label={`Amount to pay in ${pair.input.symbol}`}
+                  aria-label={`Amount to sell in ${inputSymbol}`}
                   value={amount}
                   onChange={(event) => updateAmount(event.target.value)}
                   placeholder="0"
+                  min="0"
                   className="min-w-0 flex-1 bg-transparent p-2.5 text-slate-100 outline-none"
                 />
                 <span className="px-3 text-sm text-slate-400">
-                  {pair.input.symbol}
+                  {inputSymbol}
                 </span>
               </div>
-              <span className="mt-1 block text-xs leading-5 text-slate-500">
-                Your balance and the Space&apos;s current holdings are checked
-                before approval.
-              </span>
+              <div className="mt-1 flex items-center justify-between text-xs text-slate-500">
+                <span>
+                  {walletInputBalance === undefined
+                    ? "Balance unavailable"
+                    : `Balance: ${formatTokenAmount(walletInputBalance, pair.input.decimals)} ${inputSymbol}`}
+                </span>
+                <button
+                  type="button"
+                  disabled={walletInputBalance === undefined}
+                  onClick={() =>
+                    walletInputBalance !== undefined &&
+                    updateAmount(
+                      formatTokenAmount(
+                        walletInputBalance,
+                        pair.input.decimals,
+                      ),
+                    )
+                  }
+                  className="font-medium text-cyan-300 hover:text-cyan-200 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  Max
+                </button>
+              </div>
             </label>
             <button
               type="submit"
@@ -1068,9 +1092,34 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
               }
               className="min-h-11 rounded-lg bg-cyan-600 px-5 py-3 font-medium text-white transition hover:bg-cyan-500 disabled:cursor-not-allowed disabled:opacity-50"
             >
-              {stage === "quoting" ? "Getting quote…" : "Get quote"}
+              {stage === "quoting" ? "Finding best rate…" : "Review swap"}
             </button>
           </form>
+
+          {amountAdjustment && pair && (
+            <AmountAdjustmentReview
+              adjustment={amountAdjustment}
+              inputAsset={pair.input}
+              onUse={() => {
+                const supported = BigInt(amountAdjustment.supportedAmount);
+                if (supported === 0n) {
+                  setAmountAdjustment(undefined);
+                  setError(
+                    "Enter an amount at or above the minimum executable amount.",
+                  );
+                  return;
+                }
+                setAmount(formatTokenAmount(supported, pair.input.decimals));
+                setAmountAdjustment(undefined);
+                run(() => requestQuote(supported));
+              }}
+              onEdit={() => {
+                setAmountAdjustment(undefined);
+                setError(null);
+                setStatus("Edit the amount, then review the swap again");
+              }}
+            />
+          )}
 
           {error && (
             <p
@@ -1097,11 +1146,9 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
               expired={quoteExpired}
               stale={quoteStale}
               stage={stage}
-              prepared={prepared}
               busy={busy}
               mode={appMode}
               onSign={() => run(signAndPrepare)}
-              onSubmit={() => run(submitTrade)}
               onRequote={() => run(requestQuote)}
             />
           )}
@@ -1114,30 +1161,99 @@ function TradeFlow({ routeSpaceId }: { readonly routeSpaceId?: string }) {
           role="status"
         >
           <h2 className="text-lg font-semibold text-emerald-100">
-            Trade confirmed
+            Swap complete
           </h2>
           <p className="text-sm leading-6 text-emerald-100/80">
-            The test-network receipt is confirmed. Holdings and Activity were
-            refreshed after settlement.
+            Your swap is complete. Your balances and activity have been updated.
           </p>
-          <details className="text-xs text-emerald-100/70">
-            <summary className="cursor-pointer">Transaction details</summary>
-            <p className="mt-2 break-all">
-              Transaction {transactionHash || confirmed.hash} · block{" "}
-              {confirmed.block} · gas {confirmed.gas}
-            </p>
-          </details>
           <Link
             to={`/spaces/${encodeURIComponent(selectedSpaceId)}`}
             className="inline-flex min-h-10 items-center rounded-lg bg-emerald-700 px-4 py-2.5 text-sm font-medium text-white hover:bg-emerald-600"
           >
-            Return to Space
+            View balances
           </Link>
         </section>
       )}
     </section>
   );
 }
+
+function AmountAdjustmentReview({
+  adjustment,
+  inputAsset,
+  onUse,
+  onEdit,
+}: {
+  readonly adjustment: AmountAdjustment;
+  readonly inputAsset: AssetSnapshot;
+  readonly onUse: () => void;
+  readonly onEdit: () => void;
+}) {
+  const symbol = displayAssetSymbol(inputAsset.symbol);
+  const requested = BigInt(adjustment.requestedAmount);
+  const supported = BigInt(adjustment.supportedAmount);
+  const remainder = BigInt(adjustment.remainder);
+  const minimum = BigInt(adjustment.increment);
+  const belowMinimum = supported === 0n;
+  return (
+    <section
+      aria-labelledby="amount-adjustment-heading"
+      className="space-y-4 rounded-2xl border border-amber-800/70 bg-amber-950/30 p-5 sm:p-6"
+    >
+      <div>
+        <p className="text-sm font-semibold uppercase tracking-[0.18em] text-amber-300">
+          Amount review
+        </p>
+        <h2
+          id="amount-adjustment-heading"
+          className="mt-2 text-xl font-semibold text-white"
+        >
+          {belowMinimum
+            ? "Choose a larger amount"
+            : "Review the amount available to swap"}
+        </h2>
+        <p className="mt-2 text-sm leading-6 text-amber-100/80">
+          {belowMinimum
+            ? `The current minimum executable amount is ${formatTokenAmount(minimum, inputAsset.decimals)} ${symbol}. No approval or signature has been requested.`
+            : "This rate supports a slightly smaller amount. Nothing will be approved or signed until you accept it."}
+        </p>
+      </div>
+      <dl className="grid gap-3 sm:grid-cols-3">
+        <Summary
+          label="Requested amount"
+          value={`${formatTokenAmount(requested, inputAsset.decimals)} ${symbol}`}
+        />
+        <Summary
+          label="Amount available to swap"
+          value={`${formatTokenAmount(supported, inputAsset.decimals)} ${symbol}`}
+        />
+        <Summary
+          label="Remaining in your wallet"
+          value={`${formatTokenAmount(remainder, inputAsset.decimals)} ${symbol}`}
+        />
+      </dl>
+      <div className="flex flex-wrap gap-3">
+        {!belowMinimum && (
+          <button
+            type="button"
+            onClick={onUse}
+            className="min-h-10 rounded-lg bg-amber-700 px-4 py-2.5 text-sm font-medium text-white hover:bg-amber-600"
+          >
+            Use this amount
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={onEdit}
+          className="min-h-10 rounded-lg border border-amber-700 px-4 py-2.5 text-sm font-medium text-amber-100 hover:border-amber-400"
+        >
+          Edit amount
+        </button>
+      </div>
+    </section>
+  );
+}
+
 function QuoteReview({
   result,
   inputAsset,
@@ -1146,11 +1262,9 @@ function QuoteReview({
   expired,
   stale,
   stage,
-  prepared,
   busy,
   mode,
   onSign,
-  onSubmit,
   onRequote,
 }: {
   readonly result: QuoteResult;
@@ -1160,27 +1274,22 @@ function QuoteReview({
   readonly expired: boolean;
   readonly stale: boolean;
   readonly stage: TradeStage;
-  readonly prepared: TransactionRequest | undefined;
   readonly busy: boolean;
   readonly mode: "demo" | "testnet";
   readonly onSign: () => void;
-  readonly onSubmit: () => void;
   readonly onRequote: () => void;
 }) {
   const executable = BigInt(result.solved.proposal.traderInputAmount);
   const requested = BigInt(result.requestedInputAmount);
   const remaining = requested > executable ? requested - executable : 0n;
   const partial = executable < requested;
+  const inputSymbol = displayAssetSymbol(inputAsset.symbol);
+  const outputSymbol = displayAssetSymbol(outputAsset.symbol);
   const invalidReason = expired
-    ? "This quote has expired. Request a fresh quote before continuing."
+    ? "This rate has expired. Request an updated rate before continuing."
     : stale
-      ? "The offer changed. Refresh it before trading."
+      ? "The rate changed. Request an updated rate before continuing."
       : undefined;
-  const feeAsset = findPortfolioAsset(
-    result.quote.currentPortfolio,
-    result.quote.fees.feeToken,
-  );
-  const feeToken = feeAsset?.symbol ?? outputAsset.symbol;
   return (
     <section
       aria-labelledby="swap-review-heading"
@@ -1189,61 +1298,50 @@ function QuoteReview({
     >
       <div>
         <p className="text-sm font-semibold uppercase tracking-[0.18em] text-cyan-300">
-          {invalidReason ? "Quote needs attention" : "Quote ready"}
+          {invalidReason ? "Rate needs an update" : "Rate found"}
         </p>
         <h2
           id="swap-review-heading"
           className="mt-2 text-xl font-semibold text-white"
         >
-          Review what would happen
+          Review your swap
         </h2>
         <p className="mt-2 text-sm leading-6 text-slate-400">
-          Review the amounts, fee, limit, and expiry. Nothing is signed or
-          submitted until you approve the next step.
+          Check the final amounts before confirming in your wallet.
         </p>
       </div>
 
       {partial ? (
         <div className="rounded-xl border border-amber-800/70 bg-amber-950/30 p-4 text-sm leading-6 text-amber-100">
-          <strong>Partial fill.</strong> You asked to pay{" "}
-          {formatTokenAmount(requested, inputAsset.decimals)}{" "}
-          {inputAsset.symbol}. AURKA can fill{" "}
-          {formatTokenAmount(executable, inputAsset.decimals)}{" "}
-          {inputAsset.symbol} now. The unfilled{" "}
-          {formatTokenAmount(remaining, inputAsset.decimals)}{" "}
-          {inputAsset.symbol} remains with you because{" "}
-          {constraintExplanation(result.quote.bindingConstraint)}.
+          <strong>Available now.</strong> You asked to sell{" "}
+          {formatTokenAmount(requested, inputAsset.decimals)} {inputSymbol}. We
+          can complete {formatTokenAmount(executable, inputAsset.decimals)}{" "}
+          {inputSymbol} now. The remaining{" "}
+          {formatTokenAmount(remaining, inputAsset.decimals)} {inputSymbol}{" "}
+          stays in your wallet because the available balance is limited right
+          now.
         </div>
       ) : (
         <p className="rounded-xl border border-emerald-900/70 bg-emerald-950/30 p-4 text-sm leading-6 text-emerald-100">
-          Full fill: the requested amount fits the current Space rules. The
-          network checks the rules again before settlement.
+          The full amount is available at this rate.
         </p>
       )}
 
       <dl className="grid gap-3 sm:grid-cols-2">
         <Summary
-          label="You pay (filled)"
-          value={`${formatTokenAmount(executable, inputAsset.decimals)} ${inputAsset.symbol}`}
+          label="You sell"
+          value={`${formatTokenAmount(executable, inputAsset.decimals)} ${inputSymbol}`}
         />
         <Summary
-          label="You receive (net)"
-          value={`${formatTokenAmount(result.solved.proposal.traderOutputAmount, outputAsset.decimals)} ${outputAsset.symbol}`}
+          label="You receive"
+          value={`${formatTokenAmount(result.solved.proposal.traderOutputAmount, outputAsset.decimals)} ${outputSymbol}`}
         />
         <Summary
           label="Fee"
-          value={`${formatGroupedDecimalUnits(result.quote.fees.totalFeeAmount, result.quote.currentPortfolio.valueDecimals)} normalized value units · ${feeToken}`}
+          value={formatFeePercentage(result.quote.fees.totalFeeBpsScaled)}
         />
         <Summary
-          label="Binding rule"
-          value={bindingConstraintLabel(result.quote.bindingConstraint)}
-        />
-        <Summary
-          label="Treasury retained"
-          value={`${formatGroupedDecimalUnits(result.quote.fees.treasuryAmount, result.quote.currentPortfolio.valueDecimals)} normalized value units`}
-        />
-        <Summary
-          label="Expiry"
+          label="Rate valid for"
           value={
             expired
               ? "Expired"
@@ -1251,18 +1349,6 @@ function QuoteReview({
           }
         />
       </dl>
-
-      <div className="grid gap-2 rounded-xl border border-slate-700 bg-slate-950/60 p-4 text-sm text-slate-300 sm:grid-cols-2">
-        <p className="sm:col-span-2">
-          Fees and limits use this Space&apos;s normalized settlement value.
-          They are not a USD denomination.
-        </p>
-      </div>
-
-      <PortfolioPreview
-        before={result.quote.currentPortfolio}
-        after={result.quote.expectedPostTradePortfolio}
-      />
 
       {invalidReason ? (
         <div className="flex flex-wrap items-center gap-3 rounded-xl border border-amber-800/70 bg-amber-950/30 p-4">
@@ -1275,52 +1361,36 @@ function QuoteReview({
             onClick={onRequote}
             className="min-h-10 rounded-lg bg-amber-700 px-4 py-2.5 text-sm font-medium text-white hover:bg-amber-600 disabled:opacity-50"
           >
-            Re-quote
+            Get updated rate
           </button>
         </div>
       ) : mode === "testnet" ? (
         <div className="flex flex-wrap items-center gap-3">
-          {prepared ? (
-            <>
-              <p className="w-full rounded-xl border border-amber-800/70 bg-amber-950/30 p-4 text-sm leading-6 text-amber-100">
-                Approved — the exact trade is ready to submit. No transaction
-                has been submitted yet.
-              </p>
-              <button
-                type="button"
-                disabled={busy}
-                onClick={onSubmit}
-                className="min-h-11 rounded-lg bg-cyan-600 px-5 py-3 font-medium text-white hover:bg-cyan-500 disabled:opacity-50"
-              >
-                {stage === "submitting" ? "Submitting…" : "Submit trade"}
-              </button>
-            </>
-          ) : (
-            <button
-              type="button"
-              disabled={busy}
-              onClick={onSign}
-              className="min-h-11 rounded-lg bg-cyan-600 px-5 py-3 font-medium text-white hover:bg-cyan-500 disabled:opacity-50"
-            >
-              {stage === "signing"
-                ? "Waiting for wallet…"
-                : "Approve exact trade"}
-            </button>
-          )}
+          <button
+            type="button"
+            disabled={busy}
+            onClick={onSign}
+            className="min-h-11 rounded-lg bg-cyan-600 px-5 py-3 font-medium text-white hover:bg-cyan-500 disabled:opacity-50"
+          >
+            {stage === "signing"
+              ? "Waiting for wallet…"
+              : stage === "submitting"
+                ? "Confirming…"
+                : "Confirm swap"}
+          </button>
           <button
             type="button"
             disabled={busy}
             onClick={onRequote}
             className="min-h-11 rounded-lg border border-slate-600 px-4 py-2.5 text-sm font-medium text-slate-200 hover:border-cyan-500 disabled:opacity-50"
           >
-            Re-quote
+            Get updated rate
           </button>
         </div>
       ) : (
         <div className="flex flex-wrap items-center gap-3 rounded-xl border border-slate-700 bg-slate-950/60 p-4">
           <p className="flex-1 text-sm leading-6 text-slate-300">
-            This local demo prepares offers for review only. It does not submit
-            transactions or claim a balance change.
+            Preview only. No transaction will be submitted.
           </p>
           <button
             type="button"
@@ -1328,75 +1398,11 @@ function QuoteReview({
             disabled={busy}
             className="min-h-10 rounded-lg border border-slate-600 px-4 py-2.5 text-sm font-medium text-slate-200 hover:border-cyan-500 disabled:opacity-50"
           >
-            Re-quote
+            Get updated rate
           </button>
         </div>
       )}
-
-      <details className="rounded-xl border border-slate-700 bg-slate-950/70 p-4">
-        <summary className="cursor-pointer font-medium text-slate-200">
-          Offer details
-        </summary>
-        <dl className="mt-3 grid gap-2 text-sm text-slate-300 sm:grid-cols-2">
-          <div>
-            <dt className="text-slate-500">Fee rate</dt>
-            <dd className="mt-1">
-              {formatScaledBasisPoints(result.quote.fees.totalFeeBpsScaled)}
-            </dd>
-          </div>
-          <div>
-            <dt className="text-slate-500">Fee breakdown</dt>
-            <dd className="mt-1">
-              {formatTokenAmount(
-                result.solved.proposal.solverFeeAmount,
-                outputAsset.decimals,
-              )}{" "}
-              {outputAsset.symbol} solver ·{" "}
-              {formatTokenAmount(
-                result.solved.proposal.protocolFeeAmount,
-                outputAsset.decimals,
-              )}{" "}
-              {outputAsset.symbol} protocol
-            </dd>
-          </div>
-          <div>
-            <dt className="text-slate-500">Reference price</dt>
-            <dd className="mt-1">
-              {formatPrice(
-                result.quote.referencePrice,
-                result.quote.referencePriceDecimals,
-              )}{" "}
-              quote units per whole {outputAsset.symbol}
-            </dd>
-          </div>
-          <div>
-            <dt className="text-slate-500">Data age</dt>
-            <dd className="mt-1">
-              Updated{" "}
-              {formatSnapshotAge(result.quote.currentPortfolio.observedAt, now)}
-            </dd>
-          </div>
-        </dl>
-      </details>
     </section>
-  );
-}
-
-function constraintExplanation(constraint: string): string {
-  const explanations: Record<string, string> = {
-    TRANSACTION_CAP: "the Space’s per-trade limit",
-    AVAILABLE_BALANCE: "the Space’s available balance",
-    CAPACITY_EXHAUSTED: "the remaining directional capacity",
-    MINIMUM_WEIGHT: "the minimum allocation rule",
-    MAXIMUM_WEIGHT: "the maximum allocation rule",
-    RISK_LIMIT: "the current risk limit",
-    FEE_EXCEEDS_OUTPUT: "the fee relative to the output",
-    PAUSED: "the Space is paused",
-    REQUESTED_AMOUNT: "the requested amount",
-    NONE: "no additional limiting rule",
-  };
-  return (
-    explanations[constraint] ?? constraint.toLowerCase().replace(/_/g, " ")
   );
 }
 
@@ -1412,69 +1418,5 @@ function Summary({
       <dt className="text-xs text-slate-500">{label}</dt>
       <dd className="mt-1 break-words font-medium text-slate-100">{value}</dd>
     </div>
-  );
-}
-
-function PortfolioPreview({
-  before,
-  after,
-}: {
-  readonly before: PortfolioSnapshot;
-  readonly after: PortfolioSnapshot;
-}) {
-  return (
-    <section className="rounded-xl border border-slate-700 bg-slate-950/60 p-4">
-      <div>
-        <h3 className="font-medium text-slate-100">
-          Space holdings: current → expected after
-        </h3>
-        <p className="mt-1 text-xs leading-5 text-slate-500">
-          Expected holdings change only after a confirmed settlement. Values use
-          this Space&apos;s normalized settlement units, not USD.
-        </p>
-      </div>
-      <div className="mt-3 overflow-x-auto">
-        <table className="min-w-full text-left text-sm">
-          <caption className="sr-only">
-            Space holdings before and after the quoted trade
-          </caption>
-          <thead className="text-xs uppercase tracking-wide text-slate-500">
-            <tr>
-              <th className="py-2 pr-4">Asset</th>
-              <th className="py-2 pr-4">Before</th>
-              <th className="py-2 pr-4">Expected after</th>
-              <th className="py-2">Allocation</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-800">
-            {before.assets.map((asset) => {
-              const next = findPortfolioAsset(after, asset.token);
-              if (!next) return null;
-              const difference = BigInt(next.value) - BigInt(asset.value);
-              return (
-                <tr key={asset.token}>
-                  <th className="py-2 pr-4 font-medium text-slate-200">
-                    {asset.symbol}
-                  </th>
-                  <td className="py-2 pr-4 text-slate-300">
-                    {formatValueAmount(asset.value, before.valueDecimals)}
-                  </td>
-                  <td className="py-2 pr-4 text-slate-300">
-                    {formatValueAmount(next.value, after.valueDecimals)}{" "}
-                    <span className="text-xs text-slate-500">
-                      ({formatValueAmount(difference, before.valueDecimals)})
-                    </span>
-                  </td>
-                  <td className="py-2 text-slate-300">
-                    {formatBasisPoints(asset.weightBps)} →{" "}
-                    {formatBasisPoints(next.weightBps)}
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
-    </section>
   );
 }

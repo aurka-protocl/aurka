@@ -392,6 +392,9 @@ export const delegatedSessions = sqliteTable(
     lastTransactionHash: text("last_transaction_hash"),
     lastRecoveryTransactionHash: text("last_recovery_transaction_hash"),
     lastResult: text("last_result"),
+    lastEvaluatedAt: integer("last_evaluated_at"),
+    nextCheckAt: integer("next_check_at"),
+    consecutiveFailures: integer("consecutive_failures").notNull().default(0),
     updatedAt: createdAt("updated_at"),
   },
   (table) => [
@@ -609,6 +612,61 @@ export const delegatedWorkerLeases = sqliteTable(
   (table) => [index("delegated_worker_leases_expiry_idx").on(table.expiresAt)],
 );
 
+/** Append-only, owner-scoped activity for delegated agents. The dedupe key is
+ * intentionally stored separately from the public event ID so retries and
+ * refreshes cannot create duplicate timeline entries. */
+export const agentActivityEvents = sqliteTable(
+  "agent_activity_events",
+  {
+    id: text("id").primaryKey(),
+    dedupeKey: text("dedupe_key").notNull(),
+    ownerAddress: text("owner_address").notNull(),
+    agentId: text("agent_id").notNull(),
+    sessionId: text("session_id"),
+    eventType: text("event_type").notNull(),
+    code: text("code").notNull(),
+    summary: text("summary").notNull(),
+    correlationId: text("correlation_id"),
+    transactionHash: text("transaction_hash"),
+    detailsJson: text("details_json"),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    uniqueIndex("agent_activity_dedupe_idx").on(table.dedupeKey),
+    index("agent_activity_owner_idx").on(
+      table.ownerAddress,
+      table.createdAt,
+      table.id,
+    ),
+    index("agent_activity_agent_idx").on(
+      table.agentId,
+      table.createdAt,
+      table.id,
+    ),
+  ],
+);
+
+/** Shared daily provider budget. Owner and global rows are incremented in one
+ * transaction so chat and background evaluations consume the same caps. */
+export const agentProviderUsage = sqliteTable(
+  "agent_provider_usage",
+  {
+    scope: text("scope").notNull(),
+    scopeKey: text("scope_key").notNull(),
+    day: text("day").notNull(),
+    provider: text("provider").notNull(),
+    requestCount: integer("request_count").notNull().default(0),
+    inputTokens: integer("input_tokens").notNull().default(0),
+    outputTokens: integer("output_tokens").notNull().default(0),
+    updatedAt: createdAt("updated_at"),
+  },
+  (table) => [
+    primaryKey({
+      columns: [table.scope, table.scopeKey, table.day, table.provider],
+    }),
+  ],
+);
+
 export const indexingCheckpoints = sqliteTable(
   "indexing_checkpoints",
   {
@@ -735,6 +793,8 @@ export const schema = {
   tradingAgents,
   agentFundingOperations,
   delegatedWorkerLeases,
+  agentActivityEvents,
+  agentProviderUsage,
   indexingCheckpoints,
   indexingHeaders,
   chainEvents,

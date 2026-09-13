@@ -398,14 +398,16 @@ describe("AURKA service solver", () => {
     expect(calls).toHaveLength(1);
     expect(calls[0]?.method).toBe("eth_call");
     const transaction = calls[0]?.params?.[0] as {
+      from: string;
       to: string;
       data: string;
       value: string;
     };
+    expect(transaction.from).toBe(fixture.intent.trader);
     expect(transaction.to).toBe(FIXTURE_ADDRESSES.router);
     expect(transaction.data.startsWith(ROUTER_EXECUTE_SELECTOR)).toBe(true);
     expect(transaction.value).toBe("0x0");
-    expect(calls[0]?.params?.[1]).toBe("0x64");
+    expect(calls[0]?.params?.[1]).toBe("latest");
   });
 
   it("rejects null and non-hex eth_call results", async () => {

@@ -1,23 +1,12 @@
 import { BookOpen } from "lucide-react";
 
 const terms = [
-  ["Treasury", "An organization’s assets made available for exchange."],
-  ["Holdings", "The asset balances currently shown for that treasury."],
-  ["Rule", "A portfolio range or transaction limit the treasury accepts."],
+  ["Portfolio", "A collection of assets with clear trading rules."],
+  ["Balance", "The amount of each asset currently available."],
+  ["Trading rule", "A range or limit that controls which swaps are accepted."],
   ["Swap", "An exchange of one asset for another."],
-  [
-    "Position",
-    "The AURKA record that connects one treasury to its holdings and rules.",
-  ],
-  ["Quote", "A time-limited estimate; it is not a completed trade."],
-  [
-    "Proposal",
-    "A solver’s candidate settlement for a reviewed intent, not a broadcast.",
-  ],
-  [
-    "Execution",
-    "A settlement record whose state may be prepared, submitted, or confirmed.",
-  ],
+  ["Rate", "The current estimated amount you will receive for a swap."],
+  ["Confirmation", "The wallet approval that completes a swap."],
 ] as const;
 
 export default function Glossary() {

@@ -2,13 +2,13 @@ import { existsSync, readFileSync, writeFileSync, renameSync } from "node:fs";
 import {
   decodeEventLog,
   encodeFunctionData,
-  keccak256,
   stringToHex,
 } from "viem";
 import { hashBytes, ServiceError } from "../dist/index.js";
 import {
   calculateAssetValue,
   calculateDirectSettlement,
+  buildUpstreamStrategy,
   computeCapacityEpochId,
   computePortfolioPriceSnapshotHash,
   computeSettlementPriceSnapshotHash,
@@ -25,8 +25,13 @@ const same = (a, b) =>
   typeof a === "string" &&
   typeof b === "string" &&
   a.toLowerCase() === b.toLowerCase();
-const fail = (message) => {
-  throw new ServiceError("SPACE_CHAIN_VERIFICATION_FAILED", message, 409);
+const fail = (message, details = {}) => {
+  throw new ServiceError(
+    "SPACE_CHAIN_VERIFICATION_FAILED",
+    message,
+    409,
+    details,
+  );
 };
 const recoveryFail = (message) => {
   throw new ServiceError("SPACE_BATCH_RECOVERY_REQUIRED", message, 409);
@@ -62,30 +67,14 @@ function valueToRaw(value, asset) {
   );
 }
 
-function upstreamStrategy(maker, guard, usdcPrice, wethPrice) {
-  const scale = 1_000_000n;
-  const usdcUnit = ceilDiv(
-    10n ** 6n * 10n ** BigInt(usdcPrice.priceDecimals),
-    usdcPrice.price,
-  );
-  const wethUnit = ceilDiv(
-    10n ** 18n * 10n ** BigInt(wethPrice.priceDecimals),
-    wethPrice.price,
-  );
-  const word = (value) => BigInt(value).toString(16).padStart(64, "0");
-  const address = (value) => value.slice(2).toLowerCase().padStart(40, "0");
-  const program = `0x9040${word(usdcUnit * scale + 1n)}${word(wethUnit * scale)}530100`;
-  const traits =
-    (1n << 254n) |
-    (1n << 250n) |
-    (1n << 246n) |
-    (60n << 208n) |
-    (60n << 192n) |
-    (40n << 176n) |
-    (40n << 160n);
-  const orderData = `0x${address(usdcPrice.token)}${address(wethPrice.token)}${address(guard)}${program.slice(2)}`;
-  const strategy = `0x${word(32)}${address(maker).padStart(64, "0")}${word(traits)}${word(96)}${word((orderData.length - 2) / 2)}${orderData.slice(2).padEnd(Math.ceil((orderData.length - 2) / 64) * 64, "0")}`;
-  return { strategy, strategyHash: keccak256(strategy) };
+function upstreamStrategy(maker, guard, usdcAsset, wethAsset, balanceScale) {
+  return buildUpstreamStrategy({
+    maker,
+    guard,
+    traderInput: wethAsset,
+    traderOutput: usdcAsset,
+    ...(balanceScale === undefined ? {} : { balanceScale }),
+  });
 }
 
 function fundingUnits(draft) {
@@ -599,11 +588,15 @@ export class ForkSpaceLifecycle {
       );
       const usdcPrice = {
         token: usdc,
+        decimals: draft.assets.find((asset) => same(asset.token, usdc))
+          .decimals,
         price: BigInt(asObject(usdcRaw, 0, "price")),
         priceDecimals: Number(asObject(usdcRaw, 1, "priceDecimals")),
       };
       const wethPrice = {
         token: weth,
+        decimals: draft.assets.find((asset) => same(asset.token, weth))
+          .decimals,
         price: BigInt(asObject(wethRaw, 0, "price")),
         priceDecimals: Number(asObject(wethRaw, 1, "priceDecimals")),
       };
@@ -676,6 +669,15 @@ export class ForkSpaceLifecycle {
         )
           fail(
             `The current price snapshot puts ${asset.symbol} outside its starting allocation bounds: ${value}/${initialNav} value units, allowed ${asset.minimumWeightBps}-${asset.maximumWeightBps} bps. Adjust funding or bounds before deployment.`,
+            {
+              reason: "STARTING_ALLOCATION_OUT_OF_BOUNDS",
+              asset: asset.symbol,
+              token: asset.token,
+              value: value.toString(),
+              initialNav: initialNav.toString(),
+              minimumWeightBps: asset.minimumWeightBps,
+              maximumWeightBps: asset.maximumWeightBps,
+            },
           );
       }
       const priceCommitment = {

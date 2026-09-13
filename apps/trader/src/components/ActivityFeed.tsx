@@ -2,13 +2,12 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { AurkaClient } from "@aurka/sdk";
 import {
-  formatGroupedDecimalUnits,
   type ActivityItem,
   type ActivityStatus,
   type ActivityType,
 } from "@aurka/shared";
 import { apiBaseUrl } from "../config";
-import { userFacingError } from "../ui";
+import { displayAssetSymbol, userFacingError } from "../ui";
 
 export interface ActivityFeedQuery {
   readonly spaceId?: string;
@@ -22,11 +21,11 @@ export interface ActivityFeedQuery {
 }
 
 const STATUS_LABELS: Record<ActivityStatus, string> = {
-  PREPARED: "Prepared · unsigned, not submitted",
-  PENDING: "Pending · submitted, awaiting receipt",
-  CONFIRMED: "Confirmed record",
+  PREPARED: "Waiting for approval",
+  PENDING: "Processing",
+  CONFIRMED: "Complete",
   FAILED: "Failed",
-  ORPHANED: "Orphaned by a chain reorganization",
+  ORPHANED: "Reverted",
 };
 
 type ActivityChange = Extract<
@@ -40,7 +39,7 @@ const CHANGE_LABELS: Record<ActivityChange["eventType"], string> = {
   SPACE_ACTIVATED: "Space activated",
   SPACE_PAUSED: "Trading paused",
   SPACE_RESUMED: "Trading resumed",
-  SPACE_DEPLOYMENT_FAILED: "Space setup failed",
+  SPACE_DEPLOYMENT_FAILED: "Space setup needs attention",
 };
 
 function stateLabel(value: string | undefined): string {
@@ -54,12 +53,9 @@ function stateLabel(value: string | undefined): string {
       PENDING: "Pending",
       REACTIVATION_REQUIRED: "Trading needs reactivation",
       PRICING_NEEDS_RENEWAL: "Price needs renewal",
+      STRATEGY_MISMATCH: "Owner repair required",
     }[value] ?? "Recorded"
   );
-}
-
-function shortHash(value: string): string {
-  return `${value.slice(0, 10)}…${value.slice(-8)}`;
 }
 
 function statusClass(status: ActivityStatus): string {
@@ -76,70 +72,6 @@ function activityTime(item: ActivityItem): number {
 
 function activityDate(item: ActivityItem): string {
   return new Date(activityTime(item) * 1000).toLocaleString();
-}
-
-function ActivityEvidence({ item }: { readonly item: ActivityItem }) {
-  return (
-    <details className="mt-4 rounded-lg border border-slate-700 bg-slate-950/60 p-3">
-      <summary className="cursor-pointer text-sm text-slate-300">
-        Transaction details
-      </summary>
-      <dl className="mt-3 space-y-2 break-all text-xs text-slate-500">
-        <div>
-          <dt className="inline text-slate-400">Activity ID: </dt>
-          <dd className="inline">{item.id}</dd>
-        </div>
-        {"transactionHash" in item && item.transactionHash && (
-          <div>
-            <dt className="inline text-slate-400">Transaction hash: </dt>
-            <dd className="inline">{item.transactionHash}</dd>
-          </div>
-        )}
-        {item.evidence.receiptHash && (
-          <div>
-            <dt className="inline text-slate-400">Receipt hash: </dt>
-            <dd className="inline">{item.evidence.receiptHash}</dd>
-          </div>
-        )}
-        {item.blockNumber && (
-          <div>
-            <dt className="inline text-slate-400">Block: </dt>
-            <dd className="inline">{item.blockNumber}</dd>
-          </div>
-        )}
-        {item.evidence.blockHash && (
-          <div>
-            <dt className="inline text-slate-400">Block hash: </dt>
-            <dd className="inline">{item.evidence.blockHash}</dd>
-          </div>
-        )}
-        {item.type === "SWAP" && (
-          <>
-            <div>
-              <dt className="inline text-slate-400">Intent: </dt>
-              <dd className="inline">{item.intentHash}</dd>
-            </div>
-            <div>
-              <dt className="inline text-slate-400">Proposal: </dt>
-              <dd className="inline">{item.proposalHash}</dd>
-            </div>
-            {item.evidence.tradeEventId && (
-              <div>
-                <dt className="inline text-slate-400">Trade event: </dt>
-                <dd className="inline">{item.evidence.tradeEventId}</dd>
-              </div>
-            )}
-            {item.evidence.feeEventId && (
-              <div>
-                <dt className="inline text-slate-400">Fee event: </dt>
-                <dd className="inline">{item.evidence.feeEventId}</dd>
-              </div>
-            )}
-          </>
-        )}
-      </dl>
-    </details>
-  );
 }
 
 export function ActivityCard({
@@ -167,45 +99,26 @@ export function ActivityCard({
             </p>
           </div>
           <span className={`text-sm font-medium ${statusClass(item.status)}`}>
-            {draftRecord
-              ? "Saved draft · not a policy update"
-              : STATUS_LABELS[item.status]}
+            {draftRecord ? "Saved draft" : STATUS_LABELS[item.status]}
           </span>
         </div>
-        <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-3">
-          <div>
-            <dt className="text-slate-500">Action</dt>
-            <dd className="text-slate-200">
-              {draftRecord
-                ? "Draft saved · not an active policy update"
-                : item.type === "TRADING_STATUS"
-                  ? "Trading status changed"
-                  : "Policy rules changed"}
-            </dd>
-          </div>
-          <div>
-            <dt className="text-slate-500">Actor</dt>
-            <dd className="break-all text-slate-200">
-              {item.actor ? shortHash(item.actor) : "Unavailable"}
-            </dd>
-          </div>
-          <div>
-            <dt className="text-slate-500">Resulting state</dt>
-            <dd className="text-slate-200">{stateLabel(item.state)}</dd>
-          </div>
-        </dl>
+        <p className="mt-4 text-sm text-slate-300">
+          {draftRecord
+            ? "Your changes are saved and ready to review."
+            : item.type === "TRADING_STATUS"
+              ? `Trading status: ${stateLabel(item.state)}`
+              : "Your Space rules were updated."}
+        </p>
         {item.status === "FAILED" && (
           <p className="mt-4 rounded-lg border border-amber-900/70 bg-amber-950/30 p-3 text-sm text-amber-200">
             The requested Space change failed; no successful rule or status
             update is implied.
           </p>
         )}
-        {!compact && <ActivityEvidence item={item} />}
       </article>
     );
   }
 
-  const decimals = item.initialPortfolio?.valueDecimals ?? 0;
   return (
     <article
       className={`rounded-2xl border border-slate-700 bg-slate-900 ${compact ? "p-4" : "p-5"}`}
@@ -213,8 +126,8 @@ export function ActivityCard({
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <p className="text-lg font-semibold text-white">
-            {item.traderInputSymbol ?? shortHash(item.traderInputToken)} →{" "}
-            {item.traderOutputSymbol ?? shortHash(item.traderOutputToken)}
+            {displayAssetSymbol(item.traderInputSymbol ?? "Token")} →{" "}
+            {displayAssetSymbol(item.traderOutputSymbol ?? "Token")}
           </p>
           <p className="mt-1 text-sm text-slate-400">
             {item.spaceName ?? "Space"} · {activityDate(item)}
@@ -225,60 +138,21 @@ export function ActivityCard({
         </span>
       </div>
 
-      <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-2">
-        <div>
-          <dt className="text-slate-500">Requested value</dt>
-          <dd className="text-slate-200">
-            {formatGroupedDecimalUnits(
-              item.requestedTraderInputValue,
-              decimals,
-            )}{" "}
-            normalized settlement value
-          </dd>
-        </div>
-        <div>
-          <dt className="text-slate-500">Executed value</dt>
-          <dd className="text-slate-200">
-            {item.executedTraderInputValue === undefined
-              ? "Not available"
-              : `${formatGroupedDecimalUnits(item.executedTraderInputValue, decimals)} normalized settlement value`}
-          </dd>
-        </div>
-        <div>
-          <dt className="text-slate-500">Fee record</dt>
-          <dd className="text-slate-200">
-            {item.feeState === "EARNED" && item.earnedFee
-              ? `${formatGroupedDecimalUnits(item.earnedFee.treasuryAmount, decimals)} normalized settlement value retained by treasury`
-              : item.feeState === "ESTIMATE" && item.estimatedFees
-                ? `${formatGroupedDecimalUnits(item.estimatedFees.treasuryAmount, decimals)} estimated normalized settlement value · not earned`
-                : item.status === "ORPHANED"
-                  ? "Not counted as earned revenue"
-                  : "No fee evidence recorded"}
-          </dd>
-        </div>
-        <div>
-          <dt className="text-slate-500">Evidence</dt>
-          <dd className="text-slate-200">
-            {item.source === "CHAIN_EVENT"
-              ? `Confirmed network record · block ${item.blockNumber ?? "unavailable"}`
-              : "Prepared offer record"}
-          </dd>
-        </div>
-        <div>
-          <dt className="text-slate-500">Actor</dt>
-          <dd className="break-all text-slate-200">
-            {shortHash(item.actor ?? item.trader)}
-          </dd>
-        </div>
-      </dl>
+      <p className="mt-4 text-sm text-slate-300">
+        {item.status === "CONFIRMED"
+          ? "The swap was completed successfully."
+          : item.status === "PENDING"
+            ? "The swap is being confirmed."
+            : item.status === "FAILED"
+              ? "The swap was not completed."
+              : "Review this swap before approving it."}
+      </p>
 
       {item.status === "ORPHANED" && (
         <p className="mt-4 rounded-lg border border-amber-900/70 bg-amber-950/30 p-3 text-sm text-amber-200">
-          This event was removed from the canonical chain. It remains visible
-          for audit context, but contributes zero to earned-fee totals.
+          This swap was reverted and did not complete.
         </p>
       )}
-      {!compact && <ActivityEvidence item={item} />}
     </article>
   );
 }
@@ -375,7 +249,7 @@ export function ActivityFeed({
         role="alert"
         className="flex flex-wrap items-center gap-3 rounded-xl border border-red-900/70 bg-red-950/30 p-4 text-sm text-red-200"
       >
-        <span>Activity is unavailable: {error}</span>
+        <span>We couldn't load activity. {error}</span>
         <button
           type="button"
           onClick={() => setRetry((value) => value + 1)}

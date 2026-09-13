@@ -549,12 +549,26 @@ async function request(action: string, body: unknown): Promise<Setup> {
   }
   if (!response.ok) {
     const error = isRecord(result) ? result.error : undefined;
-    if (isRecord(error) && typeof error.message === "string")
+    if (isRecord(error) && typeof error.message === "string") {
+      console.error("[AURKA space setup] request.failed", {
+        action,
+        status: response.status,
+        code: typeof error.code === "string" ? error.code : "UNKNOWN",
+        message: error.message,
+        details: isRecord(error.details) ? error.details : {},
+      });
       throw new SetupRequestError(
         typeof error.code === "string" ? error.code : "FORK_REQUEST_FAILED",
         error.message,
         isRecord(error.details) ? error.details : {},
       );
+    }
+    console.error("[AURKA space setup] request.failed", {
+      action,
+      status: response.status,
+      code: "FORK_REQUEST_FAILED",
+      response: result,
+    });
     throw new SetupRequestError(
       "FORK_REQUEST_FAILED",
       typeof error === "string" ? error : "Space setup failed",

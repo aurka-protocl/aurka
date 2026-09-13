@@ -86,21 +86,21 @@ function SpaceFilter({
   return (
     <label className="block min-w-0 sm:col-span-2">
       <span className="text-xs font-medium uppercase tracking-wide text-slate-500">
-        Space
+        Portfolio
       </span>
       <select
         value={value}
         onChange={(event) => onChange(event.target.value)}
         className="mt-1 block min-h-10 w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-100"
       >
-        <option value="">All Spaces</option>
+        <option value="">All portfolios</option>
         {spaces.map((space) => (
           <option key={space.identity.id} value={space.identity.id}>
             {space.identity.name}
           </option>
         ))}
         {value && !spaces.some((space) => space.identity.id === value) && (
-          <option value={value}>Selected Space</option>
+          <option value={value}>Selected portfolio</option>
         )}
       </select>
     </label>
@@ -127,7 +127,7 @@ function ActivityFilters({
         <div>
           <h2 className="font-semibold text-white">Filter activity</h2>
           <p className="mt-1 text-sm text-slate-400">
-            Filter by Space, activity type, status, or date.
+            Filter by portfolio, activity type, status, or date.
           </p>
         </div>
         <button
@@ -153,7 +153,7 @@ function ActivityFilters({
         >
           <option value="">All types</option>
           <option value="SWAP">Swaps</option>
-          <option value="RULE_CHANGE">Rule changes</option>
+          <option value="RULE_CHANGE">Portfolio updates</option>
           <option value="TRADING_STATUS">Trading status</option>
         </FilterSelect>
         <FilterSelect
@@ -162,11 +162,11 @@ function ActivityFilters({
           onChange={(value) => onChange("status", value)}
         >
           <option value="">All statuses</option>
-          <option value="PREPARED">Prepared</option>
-          <option value="PENDING">Pending</option>
-          <option value="CONFIRMED">Confirmed</option>
+          <option value="PREPARED">Waiting</option>
+          <option value="PENDING">Processing</option>
+          <option value="CONFIRMED">Complete</option>
           <option value="FAILED">Failed</option>
-          <option value="ORPHANED">Orphaned</option>
+          <option value="ORPHANED">Reverted</option>
         </FilterSelect>
         <label className="block min-w-0">
           <span className="text-xs font-medium uppercase tracking-wide text-slate-500">
@@ -274,13 +274,11 @@ export default function History() {
     <section className="space-y-6 text-slate-200">
       <div>
         <p className="text-sm font-semibold uppercase tracking-[0.18em] text-cyan-300">
-          Your activity
+          Activity
         </p>
         <h1 className="mt-2 text-3xl font-semibold text-white">Activity</h1>
         <p className="mt-3 max-w-2xl leading-7 text-slate-400">
-          Review offers, wallet requests, confirmed trades, and Space changes in
-          one place. Pending and failed requests are kept separate from
-          confirmed trades.
+          Review your swaps and portfolio updates in one place.
         </p>
       </div>
 
@@ -292,8 +290,7 @@ export default function History() {
       />
       {spacesError && (
         <p className="text-sm text-amber-300">
-          Space names are unavailable: {spacesError}. Activity remains readable,
-          but the filter list could not be loaded.
+          Some portfolio names are unavailable. Activity remains readable.
         </p>
       )}
       <ActivityFeed

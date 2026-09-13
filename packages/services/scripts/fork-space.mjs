@@ -39,6 +39,7 @@ import {
 } from "../dist/index.js";
 import {
   calculateDirectSettlement,
+  buildUpstreamStrategy,
   computeCapacityEpochId,
 } from "@aurka/shared";
 import {
@@ -124,14 +125,6 @@ const REAL_AQUA_ABI = parseAbi([
 const UPSTREAM_SWAPVM_COMMIT = "afd99c408b4ed610027f4426c6f98650acac9f5f";
 const UPSTREAM_AQUA_COMMIT = "9c5c42e5840e8741fba3597c48456c9510212b66";
 
-function word(value) {
-  return BigInt(value).toString(16).padStart(64, "0");
-}
-
-function addressWord(value) {
-  return value.slice(2).toLowerCase().padStart(64, "0");
-}
-
 function tupleValue(value, index, name) {
   return value && typeof value === "object" && name in value
     ? value[name]
@@ -139,34 +132,13 @@ function tupleValue(value, index, name) {
 }
 
 function upstreamStrategy(maker, guard, prices, scale) {
-  const inputPrice = prices.weth;
-  const outputPrice = prices.usdc;
-  const inputUnit =
-    (10n ** 18n * 10n ** BigInt(inputPrice.priceDecimals) - 1n) /
-      inputPrice.price +
-    1n;
-  const outputUnit =
-    (10n ** 6n * 10n ** BigInt(outputPrice.priceDecimals) - 1n) /
-      outputPrice.price +
-    1n;
-  const program = `0x9040${word(outputUnit * scale + 1n)}${word(inputUnit * scale)}530100`;
-  const traits =
-    (1n << 254n) |
-    (1n << 250n) |
-    (1n << 246n) |
-    (60n << 208n) |
-    (60n << 192n) |
-    (40n << 176n) |
-    (40n << 160n);
-  const orderData = `0x${addressWord(USDC).slice(24)}${addressWord(WETH).slice(24)}${addressWord(guard).slice(24)}${program.slice(2)}`;
-  const strategy = `0x${word(32)}${addressWord(maker)}${word(traits)}${word(96)}${word(orderData.length / 2 - 1)}${orderData.slice(2).padEnd(Math.ceil((orderData.length - 2) / 64) * 64, "0")}`;
-  return {
-    strategy,
-    strategyHash: keccak256(strategy),
-    traits,
-    orderData,
-    program,
-  };
+  return buildUpstreamStrategy({
+    maker,
+    guard,
+    traderInput: { token: WETH, decimals: 18, ...prices.weth },
+    traderOutput: { token: USDC, decimals: 6, ...prices.usdc },
+    balanceScale: scale,
+  });
 }
 // Public Anvil test derivation only. Never consume DEPLOYER_PRIVATE_KEY.
 const MNEMONIC = "test test test test test test test test test test test junk";

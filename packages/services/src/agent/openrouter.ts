@@ -15,13 +15,30 @@ import type {
 import { z } from "zod";
 
 import type { AurkaService } from "../service.js";
+import { VertexModelTransport } from "./vertex.js";
+import {
+  AgentProviderError,
+  type AgentProvider,
+  type ModelMessage,
+  type ModelResponse,
+  type ModelToolCall,
+  type ModelTransport,
+  type AgentProviderTelemetry,
+} from "./provider.js";
 
 const DEFAULT_BASE_URL = "https://openrouter.ai/api/v1";
 const DEFAULT_MODEL = "openrouter/free";
+const DEFAULT_VERTEX_MODEL = "gemini-3.1-flash-lite";
+const DEFAULT_VERTEX_LOCATION = "global";
 const DEFAULT_TIMEOUT_MS = 15_000;
 const DEFAULT_MAX_TOOL_CALLS = 4;
-const DEFAULT_MAX_CONCURRENT_PROPOSALS = 2;
+const DEFAULT_MAX_CONCURRENT_PROPOSALS = 1;
+const DEFAULT_DAILY_REQUEST_CAP = 100;
+const DEFAULT_GLOBAL_DAILY_REQUEST_CAP = 500;
+const DEFAULT_DAILY_TOKEN_CAP = 100_000;
+const DEFAULT_GLOBAL_DAILY_TOKEN_CAP = 500_000;
 const MAX_MODEL_TEXT = 1_000;
+const MAX_TOOL_RESULT_BYTES = 8_000;
 const CLARIFICATION_SUGGESTIONS = [
   "Find a small WETH → USDC trade",
   "Explain this Space's current rules",
@@ -36,44 +53,27 @@ const simulationShape = z
   .strict();
 
 export interface OpenRouterAgentOptions {
+  readonly provider?: AgentProvider;
   readonly apiKey?: string;
   readonly model?: string;
   readonly baseUrl?: string;
   readonly timeoutMs?: number;
   readonly maxToolCalls?: number;
   readonly maxConcurrentProposals?: number;
+  readonly dailyRequestCap?: number;
+  readonly globalDailyRequestCap?: number;
+  readonly dailyTokenCap?: number;
+  readonly globalDailyTokenCap?: number;
   /** Local E2E escape hatch; never enable this for a judging/production run. */
   readonly deterministicTestMode?: boolean;
   readonly fetchImpl?: typeof fetch;
+  /** Provider-specific transport. The orchestration below remains shared. */
+  readonly transport?: ModelTransport;
 }
 
-type ChatMessage = {
-  readonly role: "system" | "user" | "assistant" | "tool";
-  readonly content: string | null;
-  readonly tool_calls?: readonly ToolCall[];
-  readonly tool_call_id?: string;
-  readonly name?: string;
-};
-
-type ToolCall = {
-  readonly id: string;
-  readonly type: "function";
-  readonly function: { readonly name: string; readonly arguments: string };
-};
-
-type ChatResponse = {
-  readonly choices: readonly [
-    {
-      readonly finish_reason?: string;
-      readonly message: {
-        readonly role: "assistant";
-        readonly content?: unknown;
-        readonly tool_calls?: unknown;
-      };
-    },
-  ];
-  readonly model?: unknown;
-};
+type ChatMessage = ModelMessage;
+type ToolCall = ModelToolCall;
+type ChatResponse = ModelResponse;
 
 const emptyInputSchema = z.object({}).strict();
 const conditionsInputSchema = z
@@ -145,7 +145,8 @@ type AgentBlockedCode =
   | "INVALID_TRADE_REQUEST"
   | "SIMULATION_REJECTED"
   | "SPACE_UNAVAILABLE"
-  | "PRICING_RENEWAL_REQUIRED";
+  | "PRICING_RENEWAL_REQUIRED"
+  | "STRATEGY_MISMATCH";
 
 type ToolOutcome =
   | {
@@ -159,20 +160,19 @@ type ToolOutcome =
       readonly code: AgentUnavailableCode | AgentBlockedCode;
     };
 
-class AgentUnavailableError extends Error {
-  constructor(
-    readonly code: AgentUnavailableCode,
-    message: string,
-  ) {
-    super(message);
-    this.name = "AgentUnavailableError";
-  }
-}
-
 function modelText(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
   const trimmed = value.trim();
   return trimmed ? trimmed.slice(0, MAX_MODEL_TEXT) : undefined;
+}
+
+function boundedToolResult(value: unknown): string {
+  const serialized = JSON.stringify(value);
+  if (serialized.length <= MAX_TOOL_RESULT_BYTES) return serialized;
+  return JSON.stringify({
+    error:
+      "Tool output exceeded the bounded assistant context; use the specific Space tool again.",
+  });
 }
 
 function configuredValue(value: string | undefined, fallback: string): string {
@@ -242,6 +242,11 @@ function unavailable(
         "The assistant could not finish its bounded tool checks. Try a shorter request or try again.",
       retryable: true,
     },
+    DAILY_CAP_EXCEEDED: {
+      reason:
+        "The assistant's daily request budget has been reached. Try again after the budget resets.",
+      retryable: false,
+    },
   };
   const message = copy[code];
   return agentProposalResponseSchema.parse({
@@ -287,6 +292,8 @@ function nextActionForBlocked(code: AgentBlockedCode): string {
       return "Review the current Space state and request a fresh quote before trying again.";
     case "PRICING_RENEWAL_REQUIRED":
       return "Ask the Space owner to complete the documented price-renewal recovery, then request a fresh quote.";
+    case "STRATEGY_MISMATCH":
+      return "Ask the Space owner to pause and recover the old Space, then create a replacement Space before requesting a fresh quote.";
     case "TRADE_RULE_REJECTED":
       return "Review the deterministic reason above, then choose a direction or amount accepted by the current rules and request a fresh quote.";
   }
@@ -301,7 +308,8 @@ function isBlockedCode(
     code === "INVALID_TRADE_REQUEST" ||
     code === "SIMULATION_REJECTED" ||
     code === "SPACE_UNAVAILABLE" ||
-    code === "PRICING_RENEWAL_REQUIRED"
+    code === "PRICING_RENEWAL_REQUIRED" ||
+    code === "STRATEGY_MISMATCH"
   );
 }
 
@@ -556,6 +564,15 @@ function isPricingRenewalError(error: unknown): boolean {
   );
 }
 
+function isStrategyMismatchError(error: unknown): boolean {
+  return (
+    error !== null &&
+    typeof error === "object" &&
+    "code" in error &&
+    error.code === "STRATEGY_MISMATCH"
+  );
+}
+
 function throwIfAborted(signal: AbortSignal | undefined): void {
   if (signal?.aborted) throw new Error("OpenRouter request was cancelled.");
 }
@@ -651,7 +668,62 @@ async function walletTokenBalance(
 export function openRouterAgentOptionsFromEnv(
   environment: NodeJS.ProcessEnv = process.env,
 ): OpenRouterAgentOptions {
+  const providerValue = (
+    environment.AURKA_AI_PROVIDER ??
+    environment.AI_PROVIDER ??
+    "openrouter"
+  )
+    .trim()
+    .toLowerCase();
+  if (providerValue === "vertex") {
+    const project = environment.GOOGLE_CLOUD_PROJECT?.trim() || undefined;
+    const location =
+      environment.GOOGLE_CLOUD_LOCATION?.trim() || DEFAULT_VERTEX_LOCATION;
+    const model =
+      environment.AURKA_AI_AGENT_MODEL?.trim() ||
+      environment.AURKA_AI_CHAT_MODEL?.trim() ||
+      DEFAULT_VERTEX_MODEL;
+    return {
+      provider: "vertex",
+      model,
+      transport: new VertexModelTransport({
+        ...(project ? { project } : {}),
+        location,
+        model,
+      }),
+      timeoutMs: Number(environment.AURKA_AI_TIMEOUT_MS ?? DEFAULT_TIMEOUT_MS),
+      maxToolCalls: Number(
+        environment.AURKA_AI_MAX_TOOL_ROUNDS ?? DEFAULT_MAX_TOOL_CALLS,
+      ),
+      maxConcurrentProposals: Number(
+        environment.AURKA_AI_MAX_CONCURRENCY ??
+          DEFAULT_MAX_CONCURRENT_PROPOSALS,
+      ),
+      dailyRequestCap: Number(
+        environment.AURKA_AI_DAILY_REQUEST_CAP ?? DEFAULT_DAILY_REQUEST_CAP,
+      ),
+      globalDailyRequestCap: Number(
+        environment.AURKA_AI_GLOBAL_DAILY_REQUEST_CAP ??
+          DEFAULT_GLOBAL_DAILY_REQUEST_CAP,
+      ),
+      dailyTokenCap: Number(
+        environment.AURKA_AI_DAILY_TOKEN_CAP ?? DEFAULT_DAILY_TOKEN_CAP,
+      ),
+      globalDailyTokenCap: Number(
+        environment.AURKA_AI_GLOBAL_DAILY_TOKEN_CAP ??
+          DEFAULT_GLOBAL_DAILY_TOKEN_CAP,
+      ),
+      deterministicTestMode: environmentBoolean(
+        environment.AURKA_AGENT_TEST_MODE,
+      ),
+    };
+  }
+  if (providerValue !== "openrouter")
+    throw new Error(
+      `Unsupported AI provider "${providerValue}"; choose vertex or openrouter`,
+    );
   return {
+    provider: "openrouter",
     ...(environment.OPENROUTER_API_KEY?.trim()
       ? { apiKey: environment.OPENROUTER_API_KEY.trim() }
       : {}),
@@ -664,6 +736,20 @@ export function openRouterAgentOptionsFromEnv(
     maxConcurrentProposals: Number(
       environment.OPENROUTER_MAX_CONCURRENT_PROPOSALS ??
         DEFAULT_MAX_CONCURRENT_PROPOSALS,
+    ),
+    dailyRequestCap: Number(
+      environment.AURKA_AI_DAILY_REQUEST_CAP ?? DEFAULT_DAILY_REQUEST_CAP,
+    ),
+    globalDailyRequestCap: Number(
+      environment.AURKA_AI_GLOBAL_DAILY_REQUEST_CAP ??
+        DEFAULT_GLOBAL_DAILY_REQUEST_CAP,
+    ),
+    dailyTokenCap: Number(
+      environment.AURKA_AI_DAILY_TOKEN_CAP ?? DEFAULT_DAILY_TOKEN_CAP,
+    ),
+    globalDailyTokenCap: Number(
+      environment.AURKA_AI_GLOBAL_DAILY_TOKEN_CAP ??
+        DEFAULT_GLOBAL_DAILY_TOKEN_CAP,
     ),
     deterministicTestMode: environmentBoolean(
       environment.AURKA_AGENT_TEST_MODE,
@@ -678,16 +764,29 @@ export class OpenRouterAgent {
   private readonly timeoutMs: number;
   private readonly maxToolCalls: number;
   private readonly maxConcurrentProposals: number;
+  private readonly dailyRequestCap: number;
+  private readonly globalDailyRequestCap: number;
+  private readonly dailyTokenCap: number;
+  private readonly globalDailyTokenCap: number;
   private readonly deterministicTestMode: boolean;
   private readonly fetchImpl: typeof fetch;
+  private readonly provider: AgentProvider;
+  private readonly transport: ModelTransport | undefined;
+  private lastTelemetry: AgentProviderTelemetry | undefined;
   private activeProposals = 0;
 
   constructor(
     private readonly service: AurkaService,
     options: OpenRouterAgentOptions = openRouterAgentOptionsFromEnv(),
   ) {
+    this.transport = options.transport;
+    this.provider =
+      options.transport?.provider ?? options.provider ?? "openrouter";
     this.apiKey = options.apiKey;
-    this.model = configuredValue(options.model, DEFAULT_MODEL);
+    this.model = configuredValue(
+      options.transport?.model ?? options.model,
+      this.provider === "vertex" ? DEFAULT_VERTEX_MODEL : DEFAULT_MODEL,
+    );
     this.baseUrl = configuredValue(options.baseUrl, DEFAULT_BASE_URL).replace(
       /\/$/,
       "",
@@ -709,14 +808,32 @@ export class OpenRouterAgent {
       ),
       4,
     );
+    this.dailyRequestCap = Math.max(
+      1,
+      Number(options.dailyRequestCap ?? DEFAULT_DAILY_REQUEST_CAP),
+    );
+    this.globalDailyRequestCap = Math.max(
+      1,
+      Number(options.globalDailyRequestCap ?? DEFAULT_GLOBAL_DAILY_REQUEST_CAP),
+    );
+    this.dailyTokenCap = Math.max(
+      1,
+      Number(options.dailyTokenCap ?? DEFAULT_DAILY_TOKEN_CAP),
+    );
+    this.globalDailyTokenCap = Math.max(
+      1,
+      Number(options.globalDailyTokenCap ?? DEFAULT_GLOBAL_DAILY_TOKEN_CAP),
+    );
     this.deterministicTestMode = options.deterministicTestMode === true;
     this.fetchImpl = options.fetchImpl ?? fetch;
   }
 
   status(): AgentStatus {
     return agentStatusSchema.parse({
-      provider: "openrouter",
-      configured: Boolean(this.apiKey) || this.deterministicTestMode,
+      provider: this.provider,
+      configured:
+        (this.transport?.configured ?? Boolean(this.apiKey)) ||
+        this.deterministicTestMode,
       model: this.deterministicTestMode
         ? "aurka-deterministic-test"
         : this.model,
@@ -724,7 +841,27 @@ export class OpenRouterAgent {
     });
   }
 
+  telemetry(): AgentProviderTelemetry | undefined {
+    return this.lastTelemetry;
+  }
+
   async propose(
+    input: AgentProposalRequest,
+    requestSignal?: AbortSignal,
+  ): Promise<AgentProposalResponse> {
+    this.lastTelemetry = undefined;
+    return this.withProvider(await this.proposeInternal(input, requestSignal));
+  }
+
+  private withProvider(response: AgentProposalResponse): AgentProposalResponse {
+    if (this.provider === "openrouter") return response;
+    return agentProposalResponseSchema.parse({
+      ...response,
+      provider: this.provider,
+    });
+  }
+
+  private async proposeInternal(
     input: AgentProposalRequest,
     requestSignal?: AbortSignal,
   ): Promise<AgentProposalResponse> {
@@ -763,9 +900,25 @@ export class OpenRouterAgent {
     }
     if (this.deterministicTestMode)
       return this.proposeDeterministicTest(value, requestSignal);
-    if (!this.apiKey) return unavailable(this.model, "MISSING_CONFIGURATION");
+    if (!this.transport && !this.apiKey)
+      return unavailable(this.model, "MISSING_CONFIGURATION");
     if (this.activeProposals >= this.maxConcurrentProposals)
       return unavailable(this.model, "CONCURRENCY_LIMIT");
+    const ownerAddress =
+      this.service.repository.getTradingAgentByWalletAddress(value.trader)
+        ?.ownerAddress ?? value.trader;
+    const budgetAvailable = this.service.repository.consumeAgentProviderBudget({
+      ownerAddress,
+      provider: this.provider,
+      day: new Date().toISOString().slice(0, 10),
+      requestCap: this.dailyRequestCap,
+      tokenCap: this.dailyTokenCap,
+      globalRequestCap: this.globalDailyRequestCap,
+      globalTokenCap: this.globalDailyTokenCap,
+      estimatedInputTokens: 4_000,
+      estimatedOutputTokens: 700,
+    });
+    if (!budgetAvailable) return unavailable(this.model, "DAILY_CAP_EXCEEDED");
 
     this.activeProposals += 1;
     try {
@@ -864,14 +1017,14 @@ export class OpenRouterAgent {
             role: "tool",
             tool_call_id: call.id,
             name: call.function.name,
-            content: JSON.stringify(
+            content: boundedToolResult(
               outcome.ok ? outcome.value : { error: outcome.error },
             ),
           });
         }
       }
     } catch (error) {
-      if (error instanceof AgentUnavailableError)
+      if (error instanceof AgentProviderError)
         return unavailable(this.model, error.code, trace);
       if (signal.aborted) return unavailable(this.model, "TIMEOUT", trace);
       return unavailable(this.model, "NETWORK_ERROR", trace);
@@ -965,11 +1118,11 @@ export class OpenRouterAgent {
 
       // Resolve the addresses from the live Space policy. The test mode fixes
       // only the human intent, never a contract address supplied by a caller.
-      const inputAsset = selectedSpace.position!.policy.assets.find(
-        (asset) => asset.symbol.toUpperCase().includes("WETH"),
+      const inputAsset = selectedSpace.position!.policy.assets.find((asset) =>
+        asset.symbol.toUpperCase().includes("WETH"),
       );
-      const outputAsset = selectedSpace.position!.policy.assets.find(
-        (asset) => asset.symbol.toUpperCase().includes("USDC"),
+      const outputAsset = selectedSpace.position!.policy.assets.find((asset) =>
+        asset.symbol.toUpperCase().includes("USDC"),
       );
       if (!inputAsset || !outputAsset)
         return blocked(
@@ -1008,7 +1161,7 @@ export class OpenRouterAgent {
         if (!outcome.ok) return outcomeResponse(model, outcome, trace);
       }
     } catch (error) {
-      if (error instanceof AgentUnavailableError)
+      if (error instanceof AgentProviderError)
         return unavailable(model, error.code, trace);
       if (signal.aborted) return unavailable(model, "TIMEOUT", trace);
       return unavailable(model, "NETWORK_ERROR", trace);
@@ -1152,17 +1305,19 @@ export class OpenRouterAgent {
           ? "MALFORMED_RESPONSE"
           : message === "The requested tool is not available."
             ? "UNSUPPORTED_CAPABILITY"
-            : isPricingRenewalError(error)
-              ? "PRICING_RENEWAL_REQUIRED"
-              : /Space (?:was not found|is not active|not available)/i.test(
-                    message,
-                  )
-                ? "SPACE_UNAVAILABLE"
-                : name === "simulate_proposal"
-                  ? "SIMULATION_REJECTED"
-                  : /amount|token|requested|positive/i.test(message)
-                    ? "INVALID_TRADE_REQUEST"
-                    : "TRADE_RULE_REJECTED";
+            : isStrategyMismatchError(error)
+              ? "STRATEGY_MISMATCH"
+              : isPricingRenewalError(error)
+                ? "PRICING_RENEWAL_REQUIRED"
+                : /Space (?:was not found|is not active|not available)/i.test(
+                      message,
+                    )
+                  ? "SPACE_UNAVAILABLE"
+                  : name === "simulate_proposal"
+                    ? "SIMULATION_REJECTED"
+                    : /amount|token|requested|positive/i.test(message)
+                      ? "INVALID_TRADE_REQUEST"
+                      : "TRADE_RULE_REJECTED";
       return { ok: false, error: message, code };
     }
   }
@@ -1172,6 +1327,36 @@ export class OpenRouterAgent {
     requestSignal?: AbortSignal,
     toolChoice?: unknown,
   ): Promise<ChatResponse> {
+    const startedAt = Date.now();
+    if (this.transport) {
+      const response = await this.transport.complete({
+        messages,
+        tools: toolDefinitions,
+        ...(toolChoice === undefined ? {} : { toolChoice }),
+        maxOutputTokens: 700,
+        ...(requestSignal ? { signal: requestSignal } : {}),
+      });
+      this.lastTelemetry = {
+        latencyMs:
+          (this.lastTelemetry?.latencyMs ?? 0) +
+          Math.max(0, Date.now() - startedAt),
+        ...(response.usage?.inputTokens === undefined
+          ? {}
+          : {
+              inputTokens:
+                (this.lastTelemetry?.inputTokens ?? 0) +
+                response.usage.inputTokens,
+            }),
+        ...(response.usage?.outputTokens === undefined
+          ? {}
+          : {
+              outputTokens:
+                (this.lastTelemetry?.outputTokens ?? 0) +
+                response.usage.outputTokens,
+            }),
+      };
+      return response;
+    }
     const timeout = AbortSignal.timeout(this.timeoutMs);
     const signal = requestSignal
       ? AbortSignal.any([requestSignal, timeout])
@@ -1200,11 +1385,11 @@ export class OpenRouterAgent {
       throwIfAborted(signal);
     } catch {
       if (signal.aborted)
-        throw new AgentUnavailableError(
+        throw new AgentProviderError(
           "TIMEOUT",
           "The OpenRouter request exceeded its time budget.",
         );
-      throw new AgentUnavailableError(
+      throw new AgentProviderError(
         "NETWORK_ERROR",
         "The assistant provider could not be reached.",
       );
@@ -1222,10 +1407,7 @@ export class OpenRouterAgent {
                 : response.status >= 500
                   ? "PROVIDER_OUTAGE"
                   : "NETWORK_ERROR";
-      throw new AgentUnavailableError(
-        code,
-        "The provider request was rejected.",
-      );
+      throw new AgentProviderError(code, "The provider request was rejected.");
     }
     let body: unknown;
     try {
@@ -1233,13 +1415,13 @@ export class OpenRouterAgent {
       body = await response.json();
       throwIfAborted(signal);
     } catch (error) {
-      if (error instanceof AgentUnavailableError) throw error;
+      if (error instanceof AgentProviderError) throw error;
       if (signal.aborted)
-        throw new AgentUnavailableError(
+        throw new AgentProviderError(
           "TIMEOUT",
           "The OpenRouter response exceeded its time budget.",
         );
-      throw new AgentUnavailableError(
+      throw new AgentProviderError(
         "MALFORMED_RESPONSE",
         "The provider returned malformed JSON.",
       );
@@ -1250,19 +1432,19 @@ export class OpenRouterAgent {
       !Array.isArray((body as { choices?: unknown }).choices) ||
       (body as { choices: unknown[] }).choices.length !== 1
     )
-      throw new AgentUnavailableError(
+      throw new AgentProviderError(
         "MALFORMED_RESPONSE",
         "The provider returned a malformed completion.",
       );
     const choice = (body as { choices: unknown[] }).choices[0];
     if (!choice || typeof choice !== "object")
-      throw new AgentUnavailableError(
+      throw new AgentProviderError(
         "MALFORMED_RESPONSE",
         "The provider returned a malformed completion choice.",
       );
     const message = (choice as { message?: unknown }).message;
     if (!message || typeof message !== "object")
-      throw new AgentUnavailableError(
+      throw new AgentProviderError(
         "MALFORMED_RESPONSE",
         "The provider returned no assistant message.",
       );
@@ -1272,7 +1454,7 @@ export class OpenRouterAgent {
       content: (message as { content?: unknown }).content,
       tool_calls: (message as { tool_calls?: unknown }).tool_calls,
     };
-    return {
+    const result: ChatResponse = {
       choices: [
         {
           ...(typeof finishReason === "string"
@@ -1282,6 +1464,44 @@ export class OpenRouterAgent {
         },
       ],
       model: (body as { model?: unknown }).model,
+      ...(() => {
+        const usage = (body as { usage?: Record<string, unknown> }).usage;
+        const inputTokens =
+          typeof usage?.prompt_tokens === "number"
+            ? usage.prompt_tokens
+            : undefined;
+        const outputTokens =
+          typeof usage?.completion_tokens === "number"
+            ? usage.completion_tokens
+            : undefined;
+        return inputTokens !== undefined || outputTokens !== undefined
+          ? {
+              usage: {
+                ...(inputTokens === undefined ? {} : { inputTokens }),
+                ...(outputTokens === undefined ? {} : { outputTokens }),
+              },
+            }
+          : {};
+      })(),
     };
+    this.lastTelemetry = {
+      latencyMs:
+        (this.lastTelemetry?.latencyMs ?? 0) +
+        Math.max(0, Date.now() - startedAt),
+      ...(result.usage?.inputTokens === undefined
+        ? {}
+        : {
+            inputTokens:
+              (this.lastTelemetry?.inputTokens ?? 0) + result.usage.inputTokens,
+          }),
+      ...(result.usage?.outputTokens === undefined
+        ? {}
+        : {
+            outputTokens:
+              (this.lastTelemetry?.outputTokens ?? 0) +
+              result.usage.outputTokens,
+          }),
+    };
+    return result;
   }
 }

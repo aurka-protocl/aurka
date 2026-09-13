@@ -22,8 +22,7 @@ export const apiBaseUrl =
   configuredUrl(environment.VITE_AURKA_API_URL) ?? "/api";
 
 /** Local Sepolia rehearsal only; never enabled by the hosted/production build. */
-export const agentTestMode =
-  environment.VITE_AURKA_AGENT_TEST_MODE === "true";
+export const agentTestMode = environment.VITE_AURKA_AGENT_TEST_MODE === "true";
 
 export const supportedChainId =
   Number.isSafeInteger(configuredChainId) && configuredChainId > 0
@@ -33,6 +32,6 @@ export const supportedChainId =
 export const environmentLabel =
   appMode === "testnet"
     ? supportedChainId === 11155111
-      ? "Ethereum Sepolia · test funds · demo tokens"
-      : "Test network · test funds"
-    : "Local demo · test data";
+      ? "Testnet"
+      : "Test network"
+    : "Local";

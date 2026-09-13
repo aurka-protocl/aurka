@@ -2,7 +2,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Bot, LoaderCircle, MessageCircle, Send, X } from "lucide-react";
 import { AurkaClient } from "@aurka/sdk";
 import {
-  formatGroupedDecimalUnits,
   formatTokenAmount,
   type AgentProposalResponse,
   type SpaceRecord,
@@ -10,7 +9,7 @@ import {
 import { Link, useLocation } from "react-router-dom";
 import { apiBaseUrl, appMode, supportedChainId } from "../config";
 import { spaceAdapter } from "../domain/spaces";
-import { userFacingError } from "../ui";
+import { displayAssetSymbol, userFacingError } from "../ui";
 import { useWallet } from "../wallet";
 
 const client = new AurkaClient({ baseUrl: apiBaseUrl });
@@ -35,38 +34,51 @@ function unavailableLabel(
   code: Extract<AgentProposalResponse, { status: "UNAVAILABLE" }>["code"],
 ): string {
   const labels: Record<typeof code, string> = {
-    MISSING_CONFIGURATION: "Setup needed",
-    AUTHENTICATION_REJECTED: "Secure connection failed",
+    MISSING_CONFIGURATION: "Temporarily unavailable",
+    AUTHENTICATION_REJECTED: "Connection unavailable",
     RATE_LIMITED: "Assistant is busy",
-    TIMEOUT: "The check timed out",
-    UNSUPPORTED_CAPABILITY: "Capability unavailable",
-    PROVIDER_OUTAGE: "Provider temporarily unavailable",
-    MALFORMED_RESPONSE: "Response needs a retry",
-    NETWORK_ERROR: "Assistant could not be reached",
-    CONCURRENCY_LIMIT: "Another request is running",
-    TOOL_BUDGET_EXHAUSTED: "Request needs to be shorter",
+    TIMEOUT: "This is taking longer than expected",
+    UNSUPPORTED_CAPABILITY: "Not available for this request",
+    PROVIDER_OUTAGE: "Temporarily unavailable",
+    MALFORMED_RESPONSE: "Please try again",
+    NETWORK_ERROR: "Connection unavailable",
+    CONCURRENCY_LIMIT: "Another request is in progress",
+    TOOL_BUDGET_EXHAUSTED: "Please make the request shorter",
+    DAILY_CAP_EXCEEDED: "Daily assistant budget reached",
   };
   return labels[code];
+}
+
+function assistantCopy(value: string): string {
+  return value
+    .replace(/\bprovider\b/gi, "assistant")
+    .replace(/\bservice\b/gi, "app")
+    .replace(/\bdelegated\b/gi, "automated")
+    .replace(/\bnormalized settlement value\b/gi, "value")
+    .replace(/\bproposal\b/gi, "swap")
+    .replace(/\bsettlement\b/gi, "swap")
+    .replace(/\bpolicy\b/gi, "rules")
+    .replace(/\bsnapshot\b/gi, "current details");
 }
 
 function responseText(card: AgentProposalResponse): string {
   switch (card.status) {
     case "READY":
       return (
-        "I found a trade for " +
+        "I found a swap for " +
         card.selectedSpace.name +
-        ". Review the proposal before approving anything with your wallet."
+        ". Review the details before confirming in your wallet."
       );
     case "READ_ONLY_ANSWER":
-      return card.answer;
+      return assistantCopy(card.answer);
     case "CLARIFICATION":
-      return card.reason;
+      return assistantCopy(card.reason);
     case "UNSUPPORTED_ACTION":
-      return card.reason;
+      return assistantCopy(card.reason);
     case "BLOCKED":
-      return card.reason;
+      return assistantCopy(card.reason);
     case "UNAVAILABLE":
-      return card.reason;
+      return assistantCopy(card.reason);
   }
 }
 
@@ -106,32 +118,22 @@ function ResultCard({
 
   if (card.status === "READ_ONLY_ANSWER")
     return (
-      <div className="space-y-2 rounded-lg border border-cyan-800/70 bg-cyan-950/30 p-3 text-sm text-cyan-100">
+      <div
+        role="region"
+        aria-label="Space rules answer"
+        className="space-y-2 rounded-lg border border-cyan-800/70 bg-cyan-950/30 p-3 text-sm text-cyan-100"
+      >
         <p className="font-semibold">{card.selectedSpace.name}&apos;s rules</p>
-        <p className="leading-5 text-cyan-100/80">{card.answer}</p>
-        <dl className="grid gap-2 text-xs sm:grid-cols-2">
-          <div>
-            <dt className="text-cyan-100/60">Limit</dt>
-            <dd>
-              {formatGroupedDecimalUnits(
-                card.rules.maximumTransactionValue,
-                card.rules.valueDecimals,
-              )}{" "}
-              value units
-            </dd>
-          </div>
-          <div>
-            <dt className="text-cyan-100/60">Network</dt>
-            <dd>Chain {card.rules.chainId}</dd>
-          </div>
-        </dl>
+        <p className="leading-5 text-cyan-100/80">
+          {assistantCopy(card.answer)}
+        </p>
         <Link
           to={
             "/spaces/" + encodeURIComponent(card.selectedSpace.id) + "/settings"
           }
           className="inline-flex rounded-lg border border-cyan-800 px-3 py-2 text-xs text-cyan-100 hover:bg-cyan-950/70"
         >
-          Open Space settings
+          Review Space settings
         </Link>
       </div>
     );
@@ -139,14 +141,14 @@ function ResultCard({
   if (card.status === "UNSUPPORTED_ACTION")
     return (
       <div className="space-y-2 rounded-lg border border-amber-800/70 bg-amber-950/30 p-3 text-sm text-amber-100">
-        <strong>Owner settings required</strong>
-        <p>{card.nextAction}</p>
+        <strong>Your approval is needed</strong>
+        <p>{assistantCopy(card.nextAction)}</p>
         {card.settingsPath && (
           <Link
             to={card.settingsPath}
             className="inline-flex rounded-lg border border-amber-700 px-3 py-2 text-xs hover:bg-amber-950/70"
           >
-            Open Space settings
+            Review Space settings
           </Link>
         )}
       </div>
@@ -159,7 +161,7 @@ function ResultCard({
         className="space-y-2 rounded-lg border border-amber-800/70 bg-amber-950/30 p-3 text-sm text-amber-200"
       >
         <strong>{unavailableLabel(card.code)}</strong>
-        <p>{card.reason}</p>
+        <p>{assistantCopy(card.reason)}</p>
         {card.retryable && (
           <button
             type="button"
@@ -175,8 +177,10 @@ function ResultCard({
   if (card.status === "BLOCKED")
     return (
       <div className="rounded-lg border border-red-800/70 bg-red-950/30 p-3 text-sm text-red-200">
-        <strong>Trade blocked by Space rules</strong>
-        {card.nextAction && <p className="mt-1">{card.nextAction}</p>}
+        <strong>Swap unavailable</strong>
+        {card.nextAction && (
+          <p className="mt-1">{assistantCopy(card.nextAction)}</p>
+        )}
       </div>
     );
 
@@ -195,9 +199,7 @@ function ResultCard({
           <p className="font-semibold text-violet-100">
             {card.selectedSpace.name}
           </p>
-          <p className="text-xs text-slate-500">
-            Wallet approval still required
-          </p>
+          <p className="text-xs text-slate-500">Review before confirming</p>
         </div>
         <span className="rounded-full bg-emerald-950 px-2 py-1 text-[11px] text-emerald-200">
           {card.simulation.status === "SUCCEEDED" ? "Ready" : "Needs review"}
@@ -211,7 +213,7 @@ function ResultCard({
               card.proposal.traderInputAmount,
               input?.decimals ?? 0,
             )}{" "}
-            {input?.symbol ?? "token"}
+            {displayAssetSymbol(input?.symbol ?? "token")}
           </dd>
         </div>
         <div>
@@ -221,16 +223,18 @@ function ResultCard({
               card.proposal.traderOutputAmount,
               output?.decimals ?? 0,
             )}{" "}
-            {output?.symbol ?? "token"}
+            {displayAssetSymbol(output?.symbol ?? "token")}
           </dd>
         </div>
       </dl>
-      <p className="leading-5 text-slate-300">{card.explanation}</p>
+      <p className="leading-5 text-slate-300">
+        {assistantCopy(card.explanation)}
+      </p>
       <Link
         to={"/trade/" + encodeURIComponent(card.selectedSpace.id)}
         className="inline-flex rounded-lg bg-violet-700 px-3 py-2 text-xs font-medium text-white hover:bg-violet-600"
       >
-        Review in Trade
+        Review swap
       </Link>
     </div>
   );
@@ -244,7 +248,7 @@ export default function LiveAssistant() {
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
       role: "assistant",
-      text: "Hi — ask me about Spaces, rules, or a trade that fits the current limits.",
+      text: "Hi — I can help you find a swap or understand a Space's trading rules.",
     },
   ]);
   const [card, setCard] = useState<AgentProposalResponse>();
@@ -341,9 +345,9 @@ export default function LiveAssistant() {
   }
 
   const examples = [
-    "Which Spaces are active?",
-    "Explain this Space's rules",
-    "Find a small WETH → USDC trade",
+    "Which Spaces are available?",
+    "What are this Space's limits?",
+    "Find a small WETH → USDC swap",
   ];
 
   return (
@@ -360,8 +364,8 @@ export default function LiveAssistant() {
                 <p className="font-semibold text-white">AURKA assistant</p>
                 <p className="text-[11px] text-violet-200/70">
                   {selectedSpace
-                    ? "Context: " + selectedSpace.identity.name
-                    : "Space-aware · wallet-approved"}
+                    ? "Viewing " + selectedSpace.identity.name
+                    : "Ask about swaps or Spaces"}
                 </p>
               </div>
             </div>
@@ -420,8 +424,8 @@ export default function LiveAssistant() {
             </div>
             {appMode === "testnet" && !wallet.address && (
               <p className="mb-2 text-[11px] text-amber-200/80">
-                General questions work without a wallet. Connect one before
-                reviewing a wallet-specific trade.
+                You can ask questions without a wallet. Connect one before
+                confirming a swap.
               </p>
             )}
             <form
@@ -434,7 +438,7 @@ export default function LiveAssistant() {
             >
               <textarea
                 aria-label="Ask the AURKA assistant"
-                placeholder="Ask about Spaces, rules, or trades…"
+                placeholder="Ask about swaps or Spaces…"
                 value={prompt}
                 onChange={(event) => setPrompt(event.target.value)}
                 rows={2}
@@ -474,7 +478,7 @@ export default function LiveAssistant() {
         ) : (
           <MessageCircle className="h-4 w-4" aria-hidden="true" />
         )}
-        <span className="hidden sm:inline">AURKA assistant</span>
+        <span className="hidden sm:inline">Assistant</span>
       </button>
     </div>
   );

@@ -6,6 +6,7 @@ import {
   delegatedControlRequestHash,
   delegatedControlTypedData,
   delegatedRecoveryTypedData,
+  tradingAgentSchema,
   type AgentProposalResponse,
   type DelegatedSessionPlan,
 } from "@aurka/shared";
@@ -16,7 +17,11 @@ import type {
 } from "@aurka/wallet";
 
 import { OpenRouterAgent } from "../src/agent/openrouter.js";
-import { DelegatedSessionService } from "../src/agent/delegated.js";
+import {
+  createDelegatedSessionServiceFromEnv,
+  DelegatedSessionService,
+} from "../src/agent/delegated.js";
+import { AuthService } from "../src/api/auth.js";
 import {
   closeApiServer,
   createApiServer,
@@ -196,6 +201,221 @@ async function control(
 }
 
 describe("bounded delegated agent execution", () => {
+  it("keeps the per-user resolver when the legacy singleton is absent and authorizes through the API", async () => {
+    const service = new AurkaService();
+    const wallet = new FakeDelegatedWallet();
+    const proposalSource = {
+      propose: async (): Promise<AgentProposalResponse> => {
+        throw new Error("The authorization test must not evaluate a proposal");
+      },
+    };
+    const agentRecord = tradingAgentSchema.parse({
+      id: "agent-factory-test",
+      ownerAddress: bob.address,
+      chainId: 31_337,
+      walletId: "wallet-delegated-test",
+      walletAddress: agentAccount.address,
+      signerId: "signer-delegated-test",
+      policyId: "policy-delegated-test",
+      recoveryPolicyId: "recovery-delegated-test",
+      state: "READY",
+      fundingJson: { eth: "0", usdc: "0", weth: "0", transactions: [] },
+      mandateJson: null,
+      lastError: null,
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    service.repository.saveTradingAgent(agentRecord);
+    const originalWalletId = process.env.PRIVY_DELEGATED_WALLET_ID;
+    delete process.env.PRIVY_DELEGATED_WALLET_ID;
+    let resolverCalls = 0;
+    const delegated = await createDelegatedSessionServiceFromEnv(
+      service,
+      proposalSource,
+      {
+        now: () => 200,
+        walletResolver: async (walletId) => {
+          resolverCalls += 1;
+          expect(walletId).toBe(agentRecord.walletId);
+          return wallet;
+        },
+      },
+    );
+    const plan: DelegatedSessionPlan = {
+      ownerAddress: bob.address,
+      chainId: 31_337,
+      allowedSpaceIds: [FIXTURE_POSITION_ID],
+      traderInputToken: FIXTURE_ADDRESSES.weth,
+      traderOutputToken: FIXTURE_ADDRESSES.usdc,
+      perTradeInputAmount: "1",
+      cumulativeInputBudget: "1",
+      maxTradeCount: 1,
+      slippageBps: 50,
+      expiresAt: 800,
+      sessionNonce: `0x${"a1".repeat(32)}`,
+    };
+    const typedData = delegatedAuthorizationTypedData(
+      plan,
+      agentAccount.address,
+    );
+    const signature = await bob.signTypedData(typedData as never);
+    const auth = new AuthService(service.repository, 3_600, 31_337);
+    const challenge = auth.challenge({
+      address: bob.address,
+      chainId: 31_337,
+      origin: "http://127.0.0.1",
+    });
+    const login = await auth.verify(
+      {
+        challengeId: challenge.challengeId,
+        address: bob.address,
+        chainId: 31_337,
+        signature: await bob.signTypedData(challenge.typedData as never),
+      },
+      "http://127.0.0.1",
+    );
+    const handle = createApiServer({
+      service,
+      delegated,
+      auth,
+    });
+    await listenApiServer(handle, 0);
+    const bound = handle.server.address();
+    if (!bound || typeof bound === "string")
+      throw new Error("API did not bind");
+    try {
+      const response = await fetch(
+        `http://127.0.0.1:${bound.port}/v1/delegated/sessions/authorize`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            cookie: auth.cookie(login.token).split(";", 1)[0]!,
+          },
+          body: JSON.stringify({
+            plan,
+            agentWallet: agentAccount.address,
+            signature,
+          }),
+        },
+      );
+      expect(response.status).toBe(201);
+      expect(await response.json()).toMatchObject({
+        ok: true,
+        data: { wallet: { walletId: agentRecord.walletId } },
+      });
+      expect(resolverCalls).toBeGreaterThan(0);
+
+      const unknownWallet = privateKeyToAccount(`0x${"78".repeat(32)}`);
+      const unknownPlan = {
+        ...plan,
+        sessionNonce: `0x${"a2".repeat(32)}`,
+      };
+      const unknownResponse = await fetch(
+        `http://127.0.0.1:${bound.port}/v1/delegated/sessions/authorize`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            cookie: auth.cookie(login.token).split(";", 1)[0]!,
+          },
+          body: JSON.stringify({
+            plan: unknownPlan,
+            agentWallet: unknownWallet.address,
+            signature: await bob.signTypedData(
+              delegatedAuthorizationTypedData(
+                unknownPlan,
+                unknownWallet.address,
+              ) as never,
+            ),
+          }),
+        },
+      );
+      expect(unknownResponse.status).toBe(404);
+      expect(await unknownResponse.json()).toMatchObject({
+        ok: false,
+        error: { code: "AGENT_NOT_FOUND" },
+      });
+
+      const foreignPlan = {
+        ...plan,
+        ownerAddress: alice.address,
+        sessionNonce: `0x${"a3".repeat(32)}`,
+      };
+      await expect(
+        delegated.authorize({
+          plan: foreignPlan,
+          agentWallet: agentAccount.address,
+          signature: await alice.signTypedData(
+            delegatedAuthorizationTypedData(
+              foreignPlan,
+              agentAccount.address,
+            ) as never,
+          ),
+        }),
+      ).rejects.toMatchObject({
+        code: "DELEGATED_OWNER_UNAUTHORIZED",
+        statusCode: 403,
+      });
+    } finally {
+      await closeApiServer(handle);
+      service.close();
+      if (originalWalletId === undefined)
+        delete process.env.PRIVY_DELEGATED_WALLET_ID;
+      else process.env.PRIVY_DELEGATED_WALLET_ID = originalWalletId;
+    }
+  });
+
+  it("keeps the legacy path fail-closed when neither a singleton nor resolver is configured", async () => {
+    const service = new AurkaService();
+    const proposalSource = {
+      propose: async (): Promise<AgentProposalResponse> => {
+        throw new Error("The unavailable path must not evaluate a proposal");
+      },
+    };
+    const originalWalletId = process.env.PRIVY_DELEGATED_WALLET_ID;
+    delete process.env.PRIVY_DELEGATED_WALLET_ID;
+    try {
+      const delegated = await createDelegatedSessionServiceFromEnv(
+        service,
+        proposalSource,
+      );
+      const plan: DelegatedSessionPlan = {
+        ownerAddress: bob.address,
+        chainId: 31_337,
+        allowedSpaceIds: [FIXTURE_POSITION_ID],
+        traderInputToken: FIXTURE_ADDRESSES.weth,
+        traderOutputToken: FIXTURE_ADDRESSES.usdc,
+        perTradeInputAmount: "1",
+        cumulativeInputBudget: "1",
+        maxTradeCount: 1,
+        slippageBps: 50,
+        expiresAt: 800,
+        sessionNonce: `0x${"a4".repeat(32)}`,
+      };
+      await expect(
+        delegated.authorize({
+          plan,
+          agentWallet: agentAccount.address,
+          signature: await bob.signTypedData(
+            delegatedAuthorizationTypedData(
+              plan,
+              agentAccount.address,
+            ) as never,
+          ),
+        }),
+      ).rejects.toMatchObject({
+        code: "DELEGATED_CONFIGURATION_MISSING",
+        statusCode: 503,
+      });
+    } finally {
+      service.close();
+      if (originalWalletId === undefined)
+        delete process.env.PRIVY_DELEGATED_WALLET_ID;
+      else process.env.PRIVY_DELEGATED_WALLET_ID = originalWalletId;
+    }
+  });
+
   const nonReadyResults: Array<[string, AgentProposalResponse]> = [
     [
       "clarification",

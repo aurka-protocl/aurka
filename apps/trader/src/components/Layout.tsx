@@ -21,7 +21,7 @@ interface LayoutProps {
 const navigation = [
   { name: "Spaces", href: "/spaces", icon: Boxes },
   { name: "Trade", href: "/trade", icon: ArrowLeftRight },
-  { name: "Agent", href: "/agent", icon: Bot },
+  { name: "Automated trading", href: "/agent", icon: Bot },
   { name: "Activity", href: "/activity", icon: Activity },
   { name: "About", href: "/about", icon: Info },
 ];
@@ -65,9 +65,7 @@ export default function Layout({ children }: LayoutProps) {
             <span className="block text-lg font-bold tracking-[0.2em] text-white">
               AURKA
             </span>
-            <span className="block text-xs text-slate-500">
-              Constrained liquidity
-            </span>
+            <span className="block text-xs text-slate-500">Simple swaps</span>
           </NavLink>
 
           <nav

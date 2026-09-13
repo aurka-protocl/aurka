@@ -4,7 +4,6 @@ import { readFileSync, writeFileSync } from "node:fs";
 
 import path from "node:path";
 import {
-  concatHex,
   createPublicClient,
   createWalletClient,
   defineChain,
@@ -12,9 +11,9 @@ import {
   http,
   keccak256,
   stringToHex,
-  toHex,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
+import { buildUpstreamStrategy } from "@aurka/shared";
 
 const ROOT = path.resolve(
   path.dirname(new URL(import.meta.url).pathname),
@@ -22,14 +21,6 @@ const ROOT = path.resolve(
 );
 const CHAIN_ID = 11_155_111;
 const ZERO_HASH = `0x${"00".repeat(32)}`;
-const EIP712_MAKER_TRAITS =
-  (1n << 254n) |
-  (1n << 250n) |
-  (1n << 246n) |
-  (60n << 208n) |
-  (60n << 192n) |
-  (40n << 176n) |
-  (40n << 160n);
 
 function value(name) {
   const result = process.env[name]?.trim();
@@ -74,10 +65,6 @@ function rawPerValue(value_, decimals, price, priceDecimals) {
 
 function bytes32Address(token) {
   return `0x${token.slice(2).toLowerCase().padStart(64, "0")}`;
-}
-
-function word(value_) {
-  return toHex(value_, { size: 32 });
 }
 
 function snapshot(token, raw) {
@@ -235,48 +222,23 @@ async function main() {
     functionName: "vaultAddress",
     args: [account.address, spaceId],
   });
-  const tokenA = weth.toLowerCase() < usdc.toLowerCase() ? weth : usdc;
-  const tokenB = tokenA.toLowerCase() === weth.toLowerCase() ? usdc : weth;
-  const inputUnit = rawPerValue(
-    1n,
-    18,
-    wethPrice.price,
-    wethPrice.priceDecimals,
-  );
-  const outputUnit = rawPerValue(
-    1n,
-    6,
-    usdcPrice.price,
-    usdcPrice.priceDecimals,
-  );
-  const scaledOutput = outputUnit * 1_000_000n + 1n;
-  const scaledInput = inputUnit * 1_000_000n;
-  const program = concatHex([
-    "0x9040",
-    word(
-      tokenA.toLowerCase() === usdc.toLowerCase() ? scaledOutput : scaledInput,
-    ),
-    word(
-      tokenB.toLowerCase() === usdc.toLowerCase() ? scaledOutput : scaledInput,
-    ),
-    "0x5301",
-    tokenA.toLowerCase() === weth.toLowerCase() ? "0x80" : "0x00",
-  ]);
-  const orderData = concatHex([tokenA, tokenB, guard, program]);
-  const strategy = encodeAbiParameters(
-    [
-      {
-        type: "tuple",
-        components: [
-          { name: "maker", type: "address" },
-          { name: "traits", type: "uint256" },
-          { name: "data", type: "bytes" },
-        ],
-      },
-    ],
-    [{ maker: vault, traits: EIP712_MAKER_TRAITS, data: orderData }],
-  );
-  const strategyHash = keccak256(strategy);
+  const strategyTemplate = buildUpstreamStrategy({
+    maker: vault,
+    guard,
+    traderInput: {
+      token: weth,
+      decimals: Number(manifest.tokens.weth.decimals),
+      price: wethPrice.price,
+      priceDecimals: wethPrice.priceDecimals,
+    },
+    traderOutput: {
+      token: usdc,
+      decimals: Number(manifest.tokens.usdc.decimals),
+      price: usdcPrice.price,
+      priceDecimals: usdcPrice.priceDecimals,
+    },
+  });
+  const { strategy, strategyHash } = strategyTemplate;
   const balanceSnapshot = keccak256(
     encodeAbiParameters(
       [{ type: "address[]" }, { type: "uint256[]" }],

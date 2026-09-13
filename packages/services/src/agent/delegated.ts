@@ -8,6 +8,10 @@ import {
   delegatedSessionId,
   delegatedSessionSchema,
   delegatedStatusSchema,
+  type AgentActivityDetails,
+  type AgentActivityEventType,
+  type AgentUnavailableCode,
+  type AgentStatus,
   type AgentProposalResponse,
   type AtomicSettlementIntent,
   type DelegatedSession,
@@ -21,6 +25,7 @@ import {
   type TradingAgentState,
   formatTokenAmount,
 } from "@aurka/shared";
+import type { AgentProviderTelemetry } from "./provider.js";
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
 import { encodeFunctionData, hashTypedData, recoverAddress } from "viem";
@@ -65,6 +70,8 @@ export interface DelegatedAgentProposalSource {
     readonly chainId: number;
     readonly spaceId?: string;
   }): Promise<AgentProposalResponse>;
+  status?(): AgentStatus;
+  telemetry?(): AgentProviderTelemetry | undefined;
 }
 
 export interface DelegatedSessionServiceOptions {
@@ -115,6 +122,59 @@ type DelegatedAuthorizationModule = {
   }) => Promise<unknown>;
 };
 
+const NORMAL_CHECK_DELAY_SECONDS = 60;
+const MAX_RETRY_DELAY_SECONDS = 15 * 60;
+
+function retryDelaySeconds(consecutiveFailures: number): number {
+  const exponent = Math.min(Math.max(consecutiveFailures - 1, 0), 4);
+  const base = Math.min(MAX_RETRY_DELAY_SECONDS, 30 * 2 ** exponent);
+  return Math.min(
+    MAX_RETRY_DELAY_SECONDS,
+    base + Math.floor(Math.random() * 10),
+  );
+}
+
+function activityFailureSummary(code: string): string {
+  switch (code) {
+    case "RATE_LIMITED":
+      return "The assistant is rate-limited; the next check is scheduled automatically.";
+    case "TIMEOUT":
+      return "The assistant check timed out; the next check is scheduled automatically.";
+    case "NETWORK_ERROR":
+    case "PROVIDER_OUTAGE":
+      return "The assistant provider is temporarily unavailable; the next check is scheduled automatically.";
+    case "DELEGATED_INSUFFICIENT_FUNDS":
+      return "Waiting: the trading wallet does not have enough reviewed input balance for the next trade.";
+    case "SNAPSHOT_STALE":
+    case "PRICE_DATA_STALE":
+      return "Waiting: the Space data is stale, so no AI evaluation was requested.";
+    case "MISSING_CONFIGURATION":
+    case "AUTHENTICATION_REJECTED":
+      return "The assistant provider is not configured for automated checks.";
+    default:
+      return "The assistant check could not complete; the next check is scheduled automatically.";
+  }
+}
+
+function isDeterministicFailureCode(code: string): boolean {
+  return [
+    "DELEGATED_SPACE_INELIGIBLE",
+    "DELEGATED_TRADE_CAP",
+    "DELEGATED_DIRECTION",
+    "DELEGATED_SLIPPAGE",
+    "DELEGATED_MINIMUM_RATE",
+    "DELEGATED_INTENT_MISMATCH",
+    "INTENT_NOT_FOUND",
+  ].includes(code);
+}
+
+type EvaluationOutcome = {
+  readonly status: AgentProposalResponse["status"];
+  readonly code?: AgentUnavailableCode;
+  readonly retryable?: boolean;
+  readonly reason?: string;
+};
+
 /**
  * Load the live adapter only when the wallet identity, owner binding and RPC
  * route are configured. The bundled operator modules can be overridden, but
@@ -124,7 +184,7 @@ type DelegatedAuthorizationModule = {
 export async function createDelegatedSessionServiceFromEnv(
   service: AurkaService,
   agent: DelegatedAgentProposalSource,
-  options: Pick<DelegatedSessionServiceOptions, "walletResolver"> = {},
+  options: DelegatedSessionServiceOptions = {},
 ): Promise<DelegatedSessionService> {
   const walletId = process.env.PRIVY_DELEGATED_WALLET_ID?.trim();
   const signerId = process.env.PRIVY_DELEGATED_SIGNER_ID?.trim();
@@ -162,12 +222,19 @@ export async function createDelegatedSessionServiceFromEnv(
     !authorizationModulePath ||
     !trustedOwnerAddress ||
     !service.rpcTransport
-  )
+  ) {
+    // Per-user TradingAgentService supplies the wallet adapter and owner
+    // binding from the durable registry. A legacy singleton wallet is not a
+    // prerequisite for the per-user flow. Preserve every option here: in
+    // particular, dropping walletResolver would silently select this
+    // unavailable legacy adapter for a registered user wallet.
     return new DelegatedSessionService(
       service,
       agent,
       new UnavailableDelegatedWallet(),
+      options,
     );
+  }
   const operator = (await import(
     pathToFileURL(resolve(policyModulePath)).href
   )) as DelegatedOperatorModule;
@@ -235,7 +302,7 @@ export class UnavailableDelegatedWallet implements DelegatedWalletAdapter {
   }
   async signIntent(): Promise<string> {
     throw new ServiceError(
-      "DELEGATED_UNAVAILABLE",
+      "DELEGATED_CONFIGURATION_MISSING",
       "Delegated Privy wallet is not configured",
       503,
     );
@@ -245,7 +312,7 @@ export class UnavailableDelegatedWallet implements DelegatedWalletAdapter {
     readonly policyFingerprint: string;
   }> {
     throw new ServiceError(
-      "DELEGATED_UNAVAILABLE",
+      "DELEGATED_CONFIGURATION_MISSING",
       "Delegated Privy wallet is not configured",
       503,
     );
@@ -255,7 +322,7 @@ export class UnavailableDelegatedWallet implements DelegatedWalletAdapter {
   }
   async revoke(): Promise<void> {
     throw new ServiceError(
-      "DELEGATED_UNAVAILABLE",
+      "DELEGATED_CONFIGURATION_MISSING",
       "Delegated Privy wallet is not configured",
       503,
     );
@@ -280,6 +347,40 @@ function delegatedStatusWallet(reason: string) {
 
 function nowSeconds(): number {
   return Math.floor(Date.now() / 1000);
+}
+
+export function delegatedWalletFailure(
+  error: unknown,
+  operation: string,
+): ServiceError {
+  const message = error instanceof Error ? error.message.toLowerCase() : "";
+  if (/rate limit|too many requests|\b429\b/.test(message))
+    return new ServiceError(
+      "DELEGATED_RATE_LIMITED",
+      "The wallet service could not respond",
+      503,
+      { operation, retryable: true, nextAction: "retry-after-delay" },
+    );
+  if (/timeout|timed out|aborted/.test(message))
+    return new ServiceError(
+      "DELEGATED_TIMEOUT",
+      "The wallet service could not respond",
+      503,
+      { operation, retryable: true, nextAction: "retry" },
+    );
+  if (/policy|signer|permission|restriction|readback/.test(message))
+    return new ServiceError(
+      "DELEGATED_POLICY_MISMATCH",
+      "Trading permissions need attention",
+      409,
+      { operation, retryable: false, nextAction: "review-permissions" },
+    );
+  return new ServiceError(
+    "DELEGATED_PROVIDER_UNAVAILABLE",
+    "The wallet service could not respond",
+    503,
+    { operation, retryable: true, nextAction: "retry" },
+  );
 }
 
 function sameAddress(a: string, b: string): boolean {
@@ -466,6 +567,21 @@ function checkSpaceEligibility(
   }
 }
 
+function mandateActivitySummary(
+  service: AurkaService,
+  plan: DelegatedSessionPlan,
+): string {
+  const space = service.getSpace(plan.allowedSpaceIds[0]!);
+  const asset = space.position?.policy.assets.find((candidate) =>
+    sameAddress(candidate.token, plan.traderInputToken),
+  );
+  const amount = formatTokenAmount(
+    BigInt(plan.perTradeInputAmount),
+    asset?.decimals ?? 0,
+  );
+  return `Started: spend up to ${amount} ${asset?.symbol ?? "input tokens"} before ${new Date(plan.expiresAt * 1_000).toISOString()}.`;
+}
+
 function sessionWithWallet(
   plan: DelegatedSessionPlan,
   id: string,
@@ -481,6 +597,9 @@ function sessionWithWallet(
     consumedInputAmount: "0",
     tradeCount: 0,
     remainingInputBudget: plan.cumulativeInputBudget,
+    lastEvaluatedAt: null,
+    nextCheckAt: now + NORMAL_CHECK_DELAY_SECONDS,
+    consecutiveFailures: 0,
     updatedAt: now,
     authorityGeneration: 0,
     trades: [],
@@ -517,12 +636,233 @@ export class DelegatedSessionService {
     return this.walletResolver ? this.walletResolver(walletId) : this.wallet;
   }
 
+  private async walletStatus(
+    wallet: DelegatedWalletAdapter,
+    operation: string,
+  ): Promise<Awaited<ReturnType<DelegatedWalletAdapter["getStatus"]>>> {
+    try {
+      return await wallet.getStatus();
+    } catch (error) {
+      if (error instanceof ServiceError) throw error;
+      throw delegatedWalletFailure(error, operation);
+    }
+  }
+
   private async resolveWalletForAddress(
     walletAddress: string,
+    ownerAddress: string,
+    chainId: number,
   ): Promise<DelegatedWalletAdapter> {
     const agent =
       this.service.repository.getTradingAgentByWalletAddress(walletAddress);
+    // The per-user composition must never fall back to the configured legacy
+    // adapter. A wallet address is not an authorization for an agent by
+    // itself; it must belong to the signed and authenticated owner.
+    if (this.walletResolver && !agent)
+      throw new ServiceError(
+        "AGENT_NOT_FOUND",
+        "Trading agent was not found",
+        404,
+      );
+    if (agent && !sameAddress(agent.ownerAddress, ownerAddress))
+      throw new ServiceError(
+        "DELEGATED_OWNER_UNAUTHORIZED",
+        "This trading wallet is not linked to the authenticated owner",
+        403,
+      );
+    if (agent && agent.chainId !== chainId)
+      throw new ServiceError(
+        "CHAIN_MISMATCH",
+        "Trading agent is registered on a different chain",
+      );
     return agent ? this.resolveWallet(agent.walletId) : this.wallet;
+  }
+
+  private recordActivity(
+    id: string,
+    eventType: AgentActivityEventType,
+    code: string,
+    summary: string,
+    options: {
+      readonly dedupeKey?: string;
+      readonly correlationId?: string;
+      readonly transactionHash?: string;
+      readonly details?: AgentActivityDetails;
+    } = {},
+  ): void {
+    const session = this.get(id);
+    const agent = this.service.repository.getTradingAgentByWalletId(
+      session.wallet.walletId!,
+    );
+    if (!agent) return;
+    const provider = this.agent.status?.();
+    const telemetry = this.agent.telemetry?.();
+    const details =
+      provider || telemetry || options.details
+        ? {
+            ...(provider
+              ? { provider: provider.provider, model: provider.model }
+              : {}),
+            ...(options.details ?? {}),
+            ...(telemetry ?? {}),
+          }
+        : undefined;
+    this.service.repository.recordAgentActivity({
+      dedupeKey:
+        options.dedupeKey ?? `${id}:${eventType}:${this.now()}:${code}`,
+      ownerAddress: session.plan.ownerAddress,
+      agentId: agent.id,
+      sessionId: id,
+      occurredAt: this.now(),
+      eventType,
+      code,
+      summary: summary.slice(0, 500),
+      ...(options.correlationId
+        ? { correlationId: options.correlationId }
+        : {}),
+      ...(options.transactionHash
+        ? { transactionHash: options.transactionHash }
+        : {}),
+      ...(details && Object.keys(details).length > 0 ? { details } : {}),
+    });
+  }
+
+  private scheduleNextCheck(
+    id: string,
+    authorityGeneration: number,
+    evaluatedAt: number,
+    consecutiveFailures: number,
+  ): number {
+    const nextCheckAt =
+      evaluatedAt +
+      (consecutiveFailures > 0
+        ? retryDelaySeconds(consecutiveFailures)
+        : NORMAL_CHECK_DELAY_SECONDS);
+    this.service.repository.updateDelegatedSessionIfGeneration(
+      id,
+      authorityGeneration,
+      {
+        lastEvaluatedAt: evaluatedAt,
+        nextCheckAt,
+        consecutiveFailures,
+      },
+    );
+    return nextCheckAt;
+  }
+
+  private async runScheduledTick(
+    id: string,
+    message: string,
+  ): Promise<DelegatedSession> {
+    const startedAt = this.now();
+    let outcome: EvaluationOutcome | undefined;
+    this.recordActivity(
+      id,
+      "EVALUATION_STARTED",
+      "EVALUATION_STARTED",
+      "Started an automated check using the approved trading rules.",
+      { dedupeKey: `${id}:evaluation:${startedAt}` },
+    );
+    try {
+      const result = await this.runActiveTick(id, message, (value) => {
+        outcome = value;
+      });
+      const current = this.get(id);
+      if (current.state === "ACTIVE") {
+        const evaluatedAt = this.now();
+        if (outcome?.status === "UNAVAILABLE") {
+          const failures = (current.consecutiveFailures ?? 0) + 1;
+          const nextCheckAt = this.scheduleNextCheck(
+            id,
+            current.authorityGeneration,
+            evaluatedAt,
+            failures,
+          );
+          const code = outcome.code ?? "PROVIDER_UNAVAILABLE";
+          this.recordActivity(
+            id,
+            "PROVIDER_UNAVAILABLE",
+            code,
+            activityFailureSummary(code),
+            {
+              dedupeKey: `${id}:provider-unavailable:${startedAt}`,
+              details: { nextCheckAt, reasonCode: code },
+            },
+          );
+        } else if (outcome?.status === "BLOCKED") {
+          const nextCheckAt = this.scheduleNextCheck(
+            id,
+            current.authorityGeneration,
+            evaluatedAt,
+            0,
+          );
+          this.recordActivity(
+            id,
+            "DETERMINISTIC_REJECTED",
+            "DETERMINISTIC_REJECTED",
+            outcome.reason
+              ? `No trade: ${outcome.reason}`
+              : "The deterministic checks rejected this opportunity; no transaction was signed or submitted.",
+            {
+              dedupeKey: `${id}:evaluation-result:${startedAt}`,
+              details: { nextCheckAt, reasonCode: "DETERMINISTIC_REJECTED" },
+            },
+          );
+        } else {
+          const failures = (current.consecutiveFailures ?? 0) + 1;
+          const nextCheckAt = this.scheduleNextCheck(
+            id,
+            current.authorityGeneration,
+            evaluatedAt,
+            outcome?.status === "READY" ? 0 : failures,
+          );
+          if (outcome?.status !== "READY")
+            this.recordActivity(
+              id,
+              "EVALUATION_WAITING",
+              "NO_TRADE",
+              "The current rules did not produce a trade; the next check is scheduled automatically.",
+              {
+                dedupeKey: `${id}:evaluation-result:${startedAt}`,
+                details: { nextCheckAt, reasonCode: "NO_TRADE" },
+              },
+            );
+        }
+      }
+      return result;
+    } catch (error) {
+      const current = this.get(id);
+      if (current.state === "ACTIVE") {
+        const evaluatedAt = this.now();
+        const code =
+          error instanceof ServiceError ? error.code : "CHECK_FAILED";
+        const deterministic = isDeterministicFailureCode(code);
+        const waitOnly =
+          code === "DELEGATED_INSUFFICIENT_FUNDS" ||
+          code === "SNAPSHOT_STALE" ||
+          code === "PRICE_DATA_STALE";
+        const failures = waitOnly ? 0 : (current.consecutiveFailures ?? 0) + 1;
+        const nextCheckAt = this.scheduleNextCheck(
+          id,
+          current.authorityGeneration,
+          evaluatedAt,
+          failures,
+        );
+        this.recordActivity(
+          id,
+          deterministic ? "DETERMINISTIC_REJECTED" : "EVALUATION_WAITING",
+          code,
+          deterministic
+            ? "The deterministic checks rejected this opportunity; no transaction was signed or submitted."
+            : activityFailureSummary(code),
+          {
+            dedupeKey: `${id}:evaluation-failure:${startedAt}`,
+            details: { nextCheckAt, reasonCode: code },
+          },
+        );
+      }
+      throw error;
+    }
   }
 
   private syncTradingAgentState(
@@ -680,7 +1020,7 @@ export class DelegatedSessionService {
   }
 
   async status(): Promise<DelegatedStatus> {
-    const wallet = await this.wallet.getStatus();
+    const wallet = await this.walletStatus(this.wallet, "status");
     return delegatedStatusSchema.parse({
       wallet,
       ownerAddress: this.trustedOwnerAddress ?? null,
@@ -694,8 +1034,10 @@ export class DelegatedSessionService {
     const value = raw;
     const delegatedWallet = await this.resolveWalletForAddress(
       value.agentWallet,
+      value.plan.ownerAddress,
+      value.plan.chainId,
     );
-    let wallet = await delegatedWallet.getStatus();
+    let wallet = await this.walletStatus(delegatedWallet, "authorize");
     if (
       !wallet.configured ||
       !wallet.address ||
@@ -703,7 +1045,9 @@ export class DelegatedSessionService {
       !wallet.policyFingerprint
     )
       throw new ServiceError(
-        "DELEGATED_UNAVAILABLE",
+        wallet.reason === "Delegated Privy wallet is not configured"
+          ? "DELEGATED_CONFIGURATION_MISSING"
+          : "DELEGATED_UNAVAILABLE",
         wallet.reason ?? "Delegated Privy wallet is not configured",
         503,
       );
@@ -743,7 +1087,7 @@ export class DelegatedSessionService {
         );
       try {
         await this.withWalletOperation(() => delegatedWallet.restore!());
-        wallet = await delegatedWallet.getStatus();
+        wallet = await this.walletStatus(delegatedWallet, "authorize-restore");
       } catch (error) {
         throw new ServiceError(
           "DELEGATED_RESTORE_FAILED",
@@ -764,6 +1108,18 @@ export class DelegatedSessionService {
     if (existing) return existing;
     const session = sessionWithWallet(plan, id, wallet, this.now());
     this.service.repository.saveDelegatedSession(session);
+    this.recordActivity(
+      id,
+      "MANDATE_ACTIVATED",
+      "MANDATE_ACTIVATED",
+      mandateActivitySummary(this.service, plan),
+      {
+        dedupeKey: `${id}:mandate-activated`,
+        details: {
+          nextCheckAt: session.authorizedAt + NORMAL_CHECK_DELAY_SECONDS,
+        },
+      },
+    );
     return session;
   }
 
@@ -817,7 +1173,7 @@ export class DelegatedSessionService {
     authorization: DelegatedControlAuthorization,
   ): Promise<DelegatedSession> {
     await this.consumeControlAuthorization(id, "START", message, authorization);
-    return this.runActiveTick(id, message);
+    return this.runScheduledTick(id, message);
   }
 
   /** Called by the server worker after the owner has already approved the
@@ -826,12 +1182,13 @@ export class DelegatedSessionService {
   async tick(id: string, message: string): Promise<DelegatedSession> {
     const session = this.get(id);
     if (session.state !== "ACTIVE") return session;
-    return this.runActiveTick(id, message);
+    return this.runScheduledTick(id, message);
   }
 
   private async runActiveTick(
     id: string,
     message: string,
+    onOutcome?: (outcome: EvaluationOutcome) => void,
   ): Promise<DelegatedSession> {
     await this.reconcileInternal(id);
     let session = this.get(id);
@@ -904,7 +1261,7 @@ export class DelegatedSessionService {
       );
     }
     const delegatedWallet = await this.resolveWallet(session.wallet.walletId!);
-    const wallet = await delegatedWallet.getStatus();
+    const wallet = await this.walletStatus(delegatedWallet, "worker-tick");
     if (!wallet.enabled || wallet.revoked || wallet.address === null) {
       this.service.repository.stopDelegatedSession(
         id,
@@ -939,9 +1296,19 @@ export class DelegatedSessionService {
         409,
       );
     }
+    if (
+      wallet.balances &&
+      BigInt(wallet.balances.inputToken) <
+        BigInt(session.plan.perTradeInputAmount)
+    )
+      throw new ServiceError(
+        "DELEGATED_INSUFFICIENT_FUNDS",
+        "The delegated wallet does not have enough reviewed input balance for the next trade",
+        409,
+      );
     checkSpaceEligibility(this.service, session.plan);
     const allowedSpaceId = session.plan.allowedSpaceIds[0]!;
-    const allowedSpace = this.service.getSpace(allowedSpaceId);
+    const allowedSpace = await this.service.refreshSpace(allowedSpaceId);
     const inputAsset = allowedSpace.position?.policy.assets.find(
       (asset) =>
         asset.token.toLowerCase() ===
@@ -958,6 +1325,14 @@ export class DelegatedSessionService {
       trader: wallet.address,
       chainId: session.plan.chainId,
       spaceId: allowedSpaceId,
+    });
+    onOutcome?.({
+      status: proposal.status,
+      ...(proposal.status === "UNAVAILABLE"
+        ? { code: proposal.code, retryable: proposal.retryable }
+        : proposal.status === "BLOCKED"
+          ? { reason: proposal.reason }
+          : {}),
     });
     if (proposal.status !== "READY") {
       const resultMessage =
@@ -1163,6 +1538,24 @@ export class DelegatedSessionService {
         status: "SUBMITTED",
         transactionHash: sent.transactionHash,
       });
+      this.recordActivity(
+        id,
+        "TRADE_SUBMITTED",
+        "TRADE_SUBMITTED",
+        "A reviewed trade was submitted and is waiting for chain confirmation.",
+        {
+          dedupeKey: `${id}:trade:${trade.id}:submitted`,
+          correlationId: trade.id,
+          transactionHash: sent.transactionHash,
+          details: {
+            inputToken: intent.traderInputToken,
+            outputToken: intent.traderOutputToken,
+            inputAmount: proposal.proposal.traderInputAmount,
+            outputAmount: proposal.proposal.traderOutputAmount,
+            transactionHash: sent.transactionHash,
+          },
+        },
+      );
       this.service.repository.updateDelegatedSessionIfGeneration(
         id,
         authorityGeneration,
@@ -1197,6 +1590,20 @@ export class DelegatedSessionService {
               status === "CONFIRMED"
                 ? `Confirmed ${sent.transactionHash}`
                 : `Reverted ${sent.transactionHash}`,
+          },
+        );
+        this.recordActivity(
+          id,
+          status === "CONFIRMED" ? "TRADE_CONFIRMED" : "TRADE_REVERTED",
+          status,
+          status === "CONFIRMED"
+            ? "The reviewed trade was confirmed on-chain."
+            : "The reviewed trade reverted on-chain; no successful trade was recorded.",
+          {
+            dedupeKey: `${id}:trade:${trade.id}:${status.toLowerCase()}`,
+            correlationId: trade.id,
+            transactionHash: sent.transactionHash,
+            details: { transactionHash: sent.transactionHash },
           },
         );
       }
@@ -1252,7 +1659,7 @@ export class DelegatedSessionService {
         409,
       );
     const delegatedWallet = await this.resolveWallet(session.wallet.walletId!);
-    const wallet = await delegatedWallet.getStatus();
+    const wallet = await this.walletStatus(delegatedWallet, "approve");
     if (
       !wallet.address ||
       !sameAddress(wallet.address, session.wallet.address!) ||
@@ -1335,6 +1742,19 @@ export class DelegatedSessionService {
           "Delegated session was stopped during allowance approval",
           409,
         );
+      if (result.transactionHash) {
+        this.recordActivity(
+          id,
+          "APPROVAL_PENDING",
+          "APPROVAL_SUBMITTED",
+          "The reviewed token allowance was submitted from the trading wallet.",
+          {
+            dedupeKey: `${id}:approval:${result.transactionHash}`,
+            transactionHash: result.transactionHash,
+            details: { transactionHash: result.transactionHash },
+          },
+        );
+      }
       return this.get(id);
     } catch (error) {
       if (error instanceof ServiceError) throw error;
@@ -1355,6 +1775,13 @@ export class DelegatedSessionService {
     await this.consumeControlAuthorization(id, "STOP", "", authorization);
     const session = this.get(id);
     if (session.state === "STOPPED") return session;
+    this.recordActivity(
+      id,
+      "STOP_REQUESTED",
+      "STOP_REQUESTED",
+      "Stop was requested; new signing and automated checks are disabled.",
+      { dedupeKey: `${id}:stop-requested` },
+    );
     this.service.repository.stopDelegatedSession(
       id,
       "Local signing disabled; revoking Privy permission",
@@ -1374,6 +1801,13 @@ export class DelegatedSessionService {
         409,
       );
     }
+    this.recordActivity(
+      id,
+      "STOP_CONFIRMED",
+      "STOP_CONFIRMED",
+      "Automated trading is stopped and the trading wallet permission was revoked.",
+      { dedupeKey: `${id}:stop-confirmed` },
+    );
     return this.get(id);
   }
 
@@ -1409,9 +1843,7 @@ export class DelegatedSessionService {
       );
     const pendingRecovery = this.service.repository
       .listDelegatedRecoveries(id)
-      .find((recovery) =>
-        ["SUBMITTED", "UNKNOWN"].includes(recovery.status),
-      );
+      .find((recovery) => ["SUBMITTED", "UNKNOWN"].includes(recovery.status));
     if (pendingRecovery)
       throw new ServiceError(
         "DELEGATED_RECOVERY_RECONCILIATION_REQUIRED",
@@ -1453,7 +1885,7 @@ export class DelegatedSessionService {
       tokens.add(token);
     }
     const delegatedWallet = await this.resolveWallet(session.wallet.walletId!);
-    const wallet = await delegatedWallet.getStatus();
+    const wallet = await this.walletStatus(delegatedWallet, "recover");
     if (
       !wallet.address ||
       !sameAddress(wallet.address, session.wallet.address!)
@@ -1528,6 +1960,16 @@ export class DelegatedSessionService {
           "Recovery requires one reviewed token",
           400,
         );
+      this.recordActivity(
+        id,
+        "RECOVERY_PENDING",
+        "RECOVERY_REQUESTED",
+        "Owner-approved recovery is being processed after the trading wallet was stopped.",
+        {
+          dedupeKey: `${id}:recovery:${authorizationHash}:pending`,
+          correlationId: authorizationHash,
+        },
+      );
       const result = await delegatedWallet.recover({
         sessionId: session.id,
         ownerAddress: session.plan.ownerAddress,
@@ -1571,6 +2013,28 @@ export class DelegatedSessionService {
             ? `Recovered reviewed test funds ${result.transactionHash}`
             : `Recovery submitted ${result.transactionHash}; awaiting receipt`,
       });
+      const recoveryEventType =
+        receipt?.status === "0x1"
+          ? "RECOVERY_CONFIRMED"
+          : receipt?.status === "0x0"
+            ? "RECOVERY_REVERTED"
+            : "RECOVERY_SUBMITTED";
+      this.recordActivity(
+        id,
+        recoveryEventType,
+        recoveryEventType,
+        receipt?.status === "0x1"
+          ? "Owner-approved recovery was confirmed on-chain."
+          : receipt?.status === "0x0"
+            ? "Owner-approved recovery reverted on-chain."
+            : "Owner-approved recovery was submitted and is waiting for confirmation.",
+        {
+          dedupeKey: `${id}:recovery:${authorizationHash}:${recoveryEventType}`,
+          correlationId: authorizationHash,
+          transactionHash: result.transactionHash,
+          details: { transactionHash: result.transactionHash },
+        },
+      );
     } catch (error) {
       if (error instanceof ServiceError) throw error;
       this.service.repository.updateDelegatedRecovery(authorizationHash, {
@@ -1639,6 +2103,20 @@ export class DelegatedSessionService {
               : `Reverted ${trade.transactionHash}`,
         },
       );
+      this.recordActivity(
+        id,
+        status === "CONFIRMED" ? "TRADE_CONFIRMED" : "TRADE_REVERTED",
+        status,
+        status === "CONFIRMED"
+          ? "The submitted trade was confirmed on-chain."
+          : "The submitted trade reverted on-chain; no successful trade was recorded.",
+        {
+          dedupeKey: `${id}:trade:${trade.id}:${status.toLowerCase()}`,
+          correlationId: trade.id,
+          transactionHash: trade.transactionHash,
+          details: { transactionHash: trade.transactionHash },
+        },
+      );
     }
     for (const recovery of this.service.repository.listDelegatedRecoveries(
       id,
@@ -1680,6 +2158,20 @@ export class DelegatedSessionService {
             status === "CONFIRMED"
               ? `Confirmed recovery ${recovery.transactionHash}`
               : `Recovery reverted ${recovery.transactionHash}`,
+        },
+      );
+      this.recordActivity(
+        id,
+        status === "CONFIRMED" ? "RECOVERY_CONFIRMED" : "RECOVERY_REVERTED",
+        status,
+        status === "CONFIRMED"
+          ? "The submitted recovery was confirmed on-chain."
+          : "The submitted recovery reverted on-chain.",
+        {
+          dedupeKey: `${id}:recovery:${recovery.authorizationHash}:${status.toLowerCase()}`,
+          correlationId: recovery.authorizationHash,
+          transactionHash: recovery.transactionHash,
+          details: { transactionHash: recovery.transactionHash },
         },
       );
     }

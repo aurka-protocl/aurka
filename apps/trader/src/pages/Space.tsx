@@ -3,10 +3,8 @@ import { Link, NavLink, useParams } from "react-router-dom";
 import { ArrowLeft, ArrowRight, RefreshCw } from "lucide-react";
 import { AurkaClient } from "@aurka/sdk";
 import {
-  bindingConstraintLabel,
   formatBasisPoints,
   formatGroupedDecimalUnits,
-  formatPrice,
   formatSnapshotAge,
   snapshotFreshness,
   type AssetBound,
@@ -25,10 +23,9 @@ import {
   type SpaceRecord,
 } from "../domain/spaces";
 import SpaceForm, { SpaceOwnerControls } from "./SpaceForm";
-import { userFacingError } from "../ui";
+import { displayAssetSymbol, userFacingError } from "../ui";
 
 const client = new AurkaClient({ baseUrl: apiBaseUrl });
-type RiskPosition = Awaited<ReturnType<AurkaClient["getRiskPosition"]>>;
 
 function decodeSpaceId(value: string | undefined): string | undefined {
   if (!value) return undefined;
@@ -55,13 +52,15 @@ function currentFreshness(
 function stateLabel(space: SpaceRecord): string {
   if (space.identity.state === "ACTIVE") return "Trading active";
   if (space.identity.state === "PRICING_NEEDS_RENEWAL")
-    return "Pricing needs renewal";
+    return "Price update needed";
+  if (space.identity.state === "STRATEGY_MISMATCH")
+    return "Owner repair required";
   if (space.identity.state === "REACTIVATION_REQUIRED")
-    return "Reactivate trading";
+    return "Ready to reactivate";
   if (space.identity.state === "PAUSED") return "Trading paused";
-  if (space.identity.state === "FAILED") return "Setup failed";
-  if (space.identity.state === "PENDING") return "Setup pending";
-  return "Draft";
+  if (space.identity.state === "FAILED") return "Needs attention";
+  if (space.identity.state === "PENDING") return "Setup in progress";
+  return "Draft saved";
 }
 
 function stateClass(space: SpaceRecord): string {
@@ -69,6 +68,7 @@ function stateClass(space: SpaceRecord): string {
     ? "border-emerald-800 bg-emerald-950/40 text-emerald-300"
     : space.identity.state === "PAUSED" ||
         space.identity.state === "PRICING_NEEDS_RENEWAL" ||
+        space.identity.state === "STRATEGY_MISMATCH" ||
         space.identity.state === "REACTIVATION_REQUIRED" ||
         space.identity.state === "FAILED"
       ? "border-amber-800 bg-amber-950/40 text-amber-300"
@@ -79,7 +79,7 @@ function SpaceStatus({ space }: { readonly space: SpaceRecord }) {
   return (
     <span
       className={`inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-semibold ${stateClass(space)}`}
-      aria-label={`Space status: ${stateLabel(space)}`}
+      aria-label={`Trading status: ${stateLabel(space)}`}
     >
       {stateLabel(space)}
     </span>
@@ -138,7 +138,7 @@ function SpacePage({
     setError(null);
     if (!spaceId) {
       setLoading(false);
-      setError("This Space URL is missing its identifier.");
+      setError("This Space link is incomplete.");
       return () => {
         active = false;
       };
@@ -177,7 +177,7 @@ function SpacePage({
       <section className="space-y-4">
         <h1 className="text-3xl font-semibold text-white">Loading Space…</h1>
         <p aria-live="polite" className="text-slate-400">
-          Reading the current Space state and holdings.
+          Reading the latest balances and trading status.
         </p>
       </section>
     );
@@ -190,12 +190,11 @@ function SpacePage({
         >
           <ArrowLeft className="h-4 w-4" aria-hidden="true" /> Back to Spaces
         </Link>
-        <h1 className="text-3xl font-semibold text-white">Space not found</h1>
+        <h1 className="text-3xl font-semibold text-white">Space unavailable</h1>
         <p className="max-w-xl rounded-xl border border-amber-900/70 bg-amber-950/30 p-4 leading-6 text-amber-200">
-          We could not load “{spaceId ?? "unknown"}”. Current holdings may be
-          unavailable, so trading remains blocked.
+          We couldn't load this Space. Balances may be temporarily unavailable,
+          so trading is paused until it is safe to continue.
         </p>
-        <p className="text-sm text-slate-400">{error ?? "Unknown error"}</p>
         <button
           type="button"
           onClick={refresh}
@@ -222,7 +221,7 @@ function SpacePage({
             <ArrowLeft className="h-4 w-4" aria-hidden="true" /> All Spaces
           </Link>
           <div className="mt-4 flex flex-wrap items-center gap-3">
-            <p className="text-sm text-slate-500">AURKA Space</p>
+            <p className="text-sm text-slate-500">Space</p>
             <SpaceStatus space={space} />
           </div>
           <h1 className="mt-1 truncate text-3xl font-semibold tracking-tight text-white">
@@ -232,7 +231,7 @@ function SpacePage({
         {canTrade ? (
           <Link
             to={tradeUrl(space.identity.id)}
-            title="Trade against this Space"
+            title="Open swaps for this Space"
             className="inline-flex min-h-10 items-center gap-2 rounded-lg bg-cyan-700 px-4 py-2.5 text-sm font-medium text-white hover:bg-cyan-600"
           >
             Trade this Space{" "}
@@ -240,11 +239,15 @@ function SpacePage({
           </Link>
         ) : space.identity.state === "ACTIVE" ? (
           <span className="inline-flex min-h-10 items-center rounded-lg border border-amber-800/70 bg-amber-950/30 px-4 py-2.5 text-sm text-amber-200">
-            Trading unavailable until current holdings are available
+            Trading unavailable until balances are current
           </span>
         ) : space.identity.state === "PRICING_NEEDS_RENEWAL" ? (
           <span className="inline-flex min-h-10 items-center rounded-lg border border-amber-800/70 bg-amber-950/30 px-4 py-2.5 text-sm text-amber-200">
-            Pricing needs renewal before trading can resume
+            Price update needed before trading can resume
+          </span>
+        ) : space.identity.state === "STRATEGY_MISMATCH" ? (
+          <span className="inline-flex min-h-10 items-center rounded-lg border border-amber-800/70 bg-amber-950/30 px-4 py-2.5 text-sm text-amber-200">
+            Owner repair required before trading can resume
           </span>
         ) : null}
       </div>
@@ -259,7 +262,7 @@ function Freshness({ position }: { readonly position: Position }) {
   if (!snapshot)
     return (
       <p className="text-sm text-amber-300">
-        Current holdings are unavailable · trading is blocked
+        Balances are unavailable · trading is paused
       </p>
     );
   const now = Math.floor(Date.now() / 1000);
@@ -270,10 +273,10 @@ function Freshness({ position }: { readonly position: Position }) {
   );
   const label =
     freshness === "fresh"
-      ? "Current holdings"
+      ? "Balances are up to date"
       : freshness === "stale"
-        ? "Holdings need a refresh"
-        : "Holdings status unavailable";
+        ? "Balances need a refresh"
+        : "Balance status unavailable";
   return (
     <p
       className={`text-sm ${freshness === "fresh" ? "text-emerald-300" : "text-amber-300"}`}
@@ -284,15 +287,13 @@ function Freshness({ position }: { readonly position: Position }) {
   );
 }
 
-function normalizedValue(value: string, valueDecimals: number): string {
-  return `${formatGroupedDecimalUnits(value, valueDecimals)} normalized settlement value`;
-}
-
 function allocationRows(snapshot: PortfolioSnapshot) {
   return snapshot.assets.map((asset) => (
     <div key={asset.token} className="space-y-2">
       <div className="flex items-center justify-between gap-3 text-sm">
-        <span className="font-medium text-white">{asset.symbol}</span>
+        <span className="font-medium text-white">
+          {displayAssetSymbol(asset.symbol)}
+        </span>
         <span className="text-slate-300">
           {formatBasisPoints(asset.weightBps)}
         </span>
@@ -315,7 +316,7 @@ function RecentActivity({ spaceId }: { readonly spaceId: string }) {
         <div>
           <h2 className="text-lg font-semibold text-white">Recent activity</h2>
           <p className="mt-1 text-sm text-slate-400">
-            Shared settlement feed filtered to this Space.
+            Recent swaps and updates from this Space.
           </p>
         </div>
         <ActivityLink spaceId={spaceId} />
@@ -346,7 +347,7 @@ function RuleSummary({ position }: { readonly position: Position }) {
           to={spaceUrl(position.id, "holdings")}
           className="text-sm text-cyan-300 hover:text-cyan-200"
         >
-          Full holdings &amp; rules →
+          View holdings →
         </Link>
         <Link
           to={spaceUrl(position.id, "settings")}
@@ -357,17 +358,16 @@ function RuleSummary({ position }: { readonly position: Position }) {
       </div>
       <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-2">
         <div>
-          <dt className="text-slate-500">Global per-trade cap</dt>
+          <dt className="text-slate-500">Maximum trade size</dt>
           <dd className="mt-1 font-semibold text-white">
             {formatGroupedDecimalUnits(
               position.policy.maximumTransactionValue,
               0,
-            )}{" "}
-            normalized settlement value
+            )}
           </dd>
         </div>
         <div>
-          <dt className="text-slate-500">Policy state</dt>
+          <dt className="text-slate-500">Trading status</dt>
           <dd
             className={
               position.policy.paused
@@ -375,16 +375,14 @@ function RuleSummary({ position }: { readonly position: Position }) {
                 : "mt-1 font-semibold text-emerald-300"
             }
           >
-            {position.policy.paused
-              ? "Paused"
-              : "Trading allowed within Space rules"}
+            {position.policy.paused ? "Paused" : "Trading available"}
           </dd>
         </div>
       </dl>
       <ul className="mt-4 space-y-2 text-sm text-slate-300">
         {position.policy.assets.map((asset) => (
           <li key={asset.token} className="flex justify-between gap-3">
-            <span>{asset.symbol}</span>
+            <span>{displayAssetSymbol(asset.symbol)}</span>
             <span>
               {formatBasisPoints(asset.minimumWeightBps)} –{" "}
               {formatBasisPoints(asset.maximumWeightBps)}
@@ -408,11 +406,11 @@ export function SpaceOverview() {
                   {stateLabel(space)}
                 </p>
                 <h2 className="text-2xl font-semibold text-white">
-                  This Space has no active holdings yet
+                  This Space is not active yet
                 </h2>
                 <p className="max-w-2xl leading-7 text-slate-400">
-                  The saved policy draft is durable, but holdings and trading
-                  remain unavailable until activation is confirmed.
+                  Your settings are saved, but balances and trading remain
+                  unavailable until setup is confirmed.
                 </p>
                 <Link
                   to={spaceUrl(space.identity.id, "settings")}
@@ -435,11 +433,13 @@ export function SpaceOverview() {
                 </p>
                 <p className="mt-2 text-2xl font-semibold text-cyan-200">
                   {snapshot
-                    ? normalizedValue(snapshot.nav, snapshot.valueDecimals)
+                    ? snapshot.assets
+                        .map(
+                          (asset) =>
+                            `${displayAssetSymbol(asset.symbol)} ${formatGroupedDecimalUnits(asset.balance, asset.decimals)}`,
+                        )
+                        .join(" · ")
                     : "Unavailable"}
-                </p>
-                <p className="mt-1 text-xs text-slate-500">
-                  Denomination is not automatically USD.
                 </p>
                 <div className="mt-3">
                   <Freshness position={position} />
@@ -447,7 +447,7 @@ export function SpaceOverview() {
               </div>
               <div className="rounded-2xl border border-slate-700 bg-slate-900 p-5">
                 <p className="text-xs uppercase tracking-wide text-slate-500">
-                  Global per-trade cap
+                  Maximum trade size
                 </p>
                 <p className="mt-2 text-2xl font-semibold text-white">
                   {formatGroupedDecimalUnits(
@@ -456,7 +456,7 @@ export function SpaceOverview() {
                   )}
                 </p>
                 <p className="mt-1 text-sm text-slate-400">
-                  normalized settlement value · all directions
+                  Applies to every swap
                 </p>
               </div>
               <div className="rounded-2xl border border-slate-700 bg-slate-900 p-5">
@@ -467,7 +467,7 @@ export function SpaceOverview() {
                   {snapshot?.assets.length ?? "—"}
                 </p>
                 <p className="mt-1 text-sm text-slate-400">
-                  balances and bounds read together
+                  Included in this Space
                 </p>
               </div>
             </div>
@@ -477,7 +477,7 @@ export function SpaceOverview() {
                   Current allocation
                 </h2>
                 <p className="mt-1 text-sm text-slate-400">
-                  Current allocation across the Space&apos;s holdings.
+                  Current balance distribution across the Space.
                 </p>
                 <div className="mt-5 grid gap-4 sm:grid-cols-2">
                   {allocationRows(snapshot)}
@@ -485,37 +485,11 @@ export function SpaceOverview() {
               </section>
             ) : (
               <p className="rounded-xl border border-amber-900/70 bg-amber-950/30 p-4 text-amber-200">
-                Current holdings are unavailable; value and allocation are not
-                shown as zero.
+                Current balances are unavailable. Try refreshing before trading.
               </p>
             )}
             <RuleSummary position={position} />
             <RecentActivity spaceId={space.identity.id} />
-            <details className="rounded-xl border border-slate-800 bg-slate-900/60 p-4 text-sm text-slate-400">
-              <summary className="cursor-pointer font-medium text-slate-300">
-                Space identity details
-              </summary>
-              <dl className="mt-4 grid gap-3 sm:grid-cols-2">
-                <div>
-                  <dt className="text-slate-500">Owner wallet</dt>
-                  <dd className="mt-1 break-all text-slate-200">
-                    {space.identity.ownerAddress}
-                  </dd>
-                </div>
-                <div>
-                  <dt className="text-slate-500">Managed account</dt>
-                  <dd className="mt-1 break-all text-slate-200">
-                    {space.identity.treasuryAddress}
-                  </dd>
-                </div>
-                <div>
-                  <dt className="text-slate-500">Network</dt>
-                  <dd className="mt-1 text-slate-200">
-                    Chain {space.identity.chainId}
-                  </dd>
-                </div>
-              </dl>
-            </details>
           </div>
         );
       }}
@@ -527,8 +501,11 @@ function findTradingPair(
   position: Position,
 ): { input: AssetBound; output: AssetBound } | undefined {
   const find = (symbol: string) =>
-    position.policy.assets.find(
-      (asset) => asset.symbol.toUpperCase() === symbol,
+    position.policy.assets.find((asset) =>
+      asset.symbol
+        .toUpperCase()
+        .split(/[^A-Z0-9]+/)
+        .includes(symbol),
     );
   const input = find("WETH") ?? position.policy.assets[0];
   const output =
@@ -557,15 +534,14 @@ function HoldingsTable({
     const { rule, asset } = row;
     return {
       balance: asset
-        ? `${formatGroupedDecimalUnits(asset.balance, asset.decimals)} ${asset.symbol}`
+        ? `${formatGroupedDecimalUnits(asset.balance, asset.decimals)} ${displayAssetSymbol(asset.symbol)}`
         : "Unavailable",
-      value:
-        asset && snapshot
-          ? normalizedValue(asset.value, snapshot.valueDecimals)
-          : "Unavailable",
       allocation: asset ? formatBasisPoints(asset.weightBps) : "Unavailable",
       range: `${formatBasisPoints(rule.minimumWeightBps)} – ${formatBasisPoints(rule.maximumWeightBps)}`,
-      limit: `${formatGroupedDecimalUnits(position.policy.maximumTransactionValue, 0)} normalized settlement value`,
+      limit: formatGroupedDecimalUnits(
+        position.policy.maximumTransactionValue,
+        0,
+      ),
     };
   };
   return (
@@ -578,10 +554,9 @@ function HoldingsTable({
           <tr>
             <th className="px-5 py-3">Asset</th>
             <th className="px-5 py-3">Balance</th>
-            <th className="px-5 py-3">Value</th>
-            <th className="px-5 py-3">Current allocation</th>
-            <th className="px-5 py-3">Allowed range</th>
-            <th className="px-5 py-3">Transaction limit</th>
+            <th className="px-5 py-3">Allocation</th>
+            <th className="px-5 py-3">Target range</th>
+            <th className="px-5 py-3">Trade limit</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-slate-800">
@@ -590,19 +565,12 @@ function HoldingsTable({
             return (
               <tr key={row.rule.token}>
                 <th className="px-5 py-4 font-medium text-white">
-                  <span className="block">{row.rule.symbol}</span>
-                  <details className="mt-1 text-xs font-normal text-slate-500">
-                    <summary className="cursor-pointer">Token details</summary>
-                    <span className="mt-1 block max-w-40 break-all">
-                      {row.rule.token}
-                    </span>
-                  </details>
+                  <span className="block">
+                    {displayAssetSymbol(row.rule.symbol)}
+                  </span>
                 </th>
                 <td className="whitespace-nowrap px-5 py-4 text-slate-300">
                   {cell.balance}
-                </td>
-                <td className="whitespace-nowrap px-5 py-4 text-slate-300">
-                  {cell.value}
                 </td>
                 <td className="whitespace-nowrap px-5 py-4 text-slate-300">
                   {cell.allocation}
@@ -624,33 +592,27 @@ function HoldingsTable({
           return (
             <article key={row.rule.token} className="space-y-3 p-4">
               <div className="flex items-start justify-between gap-3">
-                <h3 className="font-semibold text-white">{row.rule.symbol}</h3>
+                <h3 className="font-semibold text-white">
+                  {displayAssetSymbol(row.rule.symbol)}
+                </h3>
                 <span className="text-right text-sm text-slate-300">
                   {cell.balance}
                 </span>
               </div>
               <dl className="grid grid-cols-2 gap-x-3 gap-y-3 text-sm">
                 <div>
-                  <dt className="text-slate-500">Value</dt>
-                  <dd className="mt-1 text-slate-300">{cell.value}</dd>
-                </div>
-                <div>
                   <dt className="text-slate-500">Allocation</dt>
                   <dd className="mt-1 text-slate-300">{cell.allocation}</dd>
                 </div>
                 <div>
-                  <dt className="text-slate-500">Allowed range</dt>
+                  <dt className="text-slate-500">Target range</dt>
                   <dd className="mt-1 text-slate-300">{cell.range}</dd>
                 </div>
                 <div>
-                  <dt className="text-slate-500">Transaction limit</dt>
+                  <dt className="text-slate-500">Trade limit</dt>
                   <dd className="mt-1 text-slate-300">{cell.limit}</dd>
                 </div>
               </dl>
-              <details className="text-xs text-slate-500">
-                <summary className="cursor-pointer">Token details</summary>
-                <p className="mt-2 break-all">{row.rule.token}</p>
-              </details>
             </article>
           );
         })}
@@ -694,9 +656,9 @@ function CapacityPanel({
             requestError instanceof Error
               ? userFacingError(
                   requestError,
-                  "Directional capacity unavailable",
+                  "Swap availability is temporarily unavailable",
                 )
-              : "Directional capacity unavailable",
+              : "Swap availability is temporarily unavailable",
           );
       })
       .finally(() => {
@@ -709,25 +671,23 @@ function CapacityPanel({
 
   return (
     <section className="rounded-2xl border border-slate-700 bg-slate-900 p-5">
-      <h2 className="text-lg font-semibold text-white">Executable capacity</h2>
+      <h2 className="text-lg font-semibold text-white">Swap availability</h2>
       <p className="mt-1 text-sm leading-6 text-slate-400">
-        The global cap applies to every trade. Executable capacity is
-        direction-dependent and can be lower because of balances, allocation
-        bounds, fees, and prior flow.
+        See how much is currently available for the most common swap in this
+        Space.
       </p>
       {!snapshot || freshness !== "fresh" ? (
         <p className="mt-4 rounded-lg border border-amber-900/70 bg-amber-950/30 p-3 text-sm text-amber-200">
-          Directional capacity is unavailable while holdings are{" "}
-          {freshness === "stale" ? "out of date" : "missing or unverified"}.
-          Trading is blocked until current holdings are available.
+          Swap availability is unavailable while balances are not current.
+          Trading is paused until they are available.
         </p>
       ) : loading ? (
         <p aria-live="polite" className="mt-4 text-sm text-slate-400">
-          Reading executable capacity…
+          Checking swap availability…
         </p>
       ) : error ? (
         <div className="mt-4 flex flex-wrap items-center gap-3 rounded-lg border border-red-900/70 bg-red-950/30 p-3 text-sm text-red-200">
-          <span>Capacity is unavailable: {error}</span>
+          <span>Swap availability is temporarily unavailable. {error}</span>
           <button
             type="button"
             onClick={() => setRetry((value) => value + 1)}
@@ -739,39 +699,23 @@ function CapacityPanel({
       ) : capacity ? (
         <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-2">
           <div>
-            <dt className="text-slate-500">Direction</dt>
+            <dt className="text-slate-500">Swap</dt>
             <dd className="mt-1 font-semibold text-white">
-              {pair?.input.symbol} → {pair?.output.symbol}
+              {pair ? displayAssetSymbol(pair.input.symbol) : "Token"} →{" "}
+              {pair ? displayAssetSymbol(pair.output.symbol) : "Token"}
             </dd>
           </div>
           <div>
-            <dt className="text-slate-500">Remaining executable capacity</dt>
+            <dt className="text-slate-500">Available now</dt>
             <dd className="mt-1 font-semibold text-cyan-200">
               {formatGroupedDecimalUnits(
                 capacity.remainingValue,
                 snapshot.valueDecimals,
-              )}{" "}
-              normalized settlement value
-            </dd>
-          </div>
-          <div>
-            <dt className="text-slate-500">Consumed in this epoch</dt>
-            <dd className="mt-1 text-slate-300">
-              {formatGroupedDecimalUnits(
-                capacity.consumedBefore,
-                snapshot.valueDecimals,
-              )}{" "}
-              normalized settlement value
-            </dd>
-          </div>
-          <div>
-            <dt className="text-slate-500">Binding constraint</dt>
-            <dd className="mt-1 text-slate-300">
-              {bindingConstraintLabel(capacity.bindingConstraint)}
+              )}
             </dd>
           </div>
           <div className="sm:col-span-2">
-            <dt className="text-slate-500">Expires</dt>
+            <dt className="text-slate-500">Available until</dt>
             <dd className="mt-1 text-slate-300">
               {new Date(capacity.expiresAt * 1000).toLocaleString()}
             </dd>
@@ -779,207 +723,6 @@ function CapacityPanel({
         </dl>
       ) : null}
     </section>
-  );
-}
-
-function RiskEvidence({ positionId }: { readonly positionId: string }) {
-  const [risk, setRisk] = useState<RiskPosition | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [retry, setRetry] = useState(0);
-
-  useEffect(() => {
-    let active = true;
-    setLoading(true);
-    setError(null);
-    client
-      .getRiskPosition(positionId)
-      .then((next) => {
-        if (active) setRisk(next);
-      })
-      .catch((requestError: unknown) => {
-        if (active)
-          setError(
-            requestError instanceof Error
-              ? userFacingError(requestError, "Risk evidence unavailable")
-              : "Risk evidence unavailable",
-          );
-      })
-      .finally(() => {
-        if (active) setLoading(false);
-      });
-    return () => {
-      active = false;
-    };
-  }, [positionId, retry]);
-
-  if (loading)
-    return (
-      <p aria-live="polite" className="mt-5 text-sm text-slate-400">
-        Loading risk certificate evidence…
-      </p>
-    );
-  if (error)
-    return (
-      <div className="mt-5 flex flex-wrap items-center gap-3 rounded-lg border border-amber-900/70 bg-amber-950/30 p-3 text-sm text-amber-200">
-        <span>Risk evidence is unavailable: {error}</span>
-        <button
-          type="button"
-          onClick={() => setRetry((value) => value + 1)}
-          className="rounded border border-amber-800 px-2 py-1 hover:border-amber-500"
-        >
-          Retry
-        </button>
-      </div>
-    );
-  const certificate = risk?.certificate;
-  return (
-    <div className="mt-5 rounded-lg border border-slate-800 bg-slate-950/50 p-4">
-      <h3 className="text-sm font-semibold text-slate-300">
-        Risk certificate evidence
-      </h3>
-      <dl className="mt-3 grid gap-3 text-sm sm:grid-cols-2">
-        <div>
-          <dt className="text-slate-500">Effective source</dt>
-          <dd className="mt-1 text-slate-300">
-            {risk?.effective.source ?? "Unavailable"}
-            {risk?.effective.mode ? ` · ${risk.effective.mode}` : ""}
-          </dd>
-        </div>
-        <div>
-          <dt className="text-slate-500">Certificate state</dt>
-          <dd className="mt-1 text-slate-300">
-            {risk?.certificateState ?? "NONE"}
-            {certificate ? ` · ${certificate.riskMode}` : ""}
-          </dd>
-        </div>
-        <div className="sm:col-span-2">
-          <dt className="text-slate-500">Certificate commitments</dt>
-          <dd className="mt-1 break-all text-xs text-slate-400">
-            {certificate
-              ? `active bounds ${certificate.activeBoundsHash} · source digest ${certificate.sourceDigest}`
-              : "No certificate recorded"}
-          </dd>
-        </div>
-      </dl>
-    </div>
-  );
-}
-
-function AdvancedDetails({
-  space,
-  position,
-  snapshot,
-}: {
-  readonly space: SpaceRecord;
-  readonly position: Position;
-  readonly snapshot?: PortfolioSnapshot;
-}) {
-  return (
-    <details className="rounded-2xl border border-slate-700 bg-slate-900 p-5">
-      <summary className="cursor-pointer text-lg font-semibold text-white">
-        Developer diagnostics and evidence
-      </summary>
-      <p className="mt-2 text-sm leading-6 text-slate-400">
-        Optional diagnostics, risk evidence, and protocol identifiers live here
-        so the actionable Space state stays visible above.
-      </p>
-      <dl className="mt-5 grid gap-x-5 gap-y-4 text-sm sm:grid-cols-2">
-        <div>
-          <dt className="text-slate-500">Source mode</dt>
-          <dd className="mt-1 text-slate-200">
-            {space.identity.mode === "testnet"
-              ? "Ethereum Sepolia contract reader"
-              : "Demo clock / local provider"}
-          </dd>
-        </div>
-        <div>
-          <dt className="text-slate-500">Risk controls</dt>
-          <dd className="mt-1 text-slate-200">
-            {position.riskMode}
-            {position.riskMode === "NORMAL"
-              ? " · no temporary tightening"
-              : " · temporary tightening applies"}
-          </dd>
-        </div>
-        <div>
-          <dt className="text-slate-500">Policy nonce</dt>
-          <dd className="mt-1 break-all text-slate-200">
-            {position.policy.nonce}
-          </dd>
-        </div>
-        <div>
-          <dt className="text-slate-500">Policy registry</dt>
-          <dd className="mt-1 break-all text-slate-200">
-            {position.policy.registry}
-          </dd>
-        </div>
-        <div className="sm:col-span-2">
-          <dt className="text-slate-500">Fee model</dt>
-          <dd className="mt-1 text-slate-200">
-            Base {formatBasisPoints(position.policy.fee.baseFeeBps)} · maximum{" "}
-            {formatBasisPoints(position.policy.fee.maximumFeeBps)} · treasury{" "}
-            {position.policy.fee.treasuryFeeRecipient}
-          </dd>
-        </div>
-        <div>
-          <dt className="text-slate-500">Snapshot block</dt>
-          <dd className="mt-1 text-slate-200">
-            {snapshot?.blockNumber ?? "Unavailable"}
-          </dd>
-        </div>
-        <div>
-          <dt className="text-slate-500">Snapshot observed at</dt>
-          <dd className="mt-1 text-slate-200">
-            {snapshot?.observedAt ?? "Unavailable"}
-          </dd>
-        </div>
-        <div className="sm:col-span-2">
-          <dt className="text-slate-500">Portfolio snapshot hash</dt>
-          <dd className="mt-1 break-all text-xs text-slate-300">
-            {snapshot?.snapshotHash ?? "Unavailable"}
-          </dd>
-        </div>
-      </dl>
-      <RiskEvidence positionId={space.identity.id} />
-      {snapshot && (
-        <div className="mt-5 overflow-x-auto">
-          <table className="min-w-full text-left text-xs">
-            <caption className="mb-2 text-left text-sm font-semibold text-slate-300">
-              Oracle prices and token scales
-            </caption>
-            <thead className="text-slate-500">
-              <tr>
-                <th className="py-2 pr-4">Asset</th>
-                <th className="py-2 pr-4">Price</th>
-                <th className="py-2 pr-4">Raw balance</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-800">
-              {snapshot.assets.map((asset) => (
-                <tr key={asset.token}>
-                  <th className="py-2 pr-4 font-medium text-slate-300">
-                    {asset.symbol} ({asset.decimals} decimals)
-                  </th>
-                  <td className="py-2 pr-4 text-slate-300">
-                    {formatPrice(asset.price, asset.priceDecimals)} · price
-                    scale {asset.priceDecimals}
-                  </td>
-                  <td className="break-all py-2 pr-4 text-slate-500">
-                    {asset.balance}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-      <p className="mt-5 text-xs leading-5 text-slate-500">
-        Values above use the snapshot’s declared normalized settlement
-        denomination. A normalized value is not automatically USD. Block, nonce,
-        hash, token decimals, and provider mode are retained as evidence.
-      </p>
-    </details>
   );
 }
 
@@ -1003,8 +746,8 @@ export function SpaceHoldings() {
                   Holdings &amp; rules
                 </h2>
                 <p className="mt-2 max-w-3xl leading-7 text-slate-400">
-                  Balances, allocation ranges, and the maximum trade are shown
-                  together so you can see what this Space can accept.
+                  See the balances, target ranges, and swap limits for this
+                  Space.
                 </p>
               </div>
               <button
@@ -1013,27 +756,25 @@ export function SpaceHoldings() {
                 className="inline-flex items-center gap-2 rounded-lg border border-slate-700 px-3 py-2 text-sm text-slate-200 hover:border-cyan-500"
               >
                 <RefreshCw className="h-4 w-4" aria-hidden="true" /> Refresh
-                holdings
+                balances
               </button>
             </div>
             <HoldingsTable position={position} snapshot={snapshot} />
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="rounded-2xl border border-slate-700 bg-slate-900 p-5">
-                <p className="text-sm text-slate-500">Global per-trade cap</p>
+                <p className="text-sm text-slate-500">Maximum trade size</p>
                 <p className="mt-2 text-lg font-semibold text-white">
                   {formatGroupedDecimalUnits(
                     position.policy.maximumTransactionValue,
                     0,
-                  )}{" "}
-                  normalized settlement value
+                  )}
                 </p>
                 <p className="mt-2 text-xs leading-5 text-slate-500">
-                  This applies across directions. It is not the executable
-                  maximum for every asset.
+                  This applies to every swap.
                 </p>
               </div>
               <div className="rounded-2xl border border-slate-700 bg-slate-900 p-5">
-                <p className="text-sm text-slate-500">Policy state</p>
+                <p className="text-sm text-slate-500">Trading status</p>
                 <p
                   className={
                     position.policy.paused
@@ -1041,9 +782,7 @@ export function SpaceHoldings() {
                       : "mt-2 text-lg font-semibold text-emerald-300"
                   }
                 >
-                  {position.policy.paused
-                    ? "Paused"
-                    : "Trading allowed within Space rules"}
+                  {position.policy.paused ? "Paused" : "Trading available"}
                 </p>
                 <div className="mt-2">
                   <Freshness position={position} />
@@ -1051,11 +790,6 @@ export function SpaceHoldings() {
               </div>
             </div>
             <CapacityPanel position={position} snapshot={snapshot} />
-            <AdvancedDetails
-              space={space}
-              position={position}
-              snapshot={snapshot}
-            />
             {space.identity.state === "ACTIVE" &&
             currentFreshness(position) === "fresh" ? (
               <Link
@@ -1069,7 +803,7 @@ export function SpaceHoldings() {
             ) : (
               <p className="rounded-lg border border-amber-900/70 bg-amber-950/30 p-3 text-sm text-amber-200">
                 Trading is unavailable until this Space is active and its
-                holdings are current.
+                balances are current.
               </p>
             )}
           </div>
@@ -1088,44 +822,12 @@ export function SpaceSettings() {
           <div>
             <h2 className="text-2xl font-semibold text-white">Settings</h2>
             <p className="mt-2 max-w-3xl leading-7 text-slate-400">
-              Space identity and owner-authorized controls. The name, status,
-              and chain remain visible above while you edit.
+              Manage the Space name, trading status, and rules.
             </p>
           </div>
           <div className="rounded-2xl border border-slate-700 bg-slate-900 p-5">
             <p className="text-sm text-slate-500">Trading status</p>
             <p className="mt-1 font-semibold text-white">{stateLabel(space)}</p>
-            <details className="mt-4 text-sm text-slate-400">
-              <summary className="cursor-pointer font-medium text-slate-300">
-                Space identity details
-              </summary>
-              <dl className="mt-4 grid gap-3 sm:grid-cols-2">
-                <div>
-                  <dt className="text-slate-500">Space ID</dt>
-                  <dd className="mt-1 break-all text-slate-200">
-                    {space.identity.id}
-                  </dd>
-                </div>
-                <div>
-                  <dt className="text-slate-500">Network</dt>
-                  <dd className="mt-1 text-slate-200">
-                    Chain {space.identity.chainId}
-                  </dd>
-                </div>
-                <div>
-                  <dt className="text-slate-500">Owner wallet</dt>
-                  <dd className="mt-1 break-all text-slate-200">
-                    {space.identity.ownerAddress}
-                  </dd>
-                </div>
-                <div>
-                  <dt className="text-slate-500">Managed account</dt>
-                  <dd className="mt-1 break-all text-slate-200">
-                    {space.identity.treasuryAddress}
-                  </dd>
-                </div>
-              </dl>
-            </details>
           </div>
           {space.failureReason && (
             <p className="rounded-xl border border-red-900/70 bg-red-950/30 p-4 text-sm text-red-200">
@@ -1134,18 +836,26 @@ export function SpaceSettings() {
           )}
           {space.identity.state === "PRICING_NEEDS_RENEWAL" && (
             <p className="rounded-xl border border-amber-900/70 bg-amber-950/30 p-4 text-sm leading-6 text-amber-200">
-              This fixed-price Space no longer matches current normalized
-              prices. Trading and agent proposals stay blocked. There is no
-              renewal button: the owner/operator must pause, dock Aqua, withdraw
-              the exact vault balances, and create a replacement Space with
-              current pricing.
+              This Space needs an updated price before trading can resume.
+              Create a new Space with current settings to continue.
+            </p>
+          )}
+          {space.identity.state === "STRATEGY_MISMATCH" && (
+            <p className="rounded-xl border border-amber-900/70 bg-amber-950/30 p-4 text-sm leading-6 text-amber-200">
+              This Space was created with an incompatible strategy encoding and
+              cannot be repaired by refreshing prices. Pause it, recover the
+              exact vault balances with the owner wallet, then create a new
+              Space with a fresh identity.
             </p>
           )}
           {!editing &&
             ["DRAFT", "PENDING", "FAILED"].includes(space.identity.state) && (
               <SpaceForm existing={space} embedded />
             )}
-          {!editing && ["ACTIVE", "PAUSED"].includes(space.identity.state) && (
+          {!editing &&
+            ["ACTIVE", "PAUSED", "STRATEGY_MISMATCH"].includes(
+              space.identity.state,
+            ) && (
             <button
               type="button"
               onClick={() => setEditing(true)}
@@ -1162,8 +872,8 @@ export function SpaceSettings() {
             appMode !== "testnet" &&
             space.identity.state === "DRAFT" && (
               <p className="rounded-xl border border-slate-800 bg-slate-900/60 p-4 text-sm leading-6 text-slate-400">
-                This draft has no holdings yet. Activation requires the recorded
-                owner wallet.
+                This draft has no balances yet. Activation requires the wallet
+                that created the Space.
               </p>
             )}
         </div>

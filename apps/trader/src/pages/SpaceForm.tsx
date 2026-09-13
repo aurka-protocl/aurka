@@ -16,7 +16,7 @@ import {
   SetupRecoveryError,
 } from "../domain/space-setup";
 import { invalidateSpaceCache, spaceUrl } from "../domain/spaces";
-import { setupProgressLabel, userFacingError } from "../ui";
+import { displayAssetSymbol, setupProgressLabel, userFacingError } from "../ui";
 import { useWallet } from "../wallet";
 
 const client = new AurkaClient({ baseUrl: apiBaseUrl });
@@ -167,8 +167,12 @@ function fieldClass(): string {
 function errorMessage(error: unknown): string {
   return userFacingError(
     error,
-    "Space change failed. Review the details and try again.",
+    "We couldn't save this Space. Review the details and try again.",
   );
+}
+
+function percentageText(bps: number): string {
+  return String(bps / 100);
 }
 
 export default function SpaceForm({
@@ -245,7 +249,7 @@ export default function SpaceForm({
     };
   }, [wallet.address, wallet.provider, wallet.revision, balanceRevision]);
 
-  async function claimDemoTokens() {
+  async function claimTestnetAssets() {
     setFaucetBusy(true);
     setError(null);
     setMessage(null);
@@ -257,14 +261,12 @@ export default function SpaceForm({
         !wallet.provider ||
         wallet.status !== "connected"
       )
-        throw new Error(
-          "Connect a wallet on Sepolia before claiming demo tokens.",
-        );
+        throw new Error("Connect a wallet on Sepolia before funding it.");
 
       const chainId = await wallet.provider.request({ method: "eth_chainId" });
       if (typeof chainId !== "string" || BigInt(chainId) !== 11_155_111n)
         throw new Error(
-          "Switch the wallet to Ethereum Sepolia before claiming demo tokens.",
+          "Switch the wallet to Ethereum Sepolia before funding it.",
         );
 
       const claims = [
@@ -272,9 +274,7 @@ export default function SpaceForm({
         { asset: SEPOLIA_ASSETS[1], amount: parseTokenAmount("5", 18) },
       ];
       for (const claim of claims) {
-        setMessage(
-          `Approve the ${claim.asset.symbol} demo-token claim in your wallet.`,
-        );
+        setMessage(`Approve the ${claim.asset.symbol} funding in your wallet.`);
         const hash = await wallet.provider.request({
           method: "eth_sendTransaction",
           params: [
@@ -287,15 +287,13 @@ export default function SpaceForm({
           ],
         });
         if (typeof hash !== "string")
-          throw new Error("The wallet did not return a claim transaction.");
-        setMessage(
-          `Waiting for the ${claim.asset.symbol} demo-token claim to confirm…`,
-        );
+          throw new Error("The wallet did not return a funding transaction.");
+        setMessage(`Waiting for the ${claim.asset.symbol} funding to confirm…`);
         await waitForReceipt(wallet.provider, hash);
       }
       setBalanceRevision((current) => current + 1);
       setMessage(
-        "Demo tokens claimed: 35,000 USDC + 5 WETH. You can continue creating the Space.",
+        "Wallet funded: 35,000 USDC + 5 WETH. You can continue creating the Space.",
       );
     } catch (requestError) {
       setError(errorMessage(requestError));
@@ -358,7 +356,7 @@ export default function SpaceForm({
   ) {
     const nextAssets = draft.assets.map((asset) =>
       asset.token.toLowerCase() === token.toLowerCase()
-        ? { ...asset, [field]: Number(value) }
+        ? { ...asset, [field]: Number(value) * 100 }
         : asset,
     );
     updateDraft({ assets: nextAssets });
@@ -370,7 +368,7 @@ export default function SpaceForm({
     );
     if (present) {
       if (draft.assets.length <= 2) {
-        setError("A Space needs at least two supported assets.");
+        setError("A Space needs at least two assets.");
         return;
       }
       updateDraft({
@@ -425,7 +423,7 @@ export default function SpaceForm({
         result.space.identity.state === "DRAFT"
           ? "Draft saved. Trading is not active yet."
           : appMode === "testnet"
-            ? "Draft saved. Confirm the next owner approval to apply the rules."
+            ? "Draft saved. Confirm the next wallet approval to apply the rules."
             : "Space changes confirmed.",
       );
       if (!existing)
@@ -482,7 +480,7 @@ export default function SpaceForm({
         setSaved(space);
         invalidateSpaceCache(space.identity.id);
         setSetupState("confirmed");
-        setMessage("Space setup confirmed on the test network.");
+        setMessage("Space setup confirmed.");
         navigate(spaceUrl(space.identity.id, "settings"), { replace: true });
         return;
       }
@@ -494,11 +492,7 @@ export default function SpaceForm({
         }
         const result = await sign("ACTIVATE", draft);
         setSaved(result.space);
-        setMessage(
-          result.space.identity.mode === "demo"
-            ? "Space activated in the local demo authority."
-            : "Space activation confirmed by the configured chain authority.",
-        );
+        setMessage("Space activation confirmed.");
         navigate(spaceUrl(result.space.identity.id, "settings"), {
           replace: true,
         });
@@ -516,15 +510,15 @@ export default function SpaceForm({
           requestError.state === "pending"
             ? "The wallet request was sent and is awaiting network confirmation."
             : requestError.state === "testnet-mismatch"
-              ? "The wallet and service are using different test-network instances."
-              : "The network did not confirm this setup request. Review the Space details before retrying.",
+              ? "The network changed while setup was in progress. Switch to Ethereum Sepolia and try again."
+              : "We couldn't confirm setup. Check your wallet and try again.",
         );
         setError(
           requestError.state === "pending"
             ? "Setup is submitted and still awaiting confirmation."
             : requestError.state === "testnet-mismatch"
-              ? "The wallet and service are using different test-network instances."
-              : "Setup needs verification before another transaction can be approved.",
+              ? "The network changed while setup was in progress. Switch to Ethereum Sepolia and try again."
+              : "Setup needs to be checked before another approval can be requested.",
         );
       } else setError(errorMessage(requestError));
     } finally {
@@ -547,12 +541,12 @@ export default function SpaceForm({
       )}
       <div>
         <p className="text-sm font-semibold uppercase tracking-[0.18em] text-cyan-300">
-          Space management
+          Portfolio settings
         </p>
         <h1 className="mt-2 text-3xl font-semibold text-white">{title}</h1>
         <p className="mt-2 text-slate-400">
-          Set the assets, allocation ranges, starting funding, and maximum trade
-          before the owner approves the Space.
+          Choose the assets, allocation ranges, starting balance, and trade
+          limit for this Space.
         </p>
       </div>
 
@@ -561,7 +555,7 @@ export default function SpaceForm({
           "Name",
           "Assets",
           "Allocation ranges",
-          "Funding & limit",
+          "Starting balance & limit",
           "Review",
         ].map((label, index) => {
           const active = step === index + 1;
@@ -602,9 +596,7 @@ export default function SpaceForm({
             role="alert"
             className="rounded-lg border border-amber-800 bg-amber-950/30 p-4 text-amber-200"
           >
-            This saved Space predates configurable funding. Review and sign a
-            new draft with explicit USDC and WETH amounts; its old funding is
-            not being reused.
+            Review the starting balances and approve the updated Space settings.
           </p>
         )}
 
@@ -620,30 +612,13 @@ export default function SpaceForm({
                 maxLength={100}
               />
             </label>
-            <details className="text-sm text-slate-400">
-              <summary className="cursor-pointer">
-                Space identity details
-              </summary>
-              <dl className="mt-3 grid gap-3 sm:grid-cols-2">
-                <div>
-                  <dt className="text-slate-500">Space ID</dt>
-                  <dd className="mt-1 break-all text-slate-200">{draft.id}</dd>
-                </div>
-                <div>
-                  <dt className="text-slate-500">Owner wallet</dt>
-                  <dd className="mt-1 break-all text-slate-200">
-                    {draft.ownerAddress}
-                  </dd>
-                </div>
-              </dl>
-            </details>
           </div>
         )}
         {step === 2 && (
           <div className="space-y-4">
             <p className="text-sm text-slate-400">
               Choose the assets this Space can hold and trade. USDC and WETH are
-              required for the current trading pair.
+              available for swaps on this network.
             </p>
             {assets.map((asset) => {
               const selected = draft.assets.some(
@@ -661,8 +636,9 @@ export default function SpaceForm({
                     onChange={() => toggleAsset(asset)}
                     className="h-4 w-4 accent-cyan-600"
                   />
-                  <span className="font-medium text-white">{asset.symbol}</span>
-                  <span className="text-xs text-slate-500">{asset.token}</span>
+                  <span className="font-medium text-white">
+                    {displayAssetSymbol(asset.symbol)}
+                  </span>
                 </label>
               );
             })}
@@ -671,8 +647,8 @@ export default function SpaceForm({
         {step === 3 && (
           <div className="space-y-4">
             <p className="text-sm text-slate-400">
-              Set the minimum and maximum allocation for each asset. 100 basis
-              points equals 1%; the Space is checked before approval.
+              Set the minimum and maximum share for each asset. These ranges are
+              checked before a swap is approved.
             </p>
             {assets
               .filter((asset) =>
@@ -686,15 +662,18 @@ export default function SpaceForm({
                   key={asset.token}
                   className="grid gap-3 rounded-lg border border-slate-800 p-3 sm:grid-cols-3 sm:items-end"
                 >
-                  <p className="font-medium text-white">{asset.symbol}</p>
+                  <p className="font-medium text-white">
+                    {displayAssetSymbol(asset.symbol)}
+                  </p>
                   <label className="text-sm text-slate-400">
-                    Minimum bps
+                    Minimum allocation (%)
                     <input
                       className={fieldClass()}
                       type="number"
                       min="0"
-                      max="10000"
-                      value={asset.minimumText}
+                      max="100"
+                      step="0.01"
+                      value={percentageText(Number(asset.minimumText))}
                       onChange={(event) =>
                         updateAsset(
                           asset.token,
@@ -705,13 +684,14 @@ export default function SpaceForm({
                     />
                   </label>
                   <label className="text-sm text-slate-400">
-                    Maximum bps
+                    Maximum allocation (%)
                     <input
                       className={fieldClass()}
                       type="number"
                       min="0"
-                      max="10000"
-                      value={asset.maximumText}
+                      max="100"
+                      step="0.01"
+                      value={percentageText(Number(asset.maximumText))}
                       onChange={(event) =>
                         updateAsset(
                           asset.token,
@@ -730,13 +710,12 @@ export default function SpaceForm({
             {appMode === "testnet" && supportedChainId === 11155111 && (
               <div className="rounded-lg border border-cyan-900 bg-cyan-950/30 p-4">
                 <p className="text-sm font-medium text-cyan-100">
-                  Need Sepolia demo funds?
+                  Need assets to get started?
                 </p>
                 <p className="mt-1 text-xs leading-5 text-cyan-200/80">
-                  This deployment uses valueless mock tokens. Claim 35,000 demo
-                  USDC and 5 demo WETH to the connected wallet, then continue
-                  with the funding amounts below. You still need Sepolia ETH for
-                  gas.
+                  Add 35,000 USDC and 5 WETH to the connected wallet, then
+                  continue with the funding amounts below. You still need
+                  Sepolia ETH for fees.
                 </p>
                 <button
                   type="button"
@@ -746,22 +725,20 @@ export default function SpaceForm({
                     !wallet.provider ||
                     !wallet.address
                   }
-                  onClick={() => void claimDemoTokens()}
+                  onClick={() => void claimTestnetAssets()}
                   className="mt-3 rounded-lg border border-cyan-600 px-4 py-2.5 text-sm font-medium text-cyan-100 disabled:opacity-40"
                 >
-                  {faucetBusy
-                    ? "Claiming demo tokens…"
-                    : "Get free Sepolia demo tokens"}
+                  {faucetBusy ? "Funding wallet…" : "Fund wallet"}
                 </button>
               </div>
             )}
             <div>
               <p className="text-sm font-medium text-slate-200">
-                Starting funding
+                Starting balance
               </p>
               <p className="mt-1 text-xs leading-5 text-slate-500">
-                Add a positive starting balance for each supported asset. Your
-                wallet balance and token precision are checked before approval.
+                Choose the starting balance for each asset. Your wallet balance
+                is checked before approval.
               </p>
             </div>
             <div className="grid gap-3 sm:grid-cols-2">
@@ -793,20 +770,20 @@ export default function SpaceForm({
                     <span className="mt-1 block text-xs text-slate-500">
                       {walletBalances
                         ? `Wallet balance: ${formatTokenAmount(balance ?? 0n, decimals)} ${token.toUpperCase()}${balance !== undefined && balance < requested ? " · insufficient" : ""}`
-                        : "Connect the owner wallet to read balance"}
+                        : "Connect your wallet to read balance"}
                     </span>
                   </label>
                 );
               })}
             </div>
             <p className="text-xs text-slate-500">
-              Wallet gas balance:{" "}
+              ETH balance for fees:{" "}
               {walletBalances
                 ? `${formatTokenAmount(walletBalances.native, 18)} ETH`
-                : "connect the owner wallet to read ETH"}
+                : "connect your wallet to read your ETH balance"}
             </p>
             <label className="block text-sm text-slate-300">
-              Maximum trade value (normalized settlement units)
+              Maximum trade size
               <input
                 className={fieldClass()}
                 inputMode="numeric"
@@ -817,9 +794,9 @@ export default function SpaceForm({
               />
               <span className="mt-2 block text-xs text-slate-500">
                 {appMode === "testnet"
-                  ? "This test network accepts 1–1,000,000,000"
-                  : "This local demo accepts 1,000–1,000,000,000"}{" "}
-                normalized settlement units. Gas is paid by the owner wallet.
+                  ? "Choose a value between 1 and 1,000,000,000"
+                  : "Choose a value between 1,000 and 1,000,000,000"}{" "}
+                . Fees are paid by your wallet.
               </span>
             </label>
           </div>
@@ -833,7 +810,7 @@ export default function SpaceForm({
             >
               <Check className="h-4 w-4" aria-hidden="true" />
               {setupState === "idle" || setupState === "awaiting-signature"
-                ? "Ready for owner approval"
+                ? "Ready for approval"
                 : setupState === "submitted"
                   ? "Waiting for network confirmation"
                   : setupState === "confirmation-unavailable"
@@ -850,33 +827,32 @@ export default function SpaceForm({
                 <dd className="mt-1 text-white">{draft.name}</dd>
               </div>
               <div>
-                <dt className="text-slate-500">Chain</dt>
-                <dd className="mt-1 text-white">{draft.chainId}</dd>
+                <dt className="text-slate-500">Network</dt>
+                <dd className="mt-1 text-white">Ethereum Sepolia</dd>
               </div>
               <div>
                 <dt className="text-slate-500">Assets</dt>
                 <dd className="mt-1 text-white">
-                  {draft.assets.map((asset) => asset.symbol).join(", ")}
+                  {draft.assets
+                    .map((asset) => displayAssetSymbol(asset.symbol))
+                    .join(", ")}
                 </dd>
               </div>
               <div>
-                <dt className="text-slate-500">Per-trade limit</dt>
+                <dt className="text-slate-500">Trade limit</dt>
                 <dd className="mt-1 text-white">
-                  {draft.maximumTransactionValue} normalized settlement units
+                  {draft.maximumTransactionValue}
                 </dd>
               </div>
               <div>
-                <dt className="text-slate-500">Starting allocation</dt>
+                <dt className="text-slate-500">Starting balance</dt>
                 <dd className="mt-1 text-white">
                   {draft.funding.usdc} USDC + {draft.funding.weth} WETH
                 </dd>
               </div>
             </dl>
             {setupDetails && (
-              <details className="text-sm text-slate-400">
-                <summary>Transaction details</summary>
-                <p className="mt-2 break-words">{setupDetails}</p>
-              </details>
+              <p className="text-sm leading-6 text-amber-200">{setupDetails}</p>
             )}
             <p className="text-sm leading-6 text-slate-400">
               {appMode === "testnet"
@@ -885,7 +861,7 @@ export default function SpaceForm({
                   : setupState === "confirmation-unavailable"
                     ? "The network could not confirm the request. Check again first; retry is offered only after it is safe."
                     : "Review the amounts above and approve the wallet requests. Your Space becomes tradable only after the network confirms setup."
-                : "Saving creates a durable draft. Activation or a rule change requires another owner approval; a rejected wallet request leaves the previous state unchanged."}
+                : "Review the details and approve the wallet request. A rejected request leaves the previous settings unchanged."}
             </p>
           </div>
         )}
@@ -932,7 +908,7 @@ export default function SpaceForm({
                     onClick={() => void activate("retry")}
                     className="rounded-lg border border-slate-600 px-4 py-2.5 text-sm text-slate-100 disabled:opacity-40"
                   >
-                    Retry setup safely
+                    Retry setup
                   </button>
                 )}
               <button
@@ -966,14 +942,16 @@ export default function SpaceForm({
                   {appMode === "testnet"
                     ? saved?.identity.state === "ACTIVE" ||
                       saved?.identity.state === "REACTIVATION_REQUIRED" ||
-                      saved?.identity.state === "PAUSED"
+                      saved?.identity.state === "PAUSED" ||
+                      saved?.identity.state === "STRATEGY_MISMATCH"
                       ? "Apply rules"
                       : "Create Space"
                     : existing?.identity.state === "ACTIVE" ||
                         existing?.identity.state === "REACTIVATION_REQUIRED" ||
-                        existing?.identity.state === "PAUSED"
+                        existing?.identity.state === "PAUSED" ||
+                        existing?.identity.state === "STRATEGY_MISMATCH"
                       ? "Save changes"
-                      : "Create / activate"}
+                      : "Create Space"}
                 </button>
               )}
             </>
@@ -1007,20 +985,20 @@ export function SpaceOwnerControls({
     try {
       if (!wallet.address || !wallet.provider || wallet.status !== "connected")
         throw new Error(
-          "Connect the recorded Space owner wallet before changing policy.",
+          "Connect the wallet that created this Space before changing its rules.",
         );
       if (appMode === "testnet") {
         const next = await activateTestnetSpace(
           space.identity.id,
           wallet.address,
           wallet.provider,
-          setMessage,
+          (progress) => setMessage(setupProgressLabel(progress)),
           operation,
         );
         onChanged?.(next);
         setMessage(
           operation === "PAUSE"
-            ? "Trading paused on the test network."
+            ? "Trading paused."
             : "Trading resumed after network confirmation.",
         );
         return;
@@ -1057,7 +1035,8 @@ export function SpaceOwnerControls({
       <div>
         <h3 className="font-medium text-white">Trading controls</h3>
         <p className="mt-1 text-sm leading-6 text-slate-400">
-          Pause or resume trading with a fresh approval from the recorded owner.
+          Pause or resume trading with approval from the wallet that created
+          this Space.
         </p>
       </div>
       {error && (
@@ -1079,7 +1058,8 @@ export function SpaceOwnerControls({
           busy ||
           (space.identity.state !== "ACTIVE" &&
             space.identity.state !== "REACTIVATION_REQUIRED" &&
-            space.identity.state !== "PAUSED")
+            space.identity.state !== "PAUSED" &&
+            space.identity.state !== "STRATEGY_MISMATCH")
         }
         onClick={() => void toggle()}
         className="rounded-lg bg-cyan-700 px-4 py-2.5 text-sm font-medium text-white disabled:opacity-40"
@@ -1092,7 +1072,7 @@ export function SpaceOwnerControls({
       </button>
       {!isOwner && (
         <p className="text-xs text-amber-300">
-          Connect the recorded owner wallet to use this control.
+          Connect the wallet that created this Space to use this control.
         </p>
       )}
     </div>

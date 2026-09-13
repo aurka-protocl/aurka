@@ -1,9 +1,9 @@
-import { keccak_256 } from "@noble/hashes/sha3.js";
-
 import type {
   AtomicSettlementIntent,
   AtomicSettlementProposal,
 } from "@aurka/shared";
+import { keccak_256 } from "@noble/hashes/sha3.js";
+import { buildUpstreamStrategy } from "@aurka/shared";
 
 import type { SolverSnapshot } from "./types.js";
 
@@ -15,7 +15,8 @@ export const SWAPVM_AQUA_COMMIT =
 export const SWAPVM_SOLIDITY_UTILS_TAG = "6.9.10" as const;
 export const SWAPVM_OPENZEPPELIN_TAG = "v5.4.0" as const;
 /** Fixed strategy scale leaves room for every bounded fork trade. */
-export const UPSTREAM_STATIC_BALANCE_SCALE = 1_000_000n;
+export { UPSTREAM_STATIC_BALANCE_SCALE } from "@aurka/shared";
+export { buildLegacyHardcodedOrderStrategy } from "@aurka/shared";
 
 export interface UpstreamSwapVMData {
   readonly makerTraits: string;
@@ -40,10 +41,6 @@ function strip0x(value: string): string {
     : value;
 }
 
-function asHex(value: Uint8Array): string {
-  return `0x${Array.from(value, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
-}
-
 function parseHex(value: string): Uint8Array {
   const clean = strip0x(value);
   if (clean.length % 2 !== 0 || !/^[0-9a-fA-F]*$/.test(clean))
@@ -53,11 +50,8 @@ function parseHex(value: string): Uint8Array {
   );
 }
 
-function addressBytes(value: string): string {
-  const clean = strip0x(value).toLowerCase();
-  if (!/^[0-9a-f]{40}$/.test(clean))
-    throw new TypeError(`Invalid address: ${value}`);
-  return clean;
+function asHex(value: Uint8Array): string {
+  return `0x${Array.from(value, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
 }
 
 function word(value: bigint | string | number): string {
@@ -65,10 +59,6 @@ function word(value: bigint | string | number): string {
   if (encoded < 0n || encoded >= 1n << 256n)
     throw new RangeError("uint256 overflow");
   return encoded.toString(16).padStart(64, "0");
-}
-
-function bytes20Word(value: string): string {
-  return addressBytes(value).padStart(64, "0");
 }
 
 function paddedBytes(value: string): string {
@@ -103,80 +93,6 @@ function abiEncodeBytesUintBytesBytes(
   ].join("")}`;
 }
 
-function abiEncodeOrder(
-  maker: string,
-  makerTraits: bigint,
-  orderData: string,
-): string {
-  const tail = paddedBytes(orderData);
-  return `0x${[
-    word(32),
-    bytes20Word(maker),
-    word(makerTraits),
-    word(96),
-    tail,
-  ].join("")}`;
-}
-
-function rawPerValue(
-  value: bigint,
-  decimals: number,
-  price: bigint,
-  priceDecimals: number,
-): bigint {
-  if (value < 0n || price <= 0n) throw new RangeError("Invalid raw conversion");
-  const numerator =
-    value * 10n ** BigInt(decimals) * 10n ** BigInt(priceDecimals);
-  return (numerator - 1n) / price + 1n;
-}
-
-function staticBalances(
-  snapshot: SolverSnapshot,
-  input: string,
-  output: string,
-): [bigint, bigint] {
-  const inputAsset = snapshot.portfolio.assets.find(
-    (asset) => asset.token.toLowerCase() === input.toLowerCase(),
-  );
-  const outputAsset = snapshot.portfolio.assets.find(
-    (asset) => asset.token.toLowerCase() === output.toLowerCase(),
-  );
-  if (!inputAsset || !outputAsset)
-    throw new Error("Upstream pair is not in the reviewed portfolio");
-  // The ratio is the oracle's raw-token exchange rate. StaticBalances keeps
-  // the VM quote aligned with valueToRaw for the complete AURKA trade value;
-  // AURKA still owns the OptionSpace capacity and fee calculation.
-  const inputUnit = rawPerValue(
-    1n,
-    inputAsset.decimals,
-    inputAsset.price,
-    inputAsset.priceDecimals,
-  );
-  const outputUnit = rawPerValue(
-    1n,
-    outputAsset.decimals,
-    outputAsset.price,
-    outputAsset.priceDecimals,
-  );
-  const tokenA =
-    input.toLowerCase() < output.toLowerCase() ? inputAsset : outputAsset;
-  const balanceA = tokenA === inputAsset ? inputUnit : outputUnit;
-  const balanceB = tokenA === inputAsset ? outputUnit : inputUnit;
-  return [balanceA, balanceB];
-}
-
-function reviewedMakerTraits(): bigint {
-  return (
-    (1n << 254n) |
-    (1n << 250n) |
-    (1n << 246n) |
-    (60n << 208n) |
-    (60n << 192n) |
-    (40n << 176n) |
-    (40n << 160n)
-  );
-}
-
 /** Rebuild the fixed-price order identity without proposal-specific amounts. */
 export function buildUpstreamSwapVMStrategy(
   snapshot: SolverSnapshot,
@@ -185,37 +101,20 @@ export function buildUpstreamSwapVMStrategy(
 ): UpstreamSwapVMStrategy {
   if (!snapshot.swapVMGuard)
     throw new Error("Pinned upstream VM guard is not configured");
-  const tokenA = input.toLowerCase() < output.toLowerCase() ? input : output;
-  const tokenB = tokenA.toLowerCase() === input.toLowerCase() ? output : input;
-  const [balanceA, balanceB] = staticBalances(snapshot, input, output);
-  const outputBalance =
-    (tokenA.toLowerCase() === output.toLowerCase() ? balanceA : balanceB) *
-      UPSTREAM_STATIC_BALANCE_SCALE +
-    1n;
-  const scaledBalanceA =
-    tokenA.toLowerCase() === output.toLowerCase()
-      ? outputBalance
-      : balanceA * UPSTREAM_STATIC_BALANCE_SCALE;
-  const scaledBalanceB =
-    tokenB.toLowerCase() === output.toLowerCase()
-      ? outputBalance
-      : balanceB * UPSTREAM_STATIC_BALANCE_SCALE;
-  const direction = input.toLowerCase() === tokenA.toLowerCase() ? "80" : "00";
-  const program = `0x9040${word(scaledBalanceA)}${word(scaledBalanceB)}5301${direction}`;
-  const orderData = `0x${addressBytes(tokenA)}${addressBytes(tokenB)}${addressBytes(snapshot.swapVMGuard)}${strip0x(program)}`;
-  const traits = reviewedMakerTraits();
-  const strategy = abiEncodeOrder(
-    snapshot.feeAccounting.treasuryRecipient,
-    traits,
-    orderData,
+  const inputAsset = snapshot.portfolio.assets.find(
+    (asset) => asset.token.toLowerCase() === input.toLowerCase(),
   );
-  return {
-    strategy,
-    strategyHash: asHex(keccak_256(parseHex(strategy))),
-    program,
-    orderData,
-    makerTraits: traits,
-  };
+  const outputAsset = snapshot.portfolio.assets.find(
+    (asset) => asset.token.toLowerCase() === output.toLowerCase(),
+  );
+  if (!inputAsset || !outputAsset)
+    throw new Error("Upstream pair is not in the reviewed portfolio");
+  return buildUpstreamStrategy({
+    maker: snapshot.feeAccounting.treasuryRecipient,
+    guard: snapshot.swapVMGuard,
+    traderInput: inputAsset,
+    traderOutput: outputAsset,
+  });
 }
 
 export function upstreamStrategyMatchesSnapshot(
@@ -259,12 +158,15 @@ export function buildUpstreamSwapVMData(
   // strategy after the VM pull. This keeps the VM's strict threshold independent
   // of the utilization-dependent OptionSpace fee curve.
   const threshold = word(
-    rawPerValue(
-      BigInt(proposal.traderInputValue),
-      snapshot.priceProtection.traderOutputDecimals,
-      BigInt(snapshot.priceProtection.traderOutputExecutionPrice.price),
-      snapshot.priceProtection.traderOutputExecutionPrice.priceDecimals,
-    ),
+    (BigInt(proposal.traderInputValue) *
+      10n ** BigInt(snapshot.priceProtection.traderOutputDecimals) *
+      10n **
+        BigInt(
+          snapshot.priceProtection.traderOutputExecutionPrice.priceDecimals,
+        ) -
+      1n) /
+      BigInt(snapshot.priceProtection.traderOutputExecutionPrice.price) +
+      1n,
   );
   const indexes = [37, 37, 37, 37, 37, 37, 37, 37, 32, 32]
     .map((value) => value.toString(16).padStart(4, "0"))

@@ -6,11 +6,13 @@ import {
   BASIS_POINTS,
   FIXED_POINT_SCALE,
   UINT256_MAX,
+  adjustAssetAmountDown,
   applyTrade,
   calculateDirectionalCapacity,
   calculateAssetValue,
   calculateAssetValueDown,
   calculateAssetValueExact,
+  calculateAssetAmountIncrement,
   establishDirectionalCapacity,
   calculateOptionSpaceFee,
   calculatePortfolioValuation,
@@ -850,6 +852,24 @@ describe("price protection", () => {
         0,
       ),
     ).toThrow("not exactly representable");
+  });
+
+  it("derives a conservative supported amount without a token-specific increment", () => {
+    const asset = {
+      decimals: 18,
+      price: 3_200n,
+      priceDecimals: 0,
+    };
+    expect(calculateAssetAmountIncrement(asset, 0)).toBe(312_500_000_000_000n);
+    expect(adjustAssetAmountDown(1_000_000_000_000_000n, asset, 0)).toEqual({
+      requestedAmount: 1_000_000_000_000_000n,
+      supportedAmount: 937_500_000_000_000n,
+      remainder: 62_500_000_000_000n,
+      increment: 312_500_000_000_000n,
+    });
+    expect(
+      adjustAssetAmountDown(312_499_999_999_999n, asset, 0).supportedAmount,
+    ).toBe(0n);
   });
 
   it("keeps the stable price commitment unchanged when a fill is split", () => {

@@ -261,6 +261,17 @@ function scale10(decimals: number): bigint {
   return 10n ** BigInt(decimals);
 }
 
+function greatestCommonDivisor(left: bigint, right: bigint): bigint {
+  let a = left < 0n ? -left : left;
+  let b = right < 0n ? -right : right;
+  while (b !== 0n) {
+    const remainder = a % b;
+    a = b;
+    b = remainder;
+  }
+  return a;
+}
+
 function normalizeToken(token: string): string {
   if (typeof token !== "string" || token.trim() === "")
     throw new TypeError("Token is required");
@@ -400,6 +411,56 @@ export function calculateAssetValueExact(
     );
   }
   return numerator / denominator;
+}
+
+export interface AssetAmountAdjustment {
+  readonly requestedAmount: bigint;
+  readonly supportedAmount: bigint;
+  readonly remainder: bigint;
+  readonly increment: bigint;
+}
+
+/**
+ * Smallest raw-token amount whose value is an integer settlement unit. This
+ * is derived from the actual token/rate precision; it is not token-specific.
+ */
+export function calculateAssetAmountIncrement(
+  asset: Pick<FinancialAssetInput, "decimals" | "price" | "priceDecimals">,
+  valueDecimals = 6,
+): bigint {
+  const price = toUint256(asset.price, "price");
+  if (price === 0n) throw new RangeError("Price must be positive");
+  const denominator = checkedMul(
+    scale10(asset.decimals),
+    scale10(asset.priceDecimals),
+    "decimal scaling",
+  );
+  const valuePerRawUnit = checkedMul(
+    price,
+    scale10(valueDecimals),
+    "value scaling",
+  );
+  return denominator / greatestCommonDivisor(denominator, valuePerRawUnit);
+}
+
+/**
+ * Conservatively adjust a raw token amount down to an exactly representable
+ * settlement amount. The caller must obtain explicit user consent before use.
+ */
+export function adjustAssetAmountDown(
+  amount: IntegerLike,
+  asset: Pick<FinancialAssetInput, "decimals" | "price" | "priceDecimals">,
+  valueDecimals = 6,
+): AssetAmountAdjustment {
+  const requestedAmount = toUint256(amount, "amount");
+  const increment = calculateAssetAmountIncrement(asset, valueDecimals);
+  const remainder = requestedAmount % increment;
+  return {
+    requestedAmount,
+    supportedAmount: requestedAmount - remainder,
+    remainder,
+    increment,
+  };
 }
 
 /** Calculate NAV and conservative (ceiling) exposure weights. */

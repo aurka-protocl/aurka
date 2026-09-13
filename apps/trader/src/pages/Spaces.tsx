@@ -1,18 +1,14 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { Boxes, RefreshCw } from "lucide-react";
-import {
-  formatSnapshotAge,
-  formatValueAmount,
-  snapshotFreshness,
-} from "@aurka/shared";
+import { formatSnapshotAge, snapshotFreshness } from "@aurka/shared";
 import {
   invalidateSpaceCache,
   spaceAdapter,
   spaceUrl,
   type SpaceRecord,
 } from "../domain/spaces";
-import { lifecycleLabel, shortAddress, userFacingError } from "../ui";
+import { displayAssetSymbol, lifecycleLabel, userFacingError } from "../ui";
 import { useWallet } from "../wallet";
 
 function SpaceCard({ space }: { readonly space: SpaceRecord }) {
@@ -30,7 +26,8 @@ function SpaceCard({ space }: { readonly space: SpaceRecord }) {
       ? "border-emerald-800 bg-emerald-950/30 text-emerald-300"
       : space.identity.state === "PAUSED"
         ? "border-amber-800 bg-amber-950/30 text-amber-300"
-        : space.identity.state === "PRICING_NEEDS_RENEWAL"
+          : space.identity.state === "PRICING_NEEDS_RENEWAL" ||
+              space.identity.state === "STRATEGY_MISMATCH"
           ? "border-amber-800 bg-amber-950/30 text-amber-300"
           : space.identity.state === "REACTIVATION_REQUIRED"
             ? "border-amber-800 bg-amber-950/30 text-amber-300"
@@ -53,9 +50,7 @@ function SpaceCard({ space }: { readonly space: SpaceRecord }) {
               <h2 className="truncate text-xl font-semibold text-white">
                 {space.identity.name}
               </h2>
-              <p className="mt-1 text-sm text-slate-400">
-                Owner-controlled Space
-              </p>
+              <p className="mt-1 text-sm text-slate-400">Managed portfolio</p>
             </div>
           </div>
           <span className="shrink-0 rounded-full border border-slate-700 px-2.5 py-1 text-[11px] text-slate-400">
@@ -66,19 +61,21 @@ function SpaceCard({ space }: { readonly space: SpaceRecord }) {
         <dl className="mt-6 grid gap-4 sm:grid-cols-3">
           <div>
             <dt className="text-xs uppercase tracking-wide text-slate-500">
-              Portfolio value
+              Holdings
             </dt>
             <dd className="mt-1 font-semibold text-cyan-200">
               {snapshot
-                ? `${formatValueAmount(snapshot.nav, snapshot.valueDecimals)} normalized value units`
+                ? snapshot.assets
+                    .map((asset) => displayAssetSymbol(asset.symbol))
+                    .join(", ")
                 : space.draft
-                  ? "Not deployed"
+                  ? "Not active yet"
                   : "Unavailable"}
             </dd>
           </div>
           <div>
             <dt className="text-xs uppercase tracking-wide text-slate-500">
-              Managed assets
+              Assets
             </dt>
             <dd className="mt-1 font-semibold text-white">
               {snapshot?.assets.length ?? space.draft?.assets.length ?? "—"}
@@ -86,7 +83,7 @@ function SpaceCard({ space }: { readonly space: SpaceRecord }) {
           </div>
           <div>
             <dt className="text-xs uppercase tracking-wide text-slate-500">
-              Holdings status
+              Updated
             </dt>
             <dd
               className={`mt-1 font-semibold ${freshness === "stale" ? "text-amber-300" : "text-emerald-300"}`}
@@ -94,7 +91,7 @@ function SpaceCard({ space }: { readonly space: SpaceRecord }) {
               {snapshot
                 ? `${freshness === "stale" ? "Needs refresh" : "Updated"} · ${formatSnapshotAge(snapshot.observedAt, now)}`
                 : space.identity.state === "DRAFT"
-                  ? "Save complete · activation pending"
+                  ? "Activation pending"
                   : "Unavailable"}
             </dd>
           </div>
@@ -107,7 +104,7 @@ function SpaceCard({ space }: { readonly space: SpaceRecord }) {
             {lifecycleLabel(space.identity.state)}
           </span>
           <span className="text-sm text-cyan-300 transition group-hover:text-cyan-200">
-            View Space
+            Open Space
           </span>
         </div>
       </article>
@@ -152,15 +149,15 @@ export default function Spaces() {
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
           <p className="text-sm font-semibold uppercase tracking-[0.18em] text-cyan-300">
-            AURKA Spaces
+            Spaces
           </p>
           <h1 className="mt-2 text-3xl font-semibold tracking-tight text-white sm:text-4xl">
-            {wallet.address ? "Your Aurka Spaces" : "Available Aurka Spaces"}
+            {wallet.address ? "Your Spaces" : "Available Spaces"}
           </h1>
           <p className="mt-3 max-w-2xl leading-7 text-slate-400">
             {wallet.address
-              ? "Create and manage the portfolios authorized by your connected wallet."
-              : "Connect a wallet to see your Spaces and manage their rules. You can still inspect available demo portfolios."}
+              ? "Create and manage portfolios with clear trading rules."
+              : "Connect a wallet to create and manage your portfolios."}
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -188,7 +185,7 @@ export default function Spaces() {
           aria-live="polite"
           className="rounded-2xl border border-slate-800 bg-slate-900/60 p-6 text-slate-400"
         >
-          Loading Spaces…
+          Loading your Spaces…
         </p>
       ) : error ? (
         <div
@@ -199,7 +196,7 @@ export default function Spaces() {
             Spaces are unavailable
           </h2>
           <p className="text-sm leading-6 text-red-200">
-            The data service could not answer: {error}
+            We couldn't load your Spaces. {error}
           </p>
           <button
             type="button"
@@ -217,8 +214,8 @@ export default function Spaces() {
           <h2 className="text-lg font-semibold text-white">No Spaces yet</h2>
           <p className="mt-2 max-w-xl leading-6 text-slate-400">
             {wallet.address
-              ? "Create a Space to define its supported assets, allocation ranges, and transaction limit."
-              : "No configured portfolio is available in this environment. Connect the owner wallet to create a Space."}
+              ? "Create a Space to choose its assets, allocation ranges, and trade limit."
+              : "Connect a wallet to create a Space."}
           </p>
         </div>
       ) : (
@@ -227,25 +224,6 @@ export default function Spaces() {
             <SpaceCard key={space.identity.id} space={space} />
           ))}
         </div>
-      )}
-
-      {spaces.length > 0 && (
-        <details className="rounded-xl border border-slate-800 bg-slate-950/40 p-4 text-sm text-slate-400">
-          <summary className="cursor-pointer font-medium text-slate-300">
-            Space details
-          </summary>
-          <div className="mt-3 grid gap-3 sm:grid-cols-2">
-            {spaces.map((space) => (
-              <div key={space.identity.id}>
-                <p className="text-slate-500">{space.identity.name}</p>
-                <p className="mt-1 break-all">
-                  Owner {shortAddress(space.identity.ownerAddress)} · chain{" "}
-                  {space.identity.chainId}
-                </p>
-              </div>
-            ))}
-          </div>
-        </details>
       )}
     </section>
   );

@@ -100,12 +100,15 @@ export class LocalChainSnapshotProvider {
     solverAddress,
     space = DEFAULT_SPACE,
     chainId = CHAIN_ID,
+    options = {},
   ) {
     this.publicClient = publicClient;
     this.contracts = contracts;
     this.solverAddress = solverAddress;
     this.space = space;
     this.chainId = chainId;
+    this.getBlock = options.getBlock ?? (() => this.publicClient.getBlock());
+    this.tokenMetadataCache = options.tokenMetadataCache ?? new Map();
   }
 
   async getPositionSnapshot(positionId) {
@@ -232,7 +235,7 @@ export class LocalChainSnapshotProvider {
 
   async currentSnapshot() {
     const { policyRegistry, aqua, oracle, router, erc20Abi } = this.contracts;
-    const block = await this.publicClient.getBlock();
+    const block = await this.getBlock();
     const pinnedClient = {
       readContract: (request) =>
         this.publicClient.readContract({
@@ -253,11 +256,16 @@ export class LocalChainSnapshotProvider {
     const prices = [];
     const balances = [];
     for (const tokenAddress of tokenAddresses) {
-      const symbol = await read(
-        pinnedClient,
-        { address: tokenAddress, abi: erc20Abi },
-        "symbol",
-      );
+      const tokenKey = `${this.chainId}:${tokenAddress.toLowerCase()}`;
+      let symbol = this.tokenMetadataCache.get(tokenKey);
+      if (symbol === undefined) {
+        symbol = await read(
+          pinnedClient,
+          { address: tokenAddress, abi: erc20Abi },
+          "symbol",
+        );
+        this.tokenMetadataCache.set(tokenKey, symbol);
+      }
       const boundsRaw = await read(
         pinnedClient,
         policyRegistry,

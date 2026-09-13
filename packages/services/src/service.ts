@@ -3,6 +3,7 @@ import type {
   PrepareTokenIntentRequest,
 } from "@aurka/shared";
 import {
+  buildLegacyHardcodedOrderStrategy,
   calculateDirectionalCapacity,
   executionSchema,
   positionSchema,
@@ -86,6 +87,49 @@ import {
 export type UnsignedTransactionRequest = RouterTransactionRequest;
 
 const serviceNow = (): number => Math.floor(Date.now() / 1000);
+
+function upstreamStrategyDiagnosis(
+  snapshot: SolverSnapshot,
+  input: string,
+  output: string,
+): {
+  readonly expectedHash: string;
+  readonly state: "STRATEGY_MISMATCH" | "PRICING_NEEDS_RENEWAL" | undefined;
+  readonly legacyHash?: string;
+} {
+  if (!snapshot.swapVMGuard)
+    return { expectedHash: snapshot.aquaStrategyHash, state: undefined };
+  const expectedHash = buildUpstreamSwapVMStrategy(
+    snapshot,
+    input,
+    output,
+  ).strategyHash;
+  if (expectedHash.toLowerCase() === snapshot.aquaStrategyHash.toLowerCase())
+    return { expectedHash, state: undefined };
+  const usdc = snapshot.portfolio.assets.find((asset) =>
+    /(?:^|[^a-z])usdc(?:$|[^a-z])/i.test(asset.symbol ?? ""),
+  );
+  const weth = snapshot.portfolio.assets.find((asset) =>
+    /(?:^|[^a-z])weth(?:$|[^a-z])/i.test(asset.symbol ?? ""),
+  );
+  const legacyHash =
+    usdc && weth
+      ? buildLegacyHardcodedOrderStrategy({
+          maker: snapshot.feeAccounting.treasuryRecipient,
+          guard: snapshot.swapVMGuard,
+          usdc,
+          weth,
+        }).strategyHash
+      : undefined;
+  return {
+    expectedHash,
+    state:
+      legacyHash?.toLowerCase() === snapshot.aquaStrategyHash.toLowerCase()
+        ? "STRATEGY_MISMATCH"
+        : "PRICING_NEEDS_RENEWAL",
+    ...(legacyHash ? { legacyHash } : {}),
+  };
+}
 
 export interface ServiceOptions {
   readonly riskNow?: () => number;
@@ -286,23 +330,41 @@ export class AurkaService {
       snapshot: SolverSnapshot,
       intent: AtomicSettlementIntent,
     ): void => {
-      if (!snapshot.swapVMGuard) return;
-      const expected = buildUpstreamSwapVMStrategy(
+      const diagnosis = upstreamStrategyDiagnosis(
         snapshot,
         intent.traderInputToken,
         intent.traderOutputToken,
-      ).strategyHash;
-      if (expected.toLowerCase() !== snapshot.aquaStrategyHash.toLowerCase()) {
+      );
+      if (diagnosis.state !== undefined) {
+        const incompatibleEncoding = diagnosis.state === "STRATEGY_MISMATCH";
+        const code = incompatibleEncoding
+          ? "STRATEGY_MISMATCH"
+          : "PRICING_RENEWAL_REQUIRED";
+        const knownSpace = this.repository.getSpace(snapshot.positionId);
+        if (
+          knownSpace &&
+          knownSpace.identity.state !== "PAUSED" &&
+          knownSpace.identity.state !== "DRAFT"
+        )
+          this.repository.saveSpaceIdentity(
+            { ...knownSpace.identity, state: diagnosis.state },
+            knownSpace.draft,
+          );
         throw new ServiceError(
-          "PRICING_RENEWAL_REQUIRED",
-          "Pricing needs renewal: this fixed-price Space no longer matches its shipped SwapVM strategy",
+          code,
+          incompatibleEncoding
+            ? "This Space uses an incompatible SwapVM strategy encoding; owner recovery is required"
+            : "Pricing needs renewal: this fixed-price Space no longer matches its shipped SwapVM strategy",
           409,
           {
             positionId: snapshot.positionId,
-            state: "PRICING_NEEDS_RENEWAL",
+            state: diagnosis.state,
             shippedStrategyHash: snapshot.aquaStrategyHash,
-            currentStrategyHash: expected,
+            currentStrategyHash: diagnosis.expectedHash,
             executable: false,
+            ...(diagnosis.legacyHash
+              ? { legacyStrategyHash: diagnosis.legacyHash }
+              : {}),
             recovery:
               "Pause the old Space, dock its Aqua strategy, withdraw the exact vault balances, and create a new owner-controlled Space with a new identity.",
           },
@@ -530,7 +592,10 @@ export class AurkaService {
       typeof finalizedHash !== "string" ||
       !/^0x[0-9a-fA-F]{64}$/.test(finalizedHash) ||
       finalizedNumber > latestNumber ||
-      latestNumber !== latestBlock
+      // Sepolia may advance between eth_blockNumber and the latest block
+      // read. A forward race is normal; a provider that moves backwards is
+      // not a canonical head and must remain unhealthy.
+      latestNumber < latestBlock
     )
       throw new Error("invalid_canonical_head");
     if (timestamp > BigInt(this.now()))
@@ -546,7 +611,7 @@ export class AurkaService {
       reason: null,
       chainId: chain,
       expectedChainId: this.runtime.chainId,
-      latestBlock: latestBlock.toString(),
+      latestBlock: latestNumber.toString(),
       canonicalBlock: latestNumber.toString(),
       canonicalBlockHash: latestHash,
       finalizedBlock: finalizedNumber.toString(),
@@ -670,17 +735,42 @@ export class AurkaService {
   }
 
   private assertTradingSnapshotFresh(snapshot: SolverSnapshot): void {
-    const freshness = snapshotFreshness(
+    const portfolioFreshness = snapshotFreshness(
       snapshot.portfolioSnapshot.observedAt,
       snapshot.priceProtection.nowSeconds,
       snapshot.priceProtection.maximumPriceAgeSeconds,
     );
-    if (freshness !== "fresh")
+    const priceSnapshots = [
+      snapshot.priceProtection.traderInputReferencePrice,
+      snapshot.priceProtection.traderInputExecutionPrice,
+      snapshot.priceProtection.traderOutputReferencePrice,
+      snapshot.priceProtection.traderOutputExecutionPrice,
+    ];
+    const stalePrices = this.localProvider
+      ? []
+      : priceSnapshots
+          .filter(
+            (price) =>
+              snapshotFreshness(
+                price.observedAt,
+                snapshot.priceProtection.nowSeconds,
+                snapshot.priceProtection.maximumPriceAgeSeconds,
+              ) !== "fresh",
+          )
+          .map((price) => price.token.toLowerCase());
+    if (portfolioFreshness !== "fresh" || stalePrices.length > 0)
       throw new ServiceError(
-        "SNAPSHOT_STALE",
-        "Trading is unavailable because the authoritative Space snapshot is stale",
+        portfolioFreshness === "fresh" && stalePrices.length > 0
+          ? "PRICE_DATA_STALE"
+          : "SNAPSHOT_STALE",
+        portfolioFreshness === "fresh" && stalePrices.length > 0
+          ? "Trading is temporarily unavailable because the Space price data is stale; request a fresh quote shortly"
+          : "Trading is unavailable because the authoritative Space snapshot is stale",
         409,
-        { positionId: snapshot.positionId },
+        {
+          positionId: snapshot.positionId,
+          ...(stalePrices.length > 0 ? { stalePrices } : {}),
+        },
       );
   }
 
@@ -744,6 +834,23 @@ export class AurkaService {
       ),
     });
     this.repository.savePosition(next);
+    const existingSpace = this.repository.getSpace(position.id);
+    if (
+      existingSpace &&
+      !["DRAFT", "PENDING", "FAILED"].includes(existingSpace.identity.state)
+    ) {
+      const diagnosis = upstreamStrategyDiagnosis(
+        snapshot,
+        snapshot.capacityEpoch.traderInputToken,
+        snapshot.capacityEpoch.traderOutputToken,
+      );
+      const state = snapshot.paused ? "PAUSED" : (diagnosis.state ?? "ACTIVE");
+      if (existingSpace.identity.state !== state)
+        this.repository.saveSpaceIdentity(
+          { ...existingSpace.identity, state },
+          existingSpace.draft,
+        );
+    }
     return this.getPosition(position.id);
   }
 

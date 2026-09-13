@@ -261,7 +261,10 @@ async function main() {
     result.checks.push("pointer navigation plus browser back/forward");
 
     await page.goto(`${appUrl}/spaces`, { waitUntil: "networkidle" });
-    await page.getByRole("link", { name: "Open Space", exact: true }).click();
+    await page
+      .getByRole("link", { name: /^Open / })
+      .first()
+      .click();
     await page.waitForURL(`**/spaces/${spaceId}`);
     await page
       .getByRole("link", { name: "Trade this Space", exact: true })
@@ -305,18 +308,27 @@ async function main() {
     result.checks.push("legacy aliases redirect to canonical routes");
 
     await page.goto(`${appUrl}/trade/${spaceId}`, { waitUntil: "networkidle" });
-    await page.getByRole("heading", { name: "Trade" }).waitFor();
-    await page.getByRole("button", { name: "Get quote", exact: true }).click();
+    await page.getByRole("heading", { name: "Swap tokens" }).first().waitFor();
+    const tradeAmount = page.getByRole("textbox", {
+      name: /Amount to sell in /,
+    });
+    await tradeAmount.fill("2");
     await page
-      .getByRole("heading", { name: "Review what would happen" })
-      .waitFor();
+      .getByRole("button", { name: "Review swap", exact: true })
+      .click();
+    await page.getByRole("heading", { name: "Review your swap" }).waitFor();
     result.checks.push("Space parameter propagated to a successful quote");
 
+    await page
+      .getByRole("button", { name: "Open AURKA assistant", exact: true })
+      .click();
     const agentPrompt = page.getByRole("textbox", {
-      name: "Ask the live trade assistant",
+      name: "Ask the AURKA assistant",
     });
     await agentPrompt.fill("I want fdits rules?");
-    await page.getByRole("button", { name: "Ask agent", exact: true }).click();
+    await page
+      .getByRole("button", { name: "Send assistant request", exact: true })
+      .click();
     await page
       .getByRole("status")
       .filter({ hasText: "Let's narrow that down" })
@@ -329,7 +341,9 @@ async function main() {
 
     await page.setViewportSize({ width: 390, height: 844 });
     await agentPrompt.fill("Explain this Space's current rules");
-    await page.getByRole("button", { name: "Ask agent", exact: true }).click();
+    await page
+      .getByRole("button", { name: "Send assistant request", exact: true })
+      .click();
     await page.getByRole("region", { name: "Space rules answer" }).waitFor();
     if (artifactDirectory)
       await page.screenshot({
@@ -373,7 +387,7 @@ async function main() {
     await page.goto(`${appUrl}/spaces/not-a-real-space`, {
       waitUntil: "networkidle",
     });
-    await page.getByRole("heading", { name: "Space not found" }).waitFor();
+    await page.getByRole("heading", { name: "Space unavailable" }).waitFor();
     result.checks.push("meaningful unknown Space state");
 
     check(

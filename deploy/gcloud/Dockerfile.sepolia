@@ -1,0 +1,39 @@
+FROM node:24-bookworm-slim
+
+WORKDIR /app
+RUN corepack enable && corepack prepare pnpm@10.13.1 --activate
+
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
+COPY packages/shared/package.json packages/shared/package.json
+COPY packages/graph/package.json packages/graph/package.json
+COPY packages/services/package.json packages/services/package.json
+COPY packages/wallet/package.json packages/wallet/package.json
+COPY packages/agents/watchtower/package.json packages/agents/watchtower/package.json
+RUN pnpm install --frozen-lockfile --ignore-scripts=false
+
+COPY packages/shared packages/shared
+COPY packages/graph packages/graph
+COPY packages/services packages/services
+COPY packages/wallet packages/wallet
+COPY packages/agents/watchtower packages/agents/watchtower
+COPY contracts/out contracts/out
+COPY contracts/out-upstream contracts/out-upstream
+COPY deploy/sepolia/sepolia-deployment.json deploy/sepolia/sepolia-deployment.json
+RUN chmod 644 deploy/sepolia/sepolia-deployment.json
+RUN pnpm --filter @aurka/services... build
+
+ENV NODE_ENV=production
+ENV AURKA_SEPOLIA_GATEWAY_HOST=0.0.0.0
+ENV AURKA_SEPOLIA_API_PORT=8797
+ENV AURKA_SEPOLIA_DATABASE_URL=/data/sepolia-service.sqlite
+ENV AURKA_SEPOLIA_SPACES_PATH=/data/sepolia-spaces.json
+ENV AURKA_SEPOLIA_EPOCHS_PATH=/data/sepolia-space-epochs.json
+ENV AURKA_SEPOLIA_LIFECYCLE_PATH=/data/sepolia-space-lifecycle.json
+# Runtime writes are confined to the mounted state directory. Keeping the
+# application tree read-only avoids an expensive recursive ownership walk over
+# the pnpm dependency graph during every image build.
+RUN mkdir -p /data && chown node:node /data
+USER node
+EXPOSE 8797
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=5 CMD node -e "fetch('http://127.0.0.1:8797/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+CMD ["node", "packages/services/scripts/sepolia-app.mjs"]

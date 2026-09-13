@@ -1,0 +1,29 @@
+{$AURKA_API_HOSTNAME} {
+  encode gzip
+
+  header {
+    X-Content-Type-Options nosniff
+    Referrer-Policy strict-origin-when-cross-origin
+    Permissions-Policy "camera=(), microphone=(), geolocation=()"
+    -Server
+  }
+
+  handle_path /api/* {
+    reverse_proxy api:8797
+  }
+
+  handle /health {
+    reverse_proxy api:8797
+  }
+
+  handle /ready {
+    reverse_proxy api:8797
+  }
+
+  # Vercel's server-side rewrite removes the /api prefix before reaching this
+  # edge. Keep a catch-all proxy for those /v1/* requests while retaining the
+  # explicit /api/* path for direct operator smoke checks.
+  handle {
+    reverse_proxy api:8797
+  }
+}
