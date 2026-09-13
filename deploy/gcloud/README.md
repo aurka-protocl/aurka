@@ -17,8 +17,7 @@ root to Vercel.
   the VM. This avoids adding Artifact Registry storage for the first demo.
 - Edge: Caddy listens on port 80 while no owned API domain is configured. Set
   `AURKA_API_HOSTNAME=api.example.com` after DNS points to the reserved IP;
-  Caddy will then obtain HTTPS automatically. Do not claim final HTTPS
-  acceptance while the host remains `:80`.
+  Caddy will then obtain HTTPS automatically.
 
 The VM has a stable regional address named `aurka-sepolia-ip`. The only public
 firewall ports are 80 and 443. SSH is limited to Google's IAP range and the

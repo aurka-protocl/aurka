@@ -135,6 +135,6 @@ owner-controlled Space first, then fund the replacement Space.
 ## Local versus Sepolia
 
 Local fixture flows deploy `MockAqua`, `MockPriceOracle`, and
-`AurkaDirectSwapVM` on an isolated chain. They are useful for deterministic
-development but do not prove the Sepolia upstream route. The Sepolia profile
+`AurkaDirectSwapVM` on an isolated chain. These support deterministic
+development. The Sepolia profile
 uses the pinned upstream Aqua/SwapVM artifacts and the reduced AURKA router.

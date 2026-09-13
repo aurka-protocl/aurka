@@ -76,6 +76,9 @@ const erc20ApproveAbi = [
 
 type PrivyClientLike = {
   wallets(): {
+    list(input: {
+      external_id: unknown;
+    }): Promise<{ data: Record<string, any>[] }>;
     get(id: string): Promise<Record<string, any>>;
     create(input: Record<string, unknown>): Promise<Record<string, any>>;
     update(id: string, input: Record<string, unknown>): Promise<unknown>;
@@ -140,6 +143,47 @@ function transactionMethod(): "eth_sendTransaction" | "eth_signTransaction" {
   return value("PRIVY_DELEGATED_BROADCAST_MODE") === "sign-and-broadcast"
     ? "eth_signTransaction"
     : "eth_sendTransaction";
+}
+
+export async function createOrRecoverWallet(
+  client: {
+    wallets(): Pick<ReturnType<PrivyClientLike["wallets"]>, "create" | "list">;
+  },
+  walletRequest: Record<string, unknown>,
+  idempotencyKey: string,
+): Promise<any> {
+  let wallet;
+  try {
+    wallet = await client.wallets().create({
+      ...walletRequest,
+      "privy-idempotency-key": idempotencyKey,
+    });
+  } catch (error) {
+    if (
+      !(error instanceof Error) ||
+      !error.message.includes(
+        "Idempotency key was reused for a request with a new body",
+      )
+    )
+      throw error;
+    const matches = await client.wallets().list({
+      external_id: walletRequest.external_id,
+    });
+    if (matches.data.length > 1)
+      throw new Error(
+        "Multiple Privy wallets match this account; reconciliation required",
+        { cause: error },
+      );
+    wallet = matches.data[0];
+    if (!wallet) {
+      const requestHash = keccak256(stringToHex(JSON.stringify(walletRequest)));
+      wallet = await client.wallets().create({
+        ...walletRequest,
+        "privy-idempotency-key": `aurka-wallet-${requestHash.slice(2)}`,
+      });
+    }
+  }
+  return wallet;
 }
 
 function recoveryPolicyIdempotencyKey(input: {
@@ -857,7 +901,7 @@ export class TradingAgentService {
       }
       let walletId = operation.walletId;
       if (!walletId) {
-        const wallet = await client.wallets().create({
+        const walletRequest = {
           chain_type: "ethereum",
           display_name: `AURKA agent ${normalizedOwner.slice(0, 10)}`,
           external_id:
@@ -870,19 +914,60 @@ export class TradingAgentService {
               override_policy_ids: [executionPolicyId],
             },
           ],
-          "privy-idempotency-key": idempotencyKey,
-        });
+        };
+        const wallet = await createOrRecoverWallet(
+          client,
+          walletRequest,
+          idempotencyKey,
+        );
         if (typeof wallet.id !== "string" && typeof wallet.id !== "number")
           throw new Error("Privy agent wallet has no ID");
         walletId = String(wallet.id);
         this.repository.updateAgentProvisioning(operation.id, { walletId });
       }
-      const readback = await this.readWallet(walletId);
+      let readback = await this.readWallet(walletId);
       if (typeof readback.address !== "string")
         throw new Error("Privy agent wallet has no address");
       const walletAddress = address(readback.address, "Privy agent address");
       const executionPolicy = await client.policies().get(executionPolicyId);
       const recoveryPolicy = await client.policies().get(recoveryPolicyId);
+      if (
+        Array.isArray(readback.policy_ids) &&
+        readback.policy_ids.length === 1 &&
+        readback.policy_ids[0] !== recoveryPolicyId
+      ) {
+        validateExecutionPolicy(
+          readback,
+          executionPolicy,
+          this.ownerId,
+          signerId,
+          executionPolicyId,
+          readback.policy_ids[0],
+          this.chainId,
+          this.router,
+          this.inputToken,
+          this.maximumInputAmount,
+          true,
+        );
+        validateRecoveryPolicy(
+          { ...readback, policy_ids: [recoveryPolicyId] },
+          recoveryPolicy,
+          this.ownerId,
+          recoveryPolicyId,
+          normalizedOwner,
+          this.chainId,
+          this.inputToken,
+          this.outputToken,
+          this.maximumRecoveryAmount,
+        );
+        await client.wallets().update(walletId, {
+          policy_ids: [recoveryPolicyId],
+          authorization_context: {
+            authorization_private_keys: [this.ownerAuthorizationKey],
+          },
+        });
+        readback = await this.readWallet(walletId);
+      }
       validateExecutionPolicy(
         readback,
         executionPolicy,
@@ -910,6 +995,7 @@ export class TradingAgentService {
       this.repository.updateAgentProvisioning(operation.id, {
         walletId,
         walletAddress,
+        recoveryPolicyId,
       });
       const timestamp = Math.floor(Date.now() / 1000);
       const agent = tradingAgentSchema.parse({

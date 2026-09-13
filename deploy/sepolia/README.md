@@ -88,9 +88,7 @@ performs only the read/simulation checks. The newly derived baseline reflects
 the current portfolio weights; it can be lower than the policy maximum after a
 previous trade reaches an asset bound.
 
-The acceptance command is deployer-only evidence for the Aqua/SwapVM path; it
-does not substitute for the separate Privy wallet, policy, delegated trade,
-Graph, or hosted-runtime gates.
+The acceptance command tests Aqua/SwapVM settlement using the deployer wallet.
 
 ## Per-user Privy agent wizard
 

@@ -134,8 +134,5 @@ A valid demonstration shows one complete financial flow:
 3. The activity view shows `TRADE CONFIRMED` and the input/output amounts.
 4. The Sepolia receipt shows the transaction's `From` address equal to the Privy
    trading wallet and the `To` address equal to the AURKA router.
-5. The source repository and this page explain the wallet and policy boundary.
 
-The transaction receipt is the evidence of execution. A policy screenshot or
-configuration file alone does not prove that a Privy-controlled transaction
-completed.
+The transaction receipt records the execution result.
